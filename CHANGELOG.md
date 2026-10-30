@@ -22,7 +22,9 @@ y a large feature update, z security and bug fixes
   `/usr/libexec/t510`, units, udev rules and system settings in `/usr/lib`;
   `/etc` keeps what is there for the owner to change. On a 0.7.0 tablet the
   first install of `t510-support` removes the old copies (a changed one is
-  kept as `*.t510-0.7.0`).
+  kept as `*.t510-0.7.0`), and each user's panel (temperature monitor,
+  rotation and keyboard buttons) is pointed at the new places at the next
+  login (`/usr/libexec/t510/migrate-user`).
 - The image builders install these packages instead of copying `overlay/` and
   compiling `tools/` in the image; files that change on the tablet itself
   (rotation, keyboard, hardware name) are in `image/`.

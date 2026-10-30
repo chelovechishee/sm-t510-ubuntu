@@ -1,0 +1,29 @@
+#!/bin/sh
+# Once per user, at login: the Xfce panel keeps its own copies of what it was
+# set up with, so a 0.7.0 user's panel still runs our programs from
+# /usr/local (the temperature monitor, the rotation and keyboard buttons),
+# where t510-support no longer has them. Point those copies at /usr.
+set -u
+
+CFG=${XDG_CONFIG_HOME:-$HOME/.config}
+MARK=$CFG/t510/migrated-0.7.1
+[ -e "$MARK" ] && exit 0
+
+SUB='s#/usr/local/sbin/t510-#/usr/sbin/t510-#g
+s#/usr/local/bin/t510-#/usr/bin/t510-#g
+s#/usr/local/share/applications/t510-#/usr/share/applications/t510-#g'
+OLD='/usr/local/\(s\?bin\|share/applications\)/t510-'
+
+# the launchers' .desktop copies: read when the panel starts
+restart=0
+for f in $(grep -rl "$OLD" "$CFG/xfce4/panel" 2>/dev/null); do
+	sed -i "$SUB" "$f" && restart=1
+done
+# panel properties (the monitor's command) belong to xfconfd: through it
+xfconf-query -c xfce4-panel -l -v 2>/dev/null | grep "$OLD" |
+	while read -r prop value; do
+		xfconf-query -c xfce4-panel -p "$prop" -s "$(printf '%s' "$value" | sed "$SUB")"
+	done
+[ "$restart" = 0 ] || xfce4-panel -r
+
+mkdir -p "$(dirname "$MARK")" && touch "$MARK"

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=SM-T510 settings update
+Comment=Moves this user's panel settings from the paths of 0.7.0 to the packaged ones (once)
+Exec=/usr/libexec/t510/migrate-user
+OnlyShowIn=XFCE;
+NoDisplay=true
