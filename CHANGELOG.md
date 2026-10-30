@@ -56,7 +56,6 @@ builds left no record of what they changed and are marked so.
   system and the normal BOOT over the USB network, checked by md5 on the
   tablet. The rescue shell of the initramfs works again (busybox has no
   `mountpoint`), and `scripts/tn.py` returns the remote exit status.
-
 - `install.sh` downloads the system image and the boot images of the release
   from GitHub and checks them against `SHA256SUMS` when there is no build of
   your own (`scripts/make-release.sh` prepares those files).
