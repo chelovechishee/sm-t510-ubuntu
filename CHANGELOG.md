@@ -10,6 +10,13 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.7.2 — new installs bring themselves up to date (build #66)
+
+- `t510-update.service`: the first time a new install is online it takes the
+  newest `t510-support` and `t510-kernel` from the apt repository, once. An
+  image is now made for large versions only, fixes reach new installs too.
+- A new image: 0.7.0's has no apt repository yet.
+
 ## 0.7.1 — apt repository (build #66)
 
 - Updates come with apt: the packages `t510-support` (our services, udev

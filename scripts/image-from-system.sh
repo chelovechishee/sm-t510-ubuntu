@@ -284,8 +284,10 @@ ln -s /etc/machine-id "$R/var/lib/dbus/machine-id"
 # the snakeoil TLS key comes back per tablet (ssl-cert.service); cloud-init
 # must run again for the installer's seed, and resize-rootfs must grow the
 # file system to the new tablet's partition (the copy's mark said it was done:
-# the image stayed at its own size and the disk was full at once)
-rm -rf "$R/var/lib/cloud" "$R/var/lib/resize-rootfs.done" "$R/.boot-attempt"
+# the image stayed at its own size and the disk was full at once); t510-update
+# must bring the new install up to date (its mark is the copy's too)
+rm -rf "$R/var/lib/cloud" "$R/var/lib/resize-rootfs.done" "$R/.boot-attempt" \
+	"$R/var/lib/t510/updated"
 
 in_root dpkg-query -W -f '${Package} ${Version}\n' > "$IMG.manifest"
 cp "$R/bin/busybox" "$T/out/busybox"

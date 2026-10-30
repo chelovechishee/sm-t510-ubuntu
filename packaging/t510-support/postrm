@@ -5,7 +5,7 @@ set -e
 UNITS="usb-gadget.service resize-rootfs.service boot-ok.service
 	t510-display.service t510-firmware.service t510-firmware-fetch.service
 	t510-audio.service t510-no-lmk.service zram-manual.service
-	t510-chrome.service"
+	t510-chrome.service t510-update.service"
 
 undivert() {
 	dpkg-divert --package t510-support --rename --remove "$1" >/dev/null

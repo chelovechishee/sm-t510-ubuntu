@@ -7,7 +7,7 @@ set -e
 UNITS="usb-gadget.service resize-rootfs.service boot-ok.service
 	t510-display.service t510-firmware.service t510-firmware-fetch.service
 	t510-audio.service t510-no-lmk.service zram-manual.service
-	t510-chrome.service"
+	t510-chrome.service t510-update.service"
 
 case $1 in
 configure | abort-upgrade | abort-deconfigure | abort-remove)

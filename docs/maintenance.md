@@ -4,8 +4,11 @@ How a fix, a new feature or a kernel security update gets from this
 repository onto the tablets that already run the system.
 
 The apt repository and the scripts `scripts/make-debs.sh` and
-`scripts/publish.sh` named below come with 0.7.1. Until then every update
-means a new image and `./install.sh` again.
+`scripts/publish.sh` named below came with 0.7.1; a tablet installed with
+0.7.0 connects to the repository once (README.md, "Updates"). New installs
+bring themselves up to date: `t510-update.service` takes the newest packages
+the first time the tablet is online, so the image of the last x or y release
+stays good for every z after it.
 
 ## Version numbers: x.y.z
 
@@ -68,7 +71,8 @@ tablets keep the old one. Avoid this while there is another way.
    what changed.
 7. **Publish:** `scripts/publish.sh` signs the packages you tested and puts
    them into the apt repository. The tablets get them with their next
-   `apt upgrade`; Xfce's update notifier shows them by itself.
+   `apt upgrade`; Xfce's update notifier shows them by itself. New installs
+   take them the first time they are online (`t510-update.service`).
 8. For **x and y**, also a new image and a GitHub release: README.md,
    "Building", then `scripts/make-release.sh`. The image carries the same
    packages, installed.

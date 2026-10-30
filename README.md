@@ -220,8 +220,9 @@ flashing the complete stock firmware.
 
 ## Updates
 
-Tablets installed from 0.7.1 on update like any Ubuntu: the update notifier
-shows our packages next to Ubuntu's, or
+Tablets installed from 0.7.2 on are brought up to date the first time they
+are online, then update like any Ubuntu: the update notifier shows our
+packages next to Ubuntu's, or
 
 ```bash
 sudo apt update && sudo apt upgrade

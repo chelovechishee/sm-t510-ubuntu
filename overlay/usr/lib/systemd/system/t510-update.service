@@ -1,0 +1,23 @@
+[Unit]
+Description=Bring the SM-T510 packages up to date (first time online)
+# Images are made for large versions only; fixes come from our apt
+# repository (docs/maintenance.md). A new install takes them the first time
+# it is online, later ones come with the usual updates
+ConditionPathExists=!/var/lib/t510/updated
+Wants=network-online.target
+After=network-online.target
+# no network yet (Wi-Fi not set up): try again until it works
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+Environment=DEBIAN_FRONTEND=noninteractive
+ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=600 update
+ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold -y install --only-upgrade t510-archive-keyring t510-support t510-kernel
+ExecStart=/usr/bin/touch /var/lib/t510/updated
+TimeoutStartSec=30min
+Restart=on-failure
+RestartSec=2min
+
+[Install]
+WantedBy=multi-user.target
