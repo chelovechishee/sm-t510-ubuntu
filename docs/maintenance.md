@@ -7,15 +7,15 @@ The apt repository and the scripts `scripts/make-debs.sh` and
 `scripts/publish.sh` named below came with 0.7.1; a tablet installed with
 0.7.0 connects to the repository once (README.md, "Updates"). New installs
 bring themselves up to date: `t510-update.service` takes the newest packages
-the first time the tablet is online, so the image of the last x or y release
-stays good for every z after it.
+the first time the tablet is online, so the last image stays good for every
+version after it that apt can bring.
 
 ## Version numbers: x.y.z
 
 | Part | What changes | How an installed tablet gets it |
 |---|---|---|
 | **x** — very large update | a new Ubuntu release as the base (26.04 → 28.04), a new partition layout, anything that does not upgrade in place | a new image, installed with `./install.sh` (erases the tablet's data); the release notes say so first |
-| **y** — large feature update | a new piece of hardware working (Bluetooth, microphone, cameras), a new kernel line (7.3 → the next one), a larger change of the desktop | `sudo apt upgrade`; also a new image on the GitHub release page for new installs |
+| **y** — large feature update | a new piece of hardware working (Bluetooth, microphone, cameras), a new kernel line (7.3 → the next one), a larger change of the desktop | `sudo apt upgrade`; a new image only when apt cannot bring it (see below) |
 | **z** — security and bug fixes | a kernel stable release with security fixes, a bug fix in our services, scripts, Xfce defaults or programs | `sudo apt upgrade` only |
 
 - Raising one part sets the parts after it to 0: 0.7.3 → 0.8.0 → 1.0.0.
@@ -24,8 +24,14 @@ stays good for every z after it.
 - The version is the top `## x.y.z — title` heading of
   [CHANGELOG.md](../CHANGELOG.md), and only that heading. The scripts read
   it from there, so there is nothing else to change by hand. `install.sh`
-  (`RELEASE=`) names the newest version that has an image: it moves with x
-  and y releases, not with every z.
+  (`RELEASE=`) names the newest version that has an image: it moves only
+  with a new image.
+- A new image comes with every x, and with a y only when apt cannot bring
+  the change: files of `image/` (they are in no package), a new partition
+  layout, or when the first update of a new install has grown too long.
+  Everything else reaches new installs through `t510-update.service`, and
+  making an image (a clean system from the tablet, a reinstall to test it)
+  is not worth it for that.
 - The kernel build counter (`uname -v`, `#N`) goes on counting every compile
   as before. It is not part of the project version.
 
@@ -73,9 +79,12 @@ tablets keep the old one. Avoid this while there is another way.
    them into the apt repository. The tablets get them with their next
    `apt upgrade`; Xfce's update notifier shows them by itself. New installs
    take them the first time they are online (`t510-update.service`).
-8. For **x and y**, also a new image and a GitHub release: README.md,
-   "Building", then `scripts/make-release.sh`. The image carries the same
-   packages, installed.
+8. For **x and y**, a GitHub release whose notes are the version's
+   CHANGELOG section, so everything important shows on the project page.
+   With a new image (see "Version numbers"): README.md, "Building", then
+   `scripts/make-release.sh`, and its files go to the release; the image
+   carries the same packages, installed. Without one, the release is the
+   tag and the notes only, and says which image a new install starts from.
 
 Only the files you tested get published. That is why packages are built
 on this PC and never by a CI service after the push.

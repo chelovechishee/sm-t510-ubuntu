@@ -28,6 +28,10 @@ y a large feature update, z security and bug fixes
   a touch, `tools/noblank.c`), and the screen stays dark while it starts
   (its X server turned the backlight on: a lit black screen with a cursor).
 
+- No new image: everything in this version is in the packages, and a new
+  install starts from 0.7.4's image and takes 0.8.0 the first time it is
+  online (the new kernel after the next restart).
+
 Builds: #67.
 
 ## 0.7.5 — no sleep attempt when idle (build #66)
