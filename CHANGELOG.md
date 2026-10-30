@@ -10,13 +10,20 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.7.4 — t510-update waits for the network (build #66)
+
+- Without a network `apt-get update` only warns and succeeds: `t510-update`
+  then upgraded nothing, set its mark all the same and never ran again, so
+  a new install offline at its first boot stayed on the image's packages.
+  It now fails until every source answers and tries again.
+- A new image, the first with the apt repository (0.7.0's has none).
+
 ## 0.7.3 — first boot: one apt at a time (build #66)
 
 - `t510-update` and `t510-chrome` both start when a new install first goes
   online, and `apt-get update` does not wait for another one's lock: the
   second failed at once and both tried again every 2 minutes. They now take
   turns (`flock /run/lock/t510-apt`).
-- A new image, the first with the apt repository (0.7.0's has none).
 
 ## 0.7.2 — new installs bring themselves up to date (build #66)
 
@@ -24,8 +31,8 @@ y a large feature update, z security and bug fixes
   newest `t510-support` and `t510-kernel` from the apt repository, once. An
   image is now made for large versions only, fixes reach new installs too.
 - A new image would have come here (0.7.0's has no apt repository yet); the
-  test install found the first-boot lock race of 0.7.3 first, so the image
-  is 0.7.3's.
+  test installs found the first-boot problems of 0.7.3 and 0.7.4 first, so
+  the image is 0.7.4's.
 
 ## 0.7.1 — apt repository (build #66)
 

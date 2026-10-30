@@ -32,7 +32,7 @@ W=$T/out/install
 # the release these sources belong to (scripts/make-release.sh checks it
 # against CHANGELOG.md)
 REPO=chelovechishee/sm-t510-ubuntu
-RELEASE=v0.7.3
+RELEASE=v0.7.4
 REL=$T/dl/release
 TABLET=172.16.42.1
 
