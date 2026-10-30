@@ -9,10 +9,13 @@ After=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
+# one at a time: t510-chrome and t510-update start together on a new
+# install, and apt-get update does not wait for a lock (DPkg::Lock::Timeout
+# covers dpkg only), the second one failed at once
 Type=oneshot
 Environment=DEBIAN_FRONTEND=noninteractive
-ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=600 update
-ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=600 -y install google-chrome-stable
+ExecStart=/usr/bin/flock /run/lock/t510-apt /usr/bin/apt-get -o DPkg::Lock::Timeout=600 update
+ExecStart=/usr/bin/flock /run/lock/t510-apt /usr/bin/apt-get -o DPkg::Lock::Timeout=600 -y install google-chrome-stable
 TimeoutStartSec=30min
 Restart=on-failure
 RestartSec=2min
