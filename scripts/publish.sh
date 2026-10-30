@@ -104,8 +104,11 @@ gzip -9nk "$A/$B/Packages"
 			"$(stat -c %s "$A/dists/$SUITE/$f")" "$f"
 	done
 } > "$A/dists/$SUITE/Release"
-gpg --batch --yes --local-user "$FPR" --clearsign -o "$A/dists/$SUITE/InRelease" "$A/dists/$SUITE/Release"
-gpg --batch --yes --local-user "$FPR" --armor --detach-sign -o "$A/dists/$SUITE/Release.gpg" "$A/dists/$SUITE/Release"
+# not --batch: gpg-agent has to ask for the key's passphrase (a window, or
+# in a text console the terminal named by GPG_TTY)
+export GPG_TTY=${GPG_TTY:-$(tty 2>/dev/null || true)}
+gpg --yes --local-user "$FPR" --clearsign -o "$A/dists/$SUITE/InRelease" "$A/dists/$SUITE/Release"
+gpg --yes --local-user "$FPR" --armor --detach-sign -o "$A/dists/$SUITE/Release.gpg" "$A/dists/$SUITE/Release"
 # what apt on a tablet does with it: the key of t510-archive-keyring only
 gpgv --keyring "$KEY" "$A/dists/$SUITE/InRelease" 2>/dev/null ||
 	die "InRelease does not verify with $KEY"
