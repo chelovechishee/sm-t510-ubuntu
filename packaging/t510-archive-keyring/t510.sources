@@ -1,0 +1,8 @@
+# SM-T510 packages: t510-support, t510-kernel (docs/maintenance.md of
+# github.com/chelovechishee/sm-t510-ubuntu)
+Types: deb
+URIs: https://chelovechishee.github.io/sm-t510-ubuntu-apt
+Suites: resolute
+Components: main
+Architectures: arm64
+Signed-By: /usr/share/keyrings/t510-archive-keyring.gpg

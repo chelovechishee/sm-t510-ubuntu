@@ -1,0 +1,57 @@
+#!/bin/sh
+# t510-support: before its files are unpacked
+set -e
+
+# gcr's prompter D-Bus services start our wrapper instead (tools/nograb.c):
+# gcr's own files move aside, D-Bus reads only *.service
+divert() {
+	dpkg-divert --package t510-support --rename --divert "$1.distrib" --add "$1" >/dev/null
+}
+
+# 0.7.0 came as an image: its files of ours belong to no package. Unchanged
+# ones go before the unpack, so that dpkg puts ours in without asking about
+# each file in /etc ("created by you or by a script"). Changed ones: where
+# the package has the same file, dpkg asks; where the package has it no more
+# (/usr/local, units now in /usr/lib) they would win over the packaged ones,
+# so they are renamed: they stop working but stay for their owner to compare.
+# Lines: same|moved, md5sum of the 0.7.0 file (- for programs built on the
+# tablet), path; scripts/make-debs.sh puts them below from
+# packaging/t510-support/legacy-0.7.0
+migrate() {
+	local kind sum path
+	while read -r kind sum path; do
+		[ -e "$path" ] || [ -L "$path" ] || continue
+		dpkg-query -S "$path" >/dev/null 2>&1 && continue
+		if [ "$sum" = - ] || [ "$(md5sum < "$path" | cut -d' ' -f1)" = "$sum" ]; then
+			rm -f "$path"
+		elif [ "$kind" = moved ]; then
+			mv "$path" "$path.t510-0.7.0"
+			echo "t510-support: you changed $path, it is now $path.t510-0.7.0"
+		else
+			continue
+		fi
+		# "systemctl enable" links to the unit's old place
+		case $path in
+		/etc/systemd/system/*)
+			find /etc/systemd/system -type l -lname "$path" -delete
+			;;
+		esac
+	done
+}
+
+case $1 in
+install | upgrade)
+	divert /usr/share/dbus-1/services/org.gnome.keyring.SystemPrompter.service
+	divert /usr/share/dbus-1/services/org.gnome.keyring.PrivatePrompter.service
+	if [ -z "$2" ]; then
+		cat <<'EOF' | migrate
+@LEGACY@
+EOF
+		# Python's cache of the old t510-rotate
+		rm -f /usr/local/sbin/__pycache__/t510-rotate*.pyc
+		rmdir --ignore-fail-on-non-empty /usr/local/share/t510 \
+			/usr/local/sbin/__pycache__ /usr/local/libexec 2>/dev/null || true
+	fi
+	;;
+esac
+exit 0

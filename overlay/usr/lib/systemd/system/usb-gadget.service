@@ -1,0 +1,14 @@
+[Unit]
+Description=USB gadget (NCM network + ACM console)
+DefaultDependencies=no
+After=sys-kernel-config.mount systemd-udevd.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/usb-gadget.sh
+
+[Install]
+WantedBy=sysinit.target

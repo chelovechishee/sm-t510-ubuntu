@@ -244,8 +244,8 @@ if [ "$OWN_IMAGE" = 1 ]; then
 			sha256sum -c --quiet --strict) ||
 			die "$IMAGE does not match its checksum: build it again."
 	fi
-	stale "$IMAGE" "$T/overlay" "$T/scripts/image-packages.txt" \
-		"$T/scripts/trim-services.sh" \
+	stale "$IMAGE" "$T/overlay" "$T/image" "$T/packaging" \
+		"$T/scripts/image-packages.txt" "$T/scripts/trim-services.sh" \
 		"$T/tools/fbtool.c" "$T/tools/longpress.c" "$T/tools/nograb.c"
 fi
 size=$(zstd -lv "$IMAGE" 2>/dev/null | sed -n 's/.*Decompressed Size:.*(\([0-9]*\) B).*/\1/p')

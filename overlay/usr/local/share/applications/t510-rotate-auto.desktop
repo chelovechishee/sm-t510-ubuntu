@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Rotate by sensor
-Name[ru]=По датчику
-Comment=Turn the screen the way the tablet is held (the session restarts)
-Comment[ru]=Повернуть экран так, как держите планшет (сеанс перезапустится)
-Icon=object-rotate-left
-Exec=sudo -n /usr/local/sbin/t510-rotate auto
-NoDisplay=true

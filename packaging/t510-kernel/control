@@ -1,0 +1,13 @@
+Package: t510-kernel
+Version: @VERSION@
+Architecture: arm64
+Maintainer: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Installed-Size: @SIZE@
+Section: kernel
+Priority: optional
+Homepage: https://github.com/chelovechishee/sm-t510-ubuntu
+Description: Linux kernel for the Samsung Galaxy Tab A 10.1 (2019, SM-T510)
+ Linux @KERNEL@ with the SM-T510 patches, build #@BUILD@, as a boot image
+ (kernel, device tree, initramfs). Installing it writes the image to the
+ BOOT partition and keeps the one it replaces in /var/lib/t510; the new
+ kernel starts with the next boot.

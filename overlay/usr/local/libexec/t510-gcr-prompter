@@ -1,4 +1,0 @@
-#!/bin/sh
-# GNOME keyring password dialog without its input grab, so Onboard keeps
-# working while it is shown (see tools/nograb.c)
-LD_PRELOAD=/usr/local/lib/t510-nograb.so exec /usr/libexec/gcr-prompter "$@"

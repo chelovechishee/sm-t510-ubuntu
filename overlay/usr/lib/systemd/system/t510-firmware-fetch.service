@@ -1,0 +1,12 @@
+[Unit]
+Description=Fetch the ACPM DVFS plugin from Samsung's kernel sources
+ConditionPathExists=!/lib/firmware/exynos7885_acpm_fvp.fw
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/t510-firmware --fetch
+
+[Install]
+WantedBy=multi-user.target

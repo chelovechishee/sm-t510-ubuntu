@@ -6,6 +6,27 @@ did not boot or hung included, so the way there shows; the build number is
 the kernel build counter (`uname -v`, `#N`). It counts every compile: a few
 builds left no record of what they changed and are marked so.
 
+Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
+y a large feature update, z security and bug fixes
+([docs/maintenance.md](docs/maintenance.md)).
+
+## 0.7.1 — apt repository (build #66)
+
+- Updates come with apt: the packages `t510-support` (our services, udev
+  rules, settings and programs) and `t510-kernel` (the boot image; its
+  update writes BOOT and keeps the previous image in `/var/lib/t510`) from
+  our repository at chelovechishee.github.io/sm-t510-ubuntu-apt, signed with
+  the key in `t510-archive-keyring`. Ubuntu's kernel packages are pinned off.
+  Versions and the way an update is made: `docs/maintenance.md`.
+- Our files moved out of `/usr/local`: programs in `/usr/bin`, `/usr/sbin` and
+  `/usr/libexec/t510`, units, udev rules and system settings in `/usr/lib`;
+  `/etc` keeps what is there for the owner to change. On a 0.7.0 tablet the
+  first install of `t510-support` removes the old copies (a changed one is
+  kept as `*.t510-0.7.0`).
+- The image builders install these packages instead of copying `overlay/` and
+  compiling `tools/` in the image; files that change on the tablet itself
+  (rotation, keyboard, hardware name) are in `image/`.
+
 ## 0.7.0 — publication (build #66)
 
 - The published image is made from a working tablet's system

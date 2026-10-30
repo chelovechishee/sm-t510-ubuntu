@@ -1,6 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Rotation hint (t510)
-Comment=Tray icon to rotate the screen when the tablet is turned
-Exec=/usr/local/bin/t510-rotate-hint
-OnlyShowIn=XFCE;

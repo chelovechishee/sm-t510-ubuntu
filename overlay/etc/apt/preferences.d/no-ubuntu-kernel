@@ -1,0 +1,6 @@
+# The kernel is t510-kernel, written to the BOOT partition. Ubuntu's kernel
+# packages do not start on this tablet, and flash-kernel would write boot
+# partitions of its own
+Package: linux-image-* linux-generic* linux-virtual* flash-kernel
+Pin: release a=*
+Pin-Priority: -1

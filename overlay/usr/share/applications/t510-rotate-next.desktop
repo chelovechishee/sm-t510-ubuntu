@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Rotate
+Name[ru]=Повернуть
+Comment=Rotate the screen 90° clockwise
+Icon=object-rotate-right
+Exec=sudo -n /usr/sbin/t510-rotate next
+NoDisplay=true

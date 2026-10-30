@@ -1,0 +1,56 @@
+#!/bin/sh
+# t510-kernel: write the boot image to the tablet's BOOT partition, keeping
+# the one it replaces. The new kernel starts with the next boot.
+set -e
+
+IMG=/usr/lib/t510/boot-mainline.img
+DEV=/dev/mmcblk0p15
+PREV=/var/lib/t510/boot-previous.img
+
+[ "$1" = configure ] || exit 0
+
+# only on the tablet itself: an image build runs this script in a chroot on
+# a PC, where mmcblk0p15 would be some other disk
+if [ "${T510_NO_FLASH:-0}" = 1 ] || ischroot ||
+	! tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | grep -qx 'samsung,gta3xlwifi'; then
+	echo "t510-kernel: not running on the SM-T510, BOOT is left as it is"
+	exit 0
+fi
+grep -qx PARTNAME=boot /sys/class/block/mmcblk0p15/uevent || {
+	echo "t510-kernel: $DEV is not the BOOT partition, nothing written" >&2
+	exit 1
+}
+
+size=$(stat -c %s "$IMG")
+part=$(blockdev --getsize64 "$DEV")
+[ "$size" -le "$part" ] || {
+	echo "t510-kernel: $IMG ($size bytes) does not fit into BOOT ($part bytes)" >&2
+	exit 1
+}
+# what is on the eMMC, not in the page cache: the cache is dropped first
+# (Ubuntu's dd, uutils, refuses iflag=direct)
+on_boot() { blockdev --flushbufs "$DEV" && cmp -s -n "$size" "$DEV" "$IMG"; }
+if on_boot; then
+	echo "t510-kernel: BOOT already holds this kernel"
+	exit 0
+fi
+
+mkdir -p "$(dirname "$PREV")"
+dd if="$DEV" of="$PREV.new" bs=4M 2>/dev/null || {
+	rm -f "$PREV.new"
+	echo "t510-kernel: BOOT could not be read, nothing written" >&2
+	exit 1
+}
+mv "$PREV.new" "$PREV"
+echo "t510-kernel: the previous boot image is kept in $PREV"
+dd if="$IMG" of="$DEV" bs=4M conv=fsync 2>/dev/null || true
+if ! on_boot; then
+	dd if="$PREV" of="$DEV" bs=4M conv=fsync 2>/dev/null || true
+	echo "t510-kernel: BOOT did not read back the same; the previous image was put back" >&2
+	exit 1
+fi
+echo "t510-kernel: written to BOOT, restart the tablet to use it"
+
+touch /run/reboot-required
+grep -qsx t510-kernel /run/reboot-required.pkgs || echo t510-kernel >> /run/reboot-required.pkgs
+exit 0

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build the SM-T510 system image: Ubuntu 26.04 arm64 from a dated snapshot of
 # the Ubuntu archive (snapshot.ubuntu.com), the packages of
-# scripts/image-packages.txt, our overlay and Xfce defaults.
+# scripts/image-packages.txt, our packages (out/debs/, scripts/make-debs.sh)
+# and the files of image/.
 # The image holds no user account, no keys and no Samsung firmware: the person
 # installing adds an account through cloud-init (scripts/seed-image.sh), the
 # tablet takes its firmware from its own VENDOR partition (t510-firmware), and
@@ -33,6 +34,7 @@ R=$T/out/rootfs
 IMG=$T/out/sm-t510-ubuntu.img
 
 [ "$(id -u)" = 0 ] || { echo "run as root: sudo $0"; exit 1; }
+"$T/scripts/make-debs.sh" --check
 
 # no terminal inside: apt otherwise gives dpkg a pty of its own, and under
 # qemu-user behind sudo's pty apt-get ended up stopped (state T) for good
@@ -44,7 +46,7 @@ cleanup() {
 	for p in /proc/[0-9]*; do
 		[ "$(readlink "$p/root" 2>/dev/null)" = "$R" ] && kill "${p#/proc/}" 2>/dev/null
 	done
-	for m in dev/pts dev proc sys tmp/src; do
+	for m in dev/pts dev proc sys; do
 		mountpoint -q "$R/$m" && umount -l "$R/$m"
 	done
 	return 0
@@ -105,27 +107,17 @@ in_root apt-get -y upgrade
 # shellcheck disable=SC2086
 in_root apt-get -y install $PACKAGES
 
-# our small programs, built natively in the tree; the compilers go again
-BUILD_DEPS="gcc libc6-dev libx11-dev libxi-dev libxtst-dev"
-# shellcheck disable=SC2086
-in_root apt-get -y install --no-install-recommends $BUILD_DEPS
-mkdir -p "$R/tmp/src" "$R/usr/local/bin" "$R/usr/local/lib"
-mount --bind "$T/tools" "$R/tmp/src"
-in_root gcc -O2 -o /usr/local/bin/fbtool /tmp/src/fbtool.c
-in_root gcc -O2 -o /usr/local/bin/longpress /tmp/src/longpress.c -lX11 -lXi -lXtst
-in_root gcc -O2 -shared -fPIC -o /usr/local/lib/t510-nograb.so /tmp/src/nograb.c
-umount "$R/tmp/src"
-# shellcheck disable=SC2086
-in_root apt-get -y purge $BUILD_DEPS
-in_root apt-get -y autoremove --purge
-
-# overlay: root-owned, existing directories left as they are
-tar -C "$T/overlay" --owner=0 --group=0 -cf - . | tar -x -C "$R" --no-overwrite-dir
-(cd "$T/overlay" && find . -mindepth 1 -type d) | while read -r d; do chmod go-w "$R/$d"; done
+# the files of the image only (written on the tablet later: rotation,
+# keyboard, hardware name), then our packages as the apt repository has them
+# (scripts/make-debs.sh): root-owned, existing directories left as they are
+tar -C "$T/image" --owner=0 --group=0 -cf - . | tar -x -C "$R" --no-overwrite-dir
+(cd "$T/image" && find . -mindepth 1 -type d) | while read -r d; do chmod go-w "$R/$d"; done
+mkdir -p "$R/tmp/debs"
+cp "$T"/out/debs/t510-*.deb "$R/tmp/debs/"
+# --force-confnew: the packaged /etc files, not what the tree had there
+in_root sh -c 'apt-get -y -o Dpkg::Options::=--force-confnew install /tmp/debs/*.deb'
 in_root glib-compile-schemas /usr/share/glib-2.0/schemas
-in_root systemctl enable usb-gadget resize-rootfs boot-ok t510-display \
-	t510-firmware t510-firmware-fetch t510-audio t510-no-lmk zram-manual \
-	t510-chrome systemd-networkd
+in_root systemctl enable systemd-networkd
 in_root systemctl mask systemd-networkd-wait-online.service systemd-firstboot.service
 # the tablet starts LightDM with the Xfce session: a recommends chain that
 # brings in another display manager makes a different desktop, stop here

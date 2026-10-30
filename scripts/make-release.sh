@@ -5,7 +5,8 @@
 # exactly these names from the tag in its RELEASE= line.
 #
 # Checks first: the version in install.sh is the newest one in CHANGELOG.md,
-# the images are newer than what they are built from, the system image is
+# the images are newer than what they are built from, the system image holds
+# the packages of out/debs/ and BOOT is t510-kernel's image, the system image is
 # ready for a first boot and holds no user, the kernel has no firmware built
 # in. Upload the files to the release by hand (github.com → Releases).
 #
@@ -33,10 +34,19 @@ n=$(newer "$BOOT" "$T/initramfs")
 [ -z "$n" ] || die "$BOOT is older than ${n#"$T"/}"
 n=$(newer "$INSTALLER" "$T/initramfs")
 [ -z "$n" ] || die "$INSTALLER is older than ${n#"$T"/}"
-n=$(newer "$IMAGE" "$T/overlay" "$T/scripts/image-packages.txt" \
-	"$T/scripts/image-remove.txt" "$T/scripts/trim-services.sh" \
-	"$T/tools/fbtool.c" "$T/tools/longpress.c" "$T/tools/nograb.c")
+n=$(newer "$IMAGE" "$T/image" "$T/out/debs" "$T/scripts/image-packages.txt" \
+	"$T/scripts/image-remove.txt" "$T/scripts/trim-services.sh")
 [ -z "$n" ] || die "$IMAGE is older than ${n#"$T"/}"
+# the image holds our packages as the apt repository gets them, and the
+# BOOT of the release is the kernel of that t510-kernel
+"$T/scripts/make-debs.sh" --check
+for deb in "$T"/out/debs/t510-*.deb; do
+	pv="$(dpkg-deb -f "$deb" Package) $(dpkg-deb -f "$deb" Version)"
+	grep -qx "$pv" "${IMAGE%.zst}.manifest" ||
+		die "the image does not have $pv (out/debs): build it again"
+done
+dpkg-deb --fsys-tarfile "$T"/out/debs/t510-kernel_*.deb | tar -xO ./usr/lib/t510/boot-mainline.img |
+	cmp -s - "$BOOT" || die "$(basename "$BOOT") is not the boot image of out/debs/t510-kernel"
 
 # the system image (both files of the build): its checksums, first boot,
 # nobody's account

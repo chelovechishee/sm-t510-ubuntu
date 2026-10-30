@@ -7,7 +7,7 @@
  * screen looks frozen. Without the grab the dialog still gets keyboard focus,
  * and Onboard's synthesized key presses reach it.
  *
- * Build (on the tablet): gcc -O2 -shared -fPIC -o /usr/local/lib/t510-nograb.so nograb.c
+ * Build: scripts/make-debs.sh (into t510-support as /usr/libexec/t510/nograb.so)
  */
 
 typedef struct _GdkSeat GdkSeat;

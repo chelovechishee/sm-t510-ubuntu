@@ -1,0 +1,11 @@
+Package: t510-archive-keyring
+Version: 1
+Architecture: all
+Maintainer: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Installed-Size: @SIZE@
+Section: misc
+Priority: optional
+Homepage: https://github.com/chelovechishee/sm-t510-ubuntu
+Description: apt source and signing key of the SM-T510 Ubuntu packages
+ The repository with t510-support and t510-kernel, and the key its
+ packages are signed with.

@@ -103,17 +103,17 @@
     <property name="plugin-22" type="string" value="directorymenu"/>
     <property name="plugin-30" type="string" value="launcher">
       <property name="items" type="array">
-        <value type="string" value="/usr/local/share/applications/t510-keyboard.desktop"/>
+        <value type="string" value="/usr/share/applications/t510-keyboard.desktop"/>
       </property>
     </property>
     <property name="plugin-31" type="string" value="launcher">
       <property name="items" type="array">
-        <value type="string" value="/usr/local/share/applications/t510-rotate-auto.desktop"/>
+        <value type="string" value="/usr/share/applications/t510-rotate-auto.desktop"/>
       </property>
     </property>
     <property name="plugin-32" type="string" value="launcher">
       <property name="items" type="array">
-        <value type="string" value="/usr/local/share/applications/t510-rotate-next.desktop"/>
+        <value type="string" value="/usr/share/applications/t510-rotate-next.desktop"/>
       </property>
     </property>
     <property name="plugin-33" type="string" value="power-manager-plugin"/>
@@ -122,7 +122,7 @@
       <property name="show-notifications" type="bool" value="true"/>
     </property>
     <property name="plugin-40" type="string" value="genmon">
-      <property name="command" type="string" value="/usr/local/bin/t510-temps"/>
+      <property name="command" type="string" value="/usr/bin/t510-temps"/>
       <property name="use-label" type="bool" value="false"/>
       <property name="update-period" type="int" value="3000"/>
       <property name="enable-single-row" type="bool" value="false"/>

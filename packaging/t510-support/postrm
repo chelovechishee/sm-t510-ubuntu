@@ -1,0 +1,34 @@
+#!/bin/sh
+# t510-support: after its files are gone
+set -e
+
+UNITS="usb-gadget.service resize-rootfs.service boot-ok.service
+	t510-display.service t510-firmware.service t510-firmware-fetch.service
+	t510-audio.service t510-no-lmk.service zram-manual.service
+	t510-chrome.service"
+
+undivert() {
+	dpkg-divert --package t510-support --rename --remove "$1" >/dev/null
+}
+
+case $1 in
+remove)
+	[ -d /run/systemd/system ] && systemctl --system daemon-reload >/dev/null || true
+	for u in $UNITS; do
+		deb-systemd-helper mask "$u" >/dev/null || true
+	done
+	;;
+purge)
+	for u in $UNITS; do
+		deb-systemd-helper purge "$u" >/dev/null || true
+		deb-systemd-helper unmask "$u" >/dev/null || true
+	done
+	;;
+esac
+case $1 in
+remove | abort-install | disappear)
+	undivert /usr/share/dbus-1/services/org.gnome.keyring.SystemPrompter.service
+	undivert /usr/share/dbus-1/services/org.gnome.keyring.PrivatePrompter.service
+	;;
+esac
+exit 0

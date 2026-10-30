@@ -1,4 +1,4 @@
-# Workarounds in userspace (`overlay/`)
+# Workarounds in userspace (package `t510-support`: `overlay/` and `tools/`)
 
 | Problem | Solution |
 |---|---|
@@ -16,9 +16,9 @@
 | ABOX and ACPM ask for their firmware before the root file system is mounted, and it may not be built into the kernel (Samsung's code) | the drivers defer their probe; `/lib/firmware/calliope_*.bin` are links to the stock files in `/vendor/firmware`; after `/vendor` is mounted `t510-firmware.service` re-probes the drivers; the ACPM plugin comes from the installer or from `t510-firmware-fetch.service` |
 | WirePlumber tries every ABOX PCM → the DSP firmware crashes | no automatic card setup (`wireplumber.conf.d/51-t510.conf`), PipeWire gets a fixed sink and source |
 | audio routing (speakers/headphones/microphones) | `t510-audio.service`: setup from `mixer_paths.xml` + switching on the jack |
-| the keyring password window (gcr-prompter) grabs input → Onboard cannot be pressed | `t510-gcr-prompter` runs it with `LD_PRELOAD=t510-nograb.so` (`tools/nograb.c`), D-Bus services overridden in `/usr/local/share/dbus-1/services` |
+| the keyring password window (gcr-prompter) grabs input → Onboard cannot be pressed | `/usr/libexec/t510/gcr-prompter` runs it with `LD_PRELOAD=nograb.so` (`tools/nograb.c`); its D-Bus services replace gcr's (`dpkg-divert`) |
 | 2 GB of RAM | 2 GB of zstd swap in zram (`zram-manual.service`; before kernel #59 zstd was not built for zram and lzo-rle was used silently), MGLRU, `vm.swappiness=100`, `page-cluster=0` (`60-t510-zram.conf`) |
-| when memory ran out the OOM killer took dbus/pipewire, not the game: user services have `oom_score_adj` 200, applications 0, and GPU buffers hardly show in RSS | `user@.service` and dbus/pipewire/wireplumber at −100 (`user@.service.d/50-t510-oom.conf`, `/etc/systemd/user/*.service.d/50-t510-oom.conf`), Xorg at −100 (`t510-xorg`) |
+| when memory ran out the OOM killer took dbus/pipewire, not the game: user services have `oom_score_adj` 200, applications 0, and GPU buffers hardly show in RSS | `user@.service` and dbus/pipewire/wireplumber at −100 (`user@.service.d/50-t510-oom.conf`, `/usr/lib/systemd/user/*.service.d/50-t510-oom.conf`), Xorg at −100 (`t510-xorg`) |
 | desktop Ubuntu services of no use here (modem, snapd, apport, fwupd…) | `scripts/trim-services.sh` turns them off (the packages stay), journal ≤ 100 MB; printing and scanning (CUPS, cups-browsed, avahi) stay: a network printer is found and added by itself (driverless IPP), scanners through sane-airscan (eSCL) |
 | the first boot (machine-id `uninitialized`) applies systemd's presets, and Ubuntu's enable everything | the image builds write `/etc/systemd/system-preset/80-t510-image.preset`: every unit off in the image stays off |
 | `resize2fs` on the mounted root: "Device or resource busy" (the kernel has `CONFIG_BLK_DEV_WRITE_MOUNTED` off) | `t510-resize-rootfs` grows `/` with ext4's resize ioctl (`resize-rootfs.service`, first boot) |
@@ -43,6 +43,6 @@ Keyboard layout `us` (`00-keyboard.conf`); more layouts in Settings › Keyboard
 
 The top panel shows the CPU and GPU temperatures: the Generic Monitor plugin
 (`xfce4-genmon-plugin`, `plugin-40` before the tray, command
-`/usr/local/bin/t510-temps`, every 3 s; orange from 75 °C, red from 90 °C).
+`/usr/bin/t510-temps`, every 3 s; orange from 75 °C, red from 90 °C).
 The ibus layout icon is hidden from the tray (`90_t510.gschema.override`);
 xkb switches the layouts.

@@ -69,8 +69,13 @@ GTK4 draws with cairo (`GSK_RENDERER=cairo`).
 - **Kernel.** Linux 7.3 + `mainline/patches/` (the tablet's DT, USB, touch,
   SPEEDY/PMIC, ACPM, Wi-Fi, sound, display, cpuidle, charging). Details and the
   pitfalls found on the way: [mainline/README.md](mainline/README.md).
-- **System.** Ubuntu arm64 + the files of `overlay/` (services, udev rules,
-  workarounds); what each one is for: [docs/userspace.md](docs/userspace.md).
+- **System.** Ubuntu arm64 + our package `t510-support` (`overlay/`: services,
+  udev rules, workarounds; the programs of `tools/`); what each one is for:
+  [docs/userspace.md](docs/userspace.md). The kernel is the package
+  `t510-kernel`; both come from our apt repository.
+- **Updates.** What x.y.z mean, how a fix or a kernel security update reaches
+  installed tablets, the checks before publishing:
+  [docs/maintenance.md](docs/maintenance.md).
 
 ## Closed firmware
 
@@ -90,16 +95,19 @@ we build carry no Samsung code.
 ## Building
 
 You need: Linux on a PC, `aarch64-linux-gnu-gcc`, `make`, `git`, `curl`,
-`mkbootimg`, `heimdall`, `zstd`, `debugfs` (e2fsprogs); for the system image on
-x86 also `qemu-user` (arm64 through binfmt) and sudo.
+`mkbootimg`, `heimdall`, `zstd`, `debugfs` (e2fsprogs), `dpkg-deb`, the arm64 X
+libraries for `tools/` (`libx11-dev:arm64 libxi-dev:arm64 libxtst-dev:arm64`);
+for the system image on x86 also `qemu-user` (arm64 through binfmt) and sudo.
 
 ```bash
 mainline/build-kernel.sh              # Linux 7.3 + patches → Image and DTB (in src/linux-7.3)
-sudo scripts/image-from-system.sh rootfs.tar.zst   # system image from a set-up tablet → out/sm-t510-ubuntu.img (+ .zst)
-sudo scripts/build-image.sh           # or: the system image from scratch
 mainline/make-boot.sh initramfs       # → mainline/out/boot-mainline.img
 INSTALL=1 mainline/make-boot.sh initramfs   # → boot-install.img for install.sh
+scripts/make-debs.sh                  # our packages → out/debs/ (t510-support, t510-kernel, t510-archive-keyring)
+sudo scripts/image-from-system.sh rootfs.tar.zst   # system image from a set-up tablet → out/sm-t510-ubuntu.img (+ .zst)
+sudo scripts/build-image.sh           # or: the system image from scratch
 scripts/make-release.sh               # checks them all → out/release/ for a GitHub release
+scripts/publish.sh                    # the packages → the apt repository (docs/maintenance.md)
 ```
 
 `install.sh` uses these builds when they are there and downloads the release
@@ -112,8 +120,10 @@ command for it is at the top of the script) and removes every user account
 and home, SSH host keys, the machine ID, Wi-Fi networks, VPNs, Bluetooth
 pairings, printers, the Ubuntu Pro attachment, logs and caches, the packages
 of `scripts/image-remove.txt` (games, development tools, GNOME, Chrome, the
-Russian language) and the Samsung firmware; our `overlay/` goes on top, and
-`tools/` is built again. Everything set up and tested on the tablet stays:
+Russian language) and the Samsung firmware; then our packages from
+`out/debs/` are installed (`t510-support`: `overlay/` and the programs of
+`tools/`), and the files of `image/` go on top. Everything set up and tested
+on the tablet stays:
 rotation, the power key, long press, the Xfce panel, Xubuntu's programs.
 
 `scripts/build-image.sh` makes the image from scratch instead: Ubuntu 26.04
@@ -121,8 +131,9 @@ arm64 from a snapshot of the Ubuntu archive
 taken at one date (`--snapshot`, pinned in the script by default): the same
 packages on every build, their versions listed in
 `out/sm-t510-ubuntu.img.manifest`. Its contents: `scripts/image-packages.txt`
-(Xubuntu minimal and what the port needs), then `overlay/` and the Xfce
-defaults for the tablet (`overlay/etc/xdg/xdg-xfce`: panel, scaling, touch).
+(Xubuntu minimal and what the port needs), then our packages with the Xfce
+defaults for the tablet (`overlay/etc/xdg/xdg-xfce`: panel, scaling, touch)
+and the files of `image/`.
 Language English, time zone UTC.
 
 The image has no user, no keys, no Samsung firmware and no Google Chrome:
@@ -173,6 +184,27 @@ publish must not contain it.
 Keep the RECOVERY partition stock: with it you can always go back to Android by
 flashing the complete stock firmware.
 
+## Updates
+
+Tablets installed from 0.7.1 on update like any Ubuntu: the update notifier
+shows our packages next to Ubuntu's, or
+
+```bash
+sudo apt update && sudo apt upgrade
+```
+
+A new kernel is written to the BOOT partition by the update and starts with
+the next restart. A tablet installed with 0.7.0 gets the repository once:
+
+```bash
+curl -fLo /tmp/t510-archive-keyring.deb https://chelovechishee.github.io/sm-t510-ubuntu-apt/t510-archive-keyring.deb
+sudo apt install /tmp/t510-archive-keyring.deb
+sudo apt update && sudo apt install t510-support t510-kernel
+```
+
+What the version numbers mean and how updates are made:
+[docs/maintenance.md](docs/maintenance.md).
+
 ## Access and rescue mode
 
 - USB cable: the tablet brings up an RNDIS network at `172.16.42.1` and gives
@@ -192,8 +224,12 @@ flashing the complete stock firmware.
   `build-kernel.sh`, `make-boot.sh`, `export-patches.sh`, the debug initramfs
   of bring-up stages 0/1.
 - `initramfs/init` — boots Ubuntu, rescue mode.
-- `overlay/` — files on top of Ubuntu (services, udev rules, Xfce defaults);
-  `scripts/` — building and seeding the system image, firmware, helpers.
+- `overlay/` — the files of the package `t510-support` (services, udev rules,
+  Xfce defaults); `packaging/` — the packages' control files and install
+  scripts; `image/` — files only the system image gets (they change on the
+  tablet: rotation, keyboard, hardware name);
+  `scripts/` — packages, the apt repository, building and seeding the system
+  image, firmware, helpers.
 - `tools/` — our programs (`longpress.c`, `fbtool.c`, `nograb.c`) and
   development tools (SPEEDY, ACPM, DSI, ASoC); `tools/gpu/` — GLES tests.
 - `gpu/` — the Mesa patch for derivatives on the G71 and a Mesa build to test it.

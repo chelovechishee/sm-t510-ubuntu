@@ -1,7 +1,7 @@
 #!/bin/bash
 # Make the SM-T510 system image from a working tablet: its root file system
 # as it is set up and tested, cleaned of everything that belongs to that one
-# tablet and the people using it, with our overlay on top. The result is the
+# tablet and the people using it, with our packages on top. The result is the
 # same as from build-image.sh and installs with install.sh: no user account,
 # no keys or passwords, no Samsung firmware, English, UTC.
 #
@@ -15,11 +15,12 @@
 # backups in /var/backups, the packages of scripts/image-remove.txt (games,
 # development tools, GNOME, Chrome, Russian), Samsung firmware in /lib/firmware
 # (the audio DSP files become links to the tablet's own VENDOR partition).
-# What stays: the installed system and its settings, our services, the Xfce
-# defaults for a tablet (overlay), Google's apt source for Chrome.
+# What stays: the installed system and its settings, our packages (out/debs/,
+# scripts/make-debs.sh) with the services and the Xfce defaults for a tablet,
+# Google's apt source for Chrome.
 #
 # Needs root (chroot) and, on an x86 PC, qemu-user with binfmt for arm64;
-# the network, for the compilers of tools/ (they go again).
+# the network (apt).
 #
 # Usage: sudo scripts/image-from-system.sh ROOTFS.tar.zst
 # Result: out/sm-t510-ubuntu.img (ext4), .img.zst, .manifest, .sha256
@@ -32,6 +33,7 @@ IMG=$T/out/sm-t510-ubuntu.img
 [ $# = 1 ] && [ -f "$1" ] || { sed -n '2,/^set /p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 1; }
 SRC=$(realpath "$1")
 [ "$(id -u)" = 0 ] || { echo "run as root: sudo $0 $1"; exit 1; }
+"$T/scripts/make-debs.sh" --check
 
 # no terminal inside: apt otherwise gives dpkg a pty of its own, and under
 # qemu-user behind sudo's pty apt-get ended up stopped (state T) for good
@@ -43,7 +45,7 @@ cleanup() {
 	for p in /proc/[0-9]*; do
 		[ "$(readlink "$p/root" 2>/dev/null)" = "$R" ] && kill "${p#/proc/}" 2>/dev/null
 	done
-	for m in dev/pts dev proc sys tmp/src; do
+	for m in dev/pts dev proc sys; do
 		mountpoint -q "$R/$m" && umount -l "$R/$m"
 	done
 	return 0
@@ -171,51 +173,42 @@ if [ -n "$REMOVE" ]; then
 	in_root apt-get -y purge $REMOVE
 fi
 
-# our small programs, built natively in the tree; the compilers go again
-BUILD_DEPS="gcc libc6-dev libx11-dev libxi-dev libxtst-dev"
-# shellcheck disable=SC2086
-in_root apt-get -y install --no-install-recommends $BUILD_DEPS
-mkdir -p "$R/tmp/src" "$R/usr/local/bin" "$R/usr/local/lib"
-mount --bind "$T/tools" "$R/tmp/src"
-in_root gcc -O2 -o /usr/local/bin/fbtool /tmp/src/fbtool.c
-in_root gcc -O2 -o /usr/local/bin/longpress /tmp/src/longpress.c -lX11 -lXi -lXtst
-in_root gcc -O2 -shared -fPIC -o /usr/local/lib/t510-nograb.so /tmp/src/nograb.c
-umount "$R/tmp/src"
-# shellcheck disable=SC2086
-in_root apt-get -y purge $BUILD_DEPS
 in_root apt-get -y autoremove --purge
 # configuration files of packages removed before this copy was made
 RC=$(in_root dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' | awk '$1 == "rc" { print $2 }' | xargs)
 # shellcheck disable=SC2086
 [ -z "$RC" ] || in_root dpkg --purge $RC
 
-# programs outside the packages: only ours (overlay, tools/) stay
+# programs outside the packages: none (ours are t510-support now)
 rm -rf "$R"/opt/* "$R/mnt/android-vendor" "$R/snap" "$R/var/snap" \
 	"$R"/etc/apparmor.d/claude-desktop "$R"/etc/apparmor.d/Discord \
 	"$R"/etc/systemd/system/happd.service "$R"/etc/systemd/system/*.wants/happd.service
-for f in "$R"/usr/local/bin/* "$R"/usr/local/sbin/*; do
-	n=${f#"$R"}
-	case $(basename "$f") in fbtool|longpress) continue ;; esac
-	[ -e "$T/overlay$n" ] || rm -rf "$f"
-done
+rm -rf "$R"/usr/local/bin/* "$R"/usr/local/sbin/*
 [ -e "$R/usr/bin/firefox" ] || rm -rf "$R/etc/firefox"
 # what purged packages left behind ("directory not empty" in the log): gdm3's
 # changed hooks, gdb's bytecode of the old Python 3.12
 [ -e "$R/usr/sbin/gdm3" ] || rm -rf "$R/etc/gdm3"
 [ -e "$R/usr/bin/gdb" ] || rm -rf "$R/usr/share/gdb/python"
 
-# Samsung firmware: none in the image. The overlay links the audio DSP files to
+# Samsung firmware: none in the image. t510-support links the audio DSP files to
 # the tablet's own VENDOR partition, the ACPM plugin comes from the installer
 # (scripts/seed-image.sh) or t510-firmware-fetch
 rm -f "$R"/usr/lib/firmware/calliope_*.bin "$R"/usr/lib/firmware/exynos7885_acpm_fvp.fw
 
-# overlay: root-owned, existing directories left as they are
-tar -C "$T/overlay" --owner=0 --group=0 -cf - . | tar -x -C "$R" --no-overwrite-dir
-(cd "$T/overlay" && find . -mindepth 1 -type d) | while read -r d; do chmod go-w "$R/$d"; done
+# the files of the image only (written on the tablet later: rotation,
+# keyboard, hardware name), then our packages as the apt repository has them
+# (scripts/make-debs.sh). On a 0.7.0 system t510-support's preinst moves its
+# old files away; what someone had changed it keeps as *.t510-0.7.0, and an
+# image keeps none of that
+tar -C "$T/image" --owner=0 --group=0 -cf - . | tar -x -C "$R" --no-overwrite-dir
+(cd "$T/image" && find . -mindepth 1 -type d) | while read -r d; do chmod go-w "$R/$d"; done
+mkdir -p "$R/tmp/debs"
+cp "$T"/out/debs/t510-*.deb "$R/tmp/debs/"
+# --force-confnew: the packaged /etc files, not what the tree had there
+in_root sh -c 'apt-get -y -o Dpkg::Options::=--force-confnew install /tmp/debs/*.deb'
+find "$R/etc" "$R/usr/local" -name '*.t510-0.7.0' -print -delete
 in_root glib-compile-schemas /usr/share/glib-2.0/schemas
-in_root systemctl enable usb-gadget resize-rootfs boot-ok t510-display \
-	t510-firmware t510-firmware-fetch t510-audio t510-no-lmk zram-manual \
-	t510-chrome systemd-networkd
+in_root systemctl enable systemd-networkd
 in_root systemctl disable openvpn.service 2>/dev/null || true
 in_root systemctl mask systemd-networkd-wait-online.service systemd-firstboot.service
 DM=$(cat "$R/etc/X11/default-display-manager" 2>/dev/null || true)
@@ -233,8 +226,8 @@ mkdir -p "$R/etc/systemd/system-preset"
 		--state=disabled --no-legend | awk '{ print "disable " $1 }'
 } > "$R/etc/systemd/system-preset/80-t510-image.preset"
 
-# the screen upright (portrait); the rotation files of the overlay are its
-in_root /usr/local/sbin/t510-rotate refresh
+# the screen upright (portrait); the rotation files of image/ are its
+in_root /usr/sbin/t510-rotate refresh
 
 # English, US keyboard, UTC; the installer's cloud-init seed may change them.
 # debconf first: the packages write these files from its answers again on

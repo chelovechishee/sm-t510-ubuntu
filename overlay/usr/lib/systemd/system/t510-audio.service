@@ -1,0 +1,12 @@
+[Unit]
+Description=SM-T510 audio routing (ABOX setup, speaker/headphone switching)
+After=sound.target systemd-udev-settle.service t510-firmware.service
+Wants=sound.target
+
+[Service]
+ExecStart=/usr/sbin/t510-audio
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
