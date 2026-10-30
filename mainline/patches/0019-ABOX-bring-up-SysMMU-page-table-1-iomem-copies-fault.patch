@@ -1,0 +1,244 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 19/34] ABOX bring-up: SysMMU page table 1, iomem copies, fault
+ stop
+
+iommu/exynos: samsung,sysmmu-pt-id1 (second page table of the 7885 ABOX
+SysMMU, base at 0x1020) and samsung,sysmmu-no-vm; ABOX: SRAM through
+memcpy_toio/fromio, stop the DSP from a work on a SysMMU fault.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts |  2 +
+ drivers/iommu/exynos-iommu.c                  | 32 +++++++++++++++-
+ sound/soc/samsung/abox/abox.c                 | 37 +++++++++++++++----
+ sound/soc/samsung/abox/abox_log.c             |  8 ++--
+ 4 files changed, 67 insertions(+), 12 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index 92bf62345..deba8db64 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -177,6 +177,8 @@ sysmmu_abox: sysmmu@14a30000 {
+ 		clocks = <&cmu_dispaud CLK_GOUT_SMMU_ABOX_CLK>;
+ 		clock-names = "sysmmu";
+ 		#iommu-cells = <0>;
++		samsung,sysmmu-no-vm;
++		samsung,sysmmu-pt-id1;
+ 	};
+ 
+ 	abox_gic: abox-gic@14af0000 {
+diff --git a/drivers/iommu/exynos-iommu.c b/drivers/iommu/exynos-iommu.c
+index 874d05f4b..e789b9261 100644
+--- a/drivers/iommu/exynos-iommu.c
++++ b/drivers/iommu/exynos-iommu.c
+@@ -306,6 +306,7 @@ struct sysmmu_drvdata {
+ 
+ 	/* v7 fields */
+ 	bool has_vcr;			/* virtual machine control register */
++	bool has_pt1;			/* second page table, Exynos 7885 ABOX */
+ };
+ 
+ #define SYSMMU_REG(data, reg) ((data)->sfrbase + (data)->variant->reg)
+@@ -446,9 +447,18 @@ static bool sysmmu_block(struct sysmmu_drvdata *data)
+ 	return true;
+ }
+ 
++/*
++ * The ABOX SysMMU of Exynos 7885 has a second page table (ID 1), which the
++ * DSP uses: its base is at 0x1020 and flushes select it with bit 4.
++ */
++#define SYSMMU_PT1_BASE		0x1020
++#define SYSMMU_FLUSH_PT1	BIT(4)
++
+ static void __sysmmu_tlb_invalidate(struct sysmmu_drvdata *data)
+ {
+ 	writel(0x1, SYSMMU_REG(data, flush_all));
++	if (data->has_pt1)
++		writel(SYSMMU_FLUSH_PT1 | 0x1, SYSMMU_REG(data, flush_all));
+ }
+ 
+ static void __sysmmu_tlb_invalidate_entry(struct sysmmu_drvdata *data,
+@@ -468,6 +478,13 @@ static void __sysmmu_tlb_invalidate_entry(struct sysmmu_drvdata *data,
+ 		       SYSMMU_REG(data, flush_end));
+ 		writel(0x1, SYSMMU_REG(data, flush_range));
+ 	}
++
++	if (data->has_pt1) {
++		writel(iova & SPAGE_MASK, SYSMMU_REG(data, flush_start));
++		writel((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE,
++		       SYSMMU_REG(data, flush_end));
++		writel(SYSMMU_FLUSH_PT1 | 0x1, SYSMMU_REG(data, flush_range));
++	}
+ }
+ 
+ static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
+@@ -480,6 +497,8 @@ static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
+ 		pt_base = pgd >> SPAGE_ORDER;
+ 
+ 	writel(pt_base, SYSMMU_REG(data, pt_base));
++	if (data->has_pt1)
++		writel(pt_base, data->sfrbase + SYSMMU_PT1_BASE);
+ 	__sysmmu_tlb_invalidate(data);
+ }
+ 
+@@ -527,7 +546,7 @@ static void __sysmmu_get_version(struct sysmmu_drvdata *data)
+ 	else
+ 		data->version = MMU_RAW_VER(ver);
+ 
+-	dev_dbg(data->sysmmu, "hardware version: %d.%d\n",
++	dev_info(data->sysmmu, "hardware version: %d.%d\n",
+ 		MMU_MAJ_VER(data->version), MMU_MIN_VER(data->version));
+ 
+ 	if (MMU_MAJ_VER(data->version) < 5) {
+@@ -537,6 +556,17 @@ static void __sysmmu_get_version(struct sysmmu_drvdata *data)
+ 	} else {
+ 		if (__sysmmu_has_capa1(data))
+ 			__sysmmu_get_vcr(data);
++		/*
++		 * Exynos 7885 SysMMU v7.2 reports a VM control register, but
++		 * walks the page table set in the non-VM PT_BASE (as its vendor
++		 * driver programs it).
++		 */
++		if (of_property_read_bool(data->sysmmu->of_node, "samsung,sysmmu-no-vm"))
++			data->has_vcr = false;
++		data->has_pt1 = of_property_read_bool(data->sysmmu->of_node,
++						      "samsung,sysmmu-pt-id1");
++		dev_info(data->sysmmu, "VM register layout: %s\n",
++			 data->has_vcr ? "yes" : "no");
+ 		if (data->has_vcr)
+ 			data->variant = &sysmmu_v7_vm_variant;
+ 		else
+diff --git a/sound/soc/samsung/abox/abox.c b/sound/soc/samsung/abox/abox.c
+index 45892cc45..cc2f697f2 100644
+--- a/sound/soc/samsung/abox/abox.c
++++ b/sound/soc/samsung/abox/abox.c
+@@ -111,13 +111,30 @@ struct scsc_bt_audio_abox *abox_get_bt_virtual(void)
+ 	return p_abox_data->bt_virtual;
+ }
+ 
++static int abox_cpu_enable(bool enable);
++
++static void abox_fault_stop(struct work_struct *work)
++{
++	abox_cpu_enable(false);
++}
++static DECLARE_WORK(abox_fault_stop_work, abox_fault_stop);
++
+ static int abox_iommu_fault_handler(
+ 		struct iommu_domain *domain, struct device *dev,
+ 		unsigned long fault_addr, int fault_flags, void *token)
+ {
+ 	struct abox_data *data = token;
+ 
+-	abox_dbg_print_gpr(&data->pdev->dev, data);
++	/*
++	 * Returning 0 lets the DSP retry the access forever (an interrupt
++	 * storm); stop its CPU on the first fault instead. The GPR dump of the
++	 * downstream handler hangs the bus while the CA7 is stuck, so skip it.
++	 */
++	/* no iommu_iova_to_phys() here: it takes the page table lock */
++	dev_err_ratelimited(dev, "SysMMU fault at %#lx (flags %#x); stopping the DSP\n",
++			    fault_addr, fault_flags);
++	/* hard IRQ under the SysMMU lock: the PMU regmap is used from a work */
++	schedule_work(&abox_fault_stop_work);
+ 	return 0;
+ }
+ 
+@@ -334,7 +351,7 @@ static int abox_start_ipc_transaction_atomic(struct device *dev,
+ 		break;
+ 	}
+ 
+-	memcpy(tx_sram_base, supplement, size);
++	memcpy_toio(tx_sram_base, supplement, size);
+ 	writel(1, tx_ack_sram_base);
+ 	abox_gic_generate_interrupt(data->pdev_gic, hw_irq);
+ 
+@@ -401,7 +418,7 @@ static void abox_process_ipc(struct work_struct *work)
+ 		dev_dbg(dev, "%s(%d, %zu)\n", __func__, hw_irq, size);
+ 
+ 		*state = SEND_MSG;
+-		memcpy(tx_sram_base, supplement, size);
++		memcpy_toio(tx_sram_base, supplement, size);
+ 		abox_gic_generate_interrupt(data->pdev_gic, hw_irq);
+ 		result = wait_event_timeout(data->ipc_wait_queue,
+ 				(*state == SEND_MSG_OK ||
+@@ -4736,7 +4753,7 @@ static irqreturn_t abox_irq_handler(int irq, void *dev_id)
+ 	if (abox_dma_irq_handler(irq, data) == IRQ_HANDLED)
+ 		return IRQ_HANDLED;
+ 
+-	memcpy(&msg, data->sram_base + data->ipc_rx_offset, sizeof(msg));
++	memcpy_fromio(&msg, data->sram_base + data->ipc_rx_offset, sizeof(msg));
+ 	writel(0, data->sram_base + data->ipc_rx_ack_offset);
+ 
+ 	dev_dbg(dev, "%s: irq=%d, ipcid=%d\n", __func__, irq, msg.ipcid);
+@@ -4971,7 +4988,7 @@ static void abox_reload_extra_firmware(struct abox_data *data, const char *name)
+ 			break;
+ 		}
+ 
+-		memcpy(base + ext_fw->offset, ext_fw->firmware->data,
++		memcpy_toio(base + ext_fw->offset, ext_fw->firmware->data,
+ 				ext_fw->firmware->size);
+ 		dev_info(dev, "%s: %s is downloaded at area %u offset %u\n",
+ 				__func__, ext_fw->name, ext_fw->area,
+@@ -5073,7 +5090,7 @@ static void abox_download_extra_firmware(struct abox_data *data)
+ 			continue;
+ 		}
+ 
+-		memcpy(base + ext_fw->offset, ext_fw->firmware->data,
++		memcpy_toio(base + ext_fw->offset, ext_fw->firmware->data,
+ 				ext_fw->firmware->size);
+ 		dev_info(dev, "%s: %s is downloaded at area %u offset %u\n",
+ 				__func__, ext_fw->name, ext_fw->area,
+@@ -5093,7 +5110,7 @@ static int abox_download_firmware(struct platform_device *pdev)
+ 		return -EAGAIN;
+ 	}
+ 	memset_io(data->sram_base, 0, data->sram_size);
+-	memcpy(data->sram_base, data->firmware_sram->data,
++	memcpy_toio(data->sram_base, data->firmware_sram->data,
+ 			data->firmware_sram->size);
+ 
+ 	if (!data->firmware_dram) {
+@@ -5718,8 +5735,12 @@ static int samsung_abox_probe(struct platform_device *pdev)
+ 		return PTR_ERR(data->dram_base);
+ 	}
+ 	dev_info(dev, "%s(%#x) alloc\n", "dram firmware", DRAM_FIRMWARE_SIZE);
+-	iommu_map(data->iommu_domain, IOVA_DRAM_FIRMWARE, data->dram_base_phys,
++	ret = iommu_map(data->iommu_domain, IOVA_DRAM_FIRMWARE, data->dram_base_phys,
+ 			DRAM_FIRMWARE_SIZE, 0);
++	dev_info(dev, "dram firmware: phys %pad, iommu_map %d, %#x -> %pa\n",
++		 &data->dram_base_phys, ret, IOVA_DRAM_FIRMWARE + 0xfd000,
++		 &(phys_addr_t){ iommu_iova_to_phys(data->iommu_domain,
++						    IOVA_DRAM_FIRMWARE + 0xfd000) });
+ 
+ 	if (IS_ENABLED(CONFIG_SHM_IPC)) {
+ 		dev_dbg(dev, "%s(%#x) alloc\n", "vss firmware", shm_get_vss_size());
+diff --git a/sound/soc/samsung/abox/abox_log.c b/sound/soc/samsung/abox/abox_log.c
+index 3d75545b0..3274c2516 100644
+--- a/sound/soc/samsung/abox/abox_log.c
++++ b/sound/soc/samsung/abox/abox_log.c
+@@ -64,8 +64,9 @@ static void abox_log_memcpy(struct device *dev,
+ #ifdef VERBOSE_LOG
+ 		dev_dbg(dev, "0: %s\n", src);
+ #endif
+-		memcpy(kernel_buffer->buffer + kernel_buffer->index,
+-				src, left_size);
++		/* the DSP log may sit in SRAM (iomem): no plain memcpy() */
++		memcpy_fromio(kernel_buffer->buffer + kernel_buffer->index,
++				(const void __iomem *)src, left_size);
+ 		src += left_size;
+ 		size -= left_size;
+ 		kernel_buffer->index = 0;
+@@ -74,7 +75,8 @@ static void abox_log_memcpy(struct device *dev,
+ #ifdef VERBOSE_LOG
+ 	dev_dbg(dev, "1: %s\n", src);
+ #endif
+-	memcpy(kernel_buffer->buffer + kernel_buffer->index, src, size);
++	memcpy_fromio(kernel_buffer->buffer + kernel_buffer->index,
++			(const void __iomem *)src, size);
+ 	kernel_buffer->index += size;
+ }
+ 
+-- 
+2.53.0
+

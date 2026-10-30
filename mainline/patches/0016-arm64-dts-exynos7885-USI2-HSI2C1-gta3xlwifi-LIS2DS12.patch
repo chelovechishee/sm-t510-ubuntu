@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 16/34] arm64: dts: exynos7885: USI2 HSI2C1; gta3xlwifi:
+ LIS2DS12 accelerometer
+
+USI v1 block (exynos8895-usi) selected to HSI2C1 through the PERI sysreg,
+the HSI2C uses the 8895 timing like the downstream driver.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi    | 32 +++++++++++++++++++
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts | 17 ++++++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index 7a8afe401..edd6adffa 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -734,6 +734,38 @@ i2c_6: i2c@13890000 {
+ 			status = "disabled";
+ 		};
+ 
++		/* USI mode selection registers at 0x2000..0x2008 */
++		syscon_peri: syscon@10030000 {
++			compatible = "syscon";
++			reg = <0x10030000 0x3000>;
++		};
++
++		usi2: usi@13980000 {
++			compatible = "samsung,exynos8895-usi";
++			ranges = <0x0 0x13980000 0x20000>;
++			clocks = <&cmu_peri CLK_GOUT_USI2_PCLK>,
++				 <&cmu_peri CLK_GOUT_USI2_SCLK>;
++			clock-names = "pclk", "ipclk";
++			#address-cells = <1>;
++			#size-cells = <1>;
++			samsung,sysreg = <&syscon_peri 0x2008>;
++			status = "disabled";
++
++			/* second HSI2C channel of USI2 (USI_MODE_I2C1) */
++			hsi2c_9: i2c@10000 {
++				compatible = "samsung,exynos8895-hsi2c";
++				reg = <0x10000 0x1000>;
++				interrupts = <GIC_SPI 276 IRQ_TYPE_LEVEL_HIGH>;
++				clocks = <&cmu_peri CLK_GOUT_HSI2C2_PCLK>;
++				clock-names = "hsi2c";
++				pinctrl-names = "default";
++				pinctrl-0 = <&hs_i2c9_bus>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++				status = "disabled";
++			};
++		};
++
+ 		i2c_7: i2c@11cd0000 {
+ 			compatible = "samsung,exynos7885-i2c",
+ 				     "samsung,s3c2440-i2c";
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index b65edae72..445cf594e 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -11,6 +11,7 @@
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/input.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/soc/samsung,exynos-usi.h>
+ 
+ / {
+ 	model = "Samsung Galaxy Tab A 10.1 (2019) Wi-Fi";
+@@ -201,6 +202,22 @@ fuel-gauge@3b {
+ 	};
+ };
+ 
++&usi2 {
++	samsung,mode = <USI_MODE_I2C1>;
++	status = "okay";
++};
++
++&hsi2c_9 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	/* ST LIS2DS12; read by polling (t510-rotate-hint), its IRQ on gpa0-3 is unused */
++	accelerometer@1d {
++		compatible = "st,lis2ds12";
++		reg = <0x1d>;
++	};
++};
++
+ &i2c_4 {
+ 	clock-frequency = <400000>;
+ 	status = "okay";
+-- 
+2.53.0
+

@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=xfce4-screensaver
+# hidden on SM-T510 (see mainline/README.md, "Session")
+Hidden=true

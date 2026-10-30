@@ -1,0 +1,10 @@
+[Unit]
+Description=Mark boot as successful (initramfs rescue fallback)
+After=multi-user.target ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rm -f /.boot-attempt
+
+[Install]
+WantedBy=multi-user.target

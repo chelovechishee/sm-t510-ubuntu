@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 34/34] ASoC: samsung: abox: defer probe until the DSP firmware
+ is there
+
+calliope_sram.bin and calliope_dram.bin come from the tablet's Android
+vendor partition and are no longer built into the kernel. Request them at
+the very start of probe, before the IOMMU is attached and the hardware is
+touched, and defer while they are missing: userspace copies them to
+/lib/firmware and re-probes the device. They are kept for every DSP boot
+as before and now released by a devm action.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ sound/soc/samsung/abox/abox.c | 45 ++++++++++++++++++++++++-----------
+ 1 file changed, 31 insertions(+), 14 deletions(-)
+
+diff --git a/sound/soc/samsung/abox/abox.c b/sound/soc/samsung/abox/abox.c
+index ef167f045..13fe9312f 100644
+--- a/sound/soc/samsung/abox/abox.c
++++ b/sound/soc/samsung/abox/abox.c
+@@ -5772,6 +5772,14 @@ static bool enable = true;
+ module_param(enable, bool, 0644);
+ MODULE_PARM_DESC(enable, "Allow probing ABOX (default on)");
+ 
++static void abox_release_firmware(void *arg)
++{
++	struct abox_data *data = arg;
++
++	release_firmware(data->firmware_dram);
++	release_firmware(data->firmware_sram);
++}
++
+ static int samsung_abox_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -5790,6 +5798,29 @@ static int samsung_abox_probe(struct platform_device *pdev)
+ 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+ 	if (!data)
+ 		return -ENOMEM;
++
++	/*
++	 * The DSP firmware comes from the tablet's own Android vendor partition
++	 * and is not part of the kernel: it shows up in /lib/firmware only once
++	 * the root file system is mounted. Ask for it before touching the IOMMU
++	 * or the hardware so that probe can be deferred cleanly; userspace
++	 * re-probes the device when the files are in place. Loading it here
++	 * (not asynchronously) keeps abox_enable() out of the middle of probe.
++	 */
++	ret = firmware_request_nowarn(&data->firmware_sram, "calliope_sram.bin", dev);
++	if (ret)
++		return dev_err_probe(dev, -EPROBE_DEFER, "waiting for calliope_sram.bin\n");
++	ret = firmware_request_nowarn(&data->firmware_dram, "calliope_dram.bin", dev);
++	if (ret) {
++		release_firmware(data->firmware_sram);
++		return dev_err_probe(dev, -EPROBE_DEFER, "waiting for calliope_dram.bin\n");
++	}
++	/* kept for every DSP boot, released when probe fails or on unbind */
++	ret = devm_add_action_or_reset(dev, abox_release_firmware, data);
++	if (ret)
++		return ret;
++	dev_info(dev, "SRAM and DRAM firmware loaded\n");
++
+ 	platform_set_drvdata(pdev, data);
+ 	data->pdev = pdev;
+ 	p_abox_data = data;
+@@ -5989,20 +6020,6 @@ static int samsung_abox_probe(struct platform_device *pdev)
+ 	dev_info(dev, "bootargs[0x%x][%s]\n",
+ 				data->bootargs_offset, data->bootargs);
+ 
+-	/*
+-	 * The DSP firmware is built into the kernel (CONFIG_EXTRA_FIRMWARE), so
+-	 * load it right here: the asynchronous requests completed in the middle
+-	 * of probe and started abox_enable() there, racing the runtime resume.
+-	 */
+-	ret = request_firmware(&data->firmware_sram, "calliope_sram.bin", dev);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "no calliope_sram.bin\n");
+-	ret = request_firmware(&data->firmware_dram, "calliope_dram.bin", dev);
+-	if (ret) {
+-		release_firmware(data->firmware_sram);
+-		return dev_err_probe(dev, ret, "no calliope_dram.bin\n");
+-	}
+-	dev_info(dev, "SRAM and DRAM firmware loaded\n");
+ 	abox_request_extra_firmware(data);
+ 
+ #ifdef EMULATOR
+-- 
+2.53.0
+

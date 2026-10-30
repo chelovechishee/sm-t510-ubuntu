@@ -1,0 +1,85 @@
+#!/bin/busybox sh
+# SM-T510 mainline, phase 1: USB gadget as in the 4.4 rescue mode
+# (RNDIS 172.16.42.1 + DHCP + telnet, ACM console). Touches no storage.
+# Progress goes to /dev/kmsg: the screen and the ramoops console.
+/bin/busybox --install -s /bin
+export PATH=/bin
+mkdir -p /proc /sys /dev /tmp /etc
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+exec >/dev/kmsg 2>&1
+
+say() { echo "T510: $*"; }
+
+say "=== mainline phase 1: $(uname -r) ==="
+
+for i in $(seq 1 50); do [ -n "$(ls /sys/class/udc 2>/dev/null)" ] && break; sleep 0.1; done
+UDC=$(ls /sys/class/udc 2>/dev/null | head -n1)
+if [ -z "$UDC" ]; then
+	say "no UDC: USB controller did not probe"
+	dmesg | grep -iE 'dwc3|usb|phy' | tail -20
+	say "=== phase 1 FAILED, photo the screen ==="
+	while :; do sleep 3600; done
+fi
+say "UDC: $UDC"
+
+CFS=/sys/kernel/config
+G=$CFS/usb_gadget/g1
+mount -t configfs none $CFS
+mkdir -p $G/strings/0x409 $G/functions/rndis.usb0 $G/functions/acm.GS0 $G/configs/c.1/strings/0x409
+echo 0x1d6b > $G/idVendor
+echo 0x0104 > $G/idProduct
+echo t510 > $G/strings/0x409/serialnumber
+echo "t510 mainline" > $G/strings/0x409/product
+echo "t510 mainline" > $G/configs/c.1/strings/0x409/configuration
+echo 02:00:00:51:05:01 > $G/functions/rndis.usb0/dev_addr
+echo 02:00:00:51:05:10 > $G/functions/rndis.usb0/host_addr
+ln -s $G/functions/rndis.usb0 $G/configs/c.1/
+ln -s $G/functions/acm.GS0 $G/configs/c.1/
+echo "$UDC" > $G/UDC || say "binding gadget to $UDC FAILED"
+IF=$(cat $G/functions/rndis.usb0/ifname)
+sleep 1
+ip link set lo up
+ip link set "$IF" up
+ip addr add 172.16.42.1/24 dev "$IF"
+say "gadget up: $IF 172.16.42.1, state $(cat /sys/class/udc/$UDC/state)"
+
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+(while :; do setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done) &
+echo "start 172.16.42.100
+end 172.16.42.120
+interface $IF
+option subnet 255.255.255.0
+lease_file /tmp/udhcpd.leases" > /etc/udhcpd.conf
+touch /tmp/udhcpd.leases
+udhcpd /etc/udhcpd.conf
+telnetd -l /bin/sh
+say "=== phase 1: telnet 172.16.42.1 ==="
+
+# same registers as tools/usbregs (values read on the 4.4 kernel)
+dumpregs() {
+	for r in usbcon:0x135d0000:"0x04 0x08 0x20 0x30 0x50 0x54 0x58 0x5c 0x60" \
+		 dwc3:0x13600000:"0xc110 0xc200 0xc630 0xc700 0xc704" \
+		 pmu:0x11c80000:"0x674" \
+		 cmu_fsys:0x13400000:"0x0180 0x01a0 0x200c 0x2068 0x2074 0x2078"; do
+		name=${r%%:*}; rest=${r#*:}; base=${rest%%:*}
+		line=
+		for o in ${rest#*:}; do
+			line="$line $o=$(devmem $((base + o)) 32)"
+		done
+		say "$name$line"
+	done
+}
+
+# show USB link changes on screen; dump registers if it never configures
+last=
+n=0
+while :; do
+	st=$(cat /sys/class/udc/$UDC/state 2>/dev/null)
+	[ "$st" != "$last" ] && say "usb state: $st" && last=$st
+	n=$((n + 1))
+	[ $n = 15 ] && [ "$st" != configured ] && dumpregs
+	sleep 1
+done

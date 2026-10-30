@@ -1,0 +1,1 @@
+%sudo ALL=(root) NOPASSWD: /usr/local/sbin/t510-rotate

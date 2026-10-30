@@ -1,0 +1,2 @@
+# Masks /usr/lib/udev/rules.d/60-persistent-v4l.rules: v4l_id probing the
+# Samsung exynos-fimc-is camera nodes crashes the kernel (fimc_is_3aa_video_close).

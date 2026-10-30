@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 26/34] drm/tiny: exynos7885-decon: mask the frame start
+ interrupt while unused
+
+The frame start interrupt stayed enabled all the time, so an idle desktop
+took 60 interrupts a second. Enable it only while vblank events are on or a
+page flip waits for its frame; a frame start latched while masked is
+cleared before unmasking. INTERRUPT_ENABLE updates take their own lock:
+the vblank core calls disable_vblank under vbl_lock and may take vbl_lock
+inside event_lock.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/gpu/drm/tiny/exynos7885-decon.c | 55 +++++++++++++++++++++----
+ 1 file changed, 48 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/tiny/exynos7885-decon.c b/drivers/gpu/drm/tiny/exynos7885-decon.c
+index 9c62fb4a4..aa93a029b 100644
+--- a/drivers/gpu/drm/tiny/exynos7885-decon.c
++++ b/drivers/gpu/drm/tiny/exynos7885-decon.c
+@@ -76,6 +76,12 @@ struct decon7885 {
+ 	/* flip completion, sent at the frame start that latched it */
+ 	struct drm_pending_vblank_event *event;	/* under drm.event_lock */
+ 	bool vblank_enabled;
++	/*
++	 * Serializes INTERRUPT_ENABLE updates. Not event_lock: the vblank core
++	 * calls disable_vblank under vbl_lock and may take vbl_lock inside
++	 * event_lock.
++	 */
++	spinlock_t irq_lock;
+ };
+ 
+ #define to_decon(d) container_of(d, struct decon7885, drm)
+@@ -86,6 +92,31 @@ static void decon_scanout(struct decon7885 *decon, dma_addr_t addr)
+ 	writel(SHADOW_UPDATE, decon->regs + SHADOW_REG_UPDATE_REQ);
+ }
+ 
++/*
++ * The frame start interrupt is only needed while vblank events are on or a
++ * flip waits for its frame; masked otherwise, an idle desktop takes no
++ * interrupts at all instead of 60 a second.
++ */
++static void decon_irq_update(struct decon7885 *decon)
++{
++	unsigned long flags;
++	u32 val, en;
++
++	spin_lock_irqsave(&decon->irq_lock, flags);
++	val = readl(decon->regs + INTERRUPT_ENABLE);
++	en = (READ_ONCE(decon->vblank_enabled) || READ_ONCE(decon->event)) ?
++	     FRAME_START_INT_EN : 0;
++	if ((val & FRAME_START_INT_EN) != en) {
++		/* a frame start latched while masked is stale */
++		if (en)
++			writel(FRAME_START_INT_PEND,
++			       decon->regs + INTERRUPT_PENDING);
++		writel((val & ~FRAME_START_INT_EN) | en,
++		       decon->regs + INTERRUPT_ENABLE);
++	}
++	spin_unlock_irqrestore(&decon->irq_lock, flags);
++}
++
+ static irqreturn_t decon_frame_start_irq(int irq, void *arg)
+ {
+ 	struct decon7885 *decon = arg;
+@@ -104,9 +135,10 @@ static irqreturn_t decon_frame_start_irq(int irq, void *arg)
+ 	if (decon->event &&
+ 	    !(readl(decon->regs + SHADOW_REG_UPDATE_REQ) & SHADOW_UPDATE)) {
+ 		drm_crtc_send_vblank_event(crtc, decon->event);
+-		decon->event = NULL;
++		WRITE_ONCE(decon->event, NULL);
+ 	}
+ 	spin_unlock(&decon->drm.event_lock);
++	decon_irq_update(decon);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -172,23 +204,30 @@ static void decon_update(struct drm_simple_display_pipe *pipe,
+ 	spin_lock_irq(&decon->drm.event_lock);
+ 	if (decon->event)
+ 		drm_crtc_send_vblank_event(crtc, decon->event);
+-	decon->event = NULL;
++	WRITE_ONCE(decon->event, NULL);
+ 	if (active)
+-		decon->event = event;
++		WRITE_ONCE(decon->event, event);
+ 	else
+ 		drm_crtc_send_vblank_event(crtc, event);
+ 	spin_unlock_irq(&decon->drm.event_lock);
++	decon_irq_update(decon);
+ }
+ 
+ static int decon_enable_vblank(struct drm_simple_display_pipe *pipe)
+ {
+-	WRITE_ONCE(to_decon(pipe->crtc.dev)->vblank_enabled, true);
++	struct decon7885 *decon = to_decon(pipe->crtc.dev);
++
++	WRITE_ONCE(decon->vblank_enabled, true);
++	decon_irq_update(decon);
+ 	return 0;
+ }
+ 
+ static void decon_disable_vblank(struct drm_simple_display_pipe *pipe)
+ {
+-	WRITE_ONCE(to_decon(pipe->crtc.dev)->vblank_enabled, false);
++	struct decon7885 *decon = to_decon(pipe->crtc.dev);
++
++	WRITE_ONCE(decon->vblank_enabled, false);
++	decon_irq_update(decon);
+ }
+ 
+ static const struct drm_simple_display_pipe_funcs decon_pipe_funcs = {
+@@ -354,9 +393,11 @@ static int decon_probe(struct platform_device *pdev)
+ 	irq = platform_get_irq_byname(pdev, "frame-start");
+ 	if (irq < 0)
+ 		return irq;
++	/* frame start stays masked until vblank or a flip needs it */
++	spin_lock_init(&decon->irq_lock);
+ 	writel(FRAME_START_INT_PEND, decon->regs + INTERRUPT_PENDING);
+-	writel(readl(decon->regs + INTERRUPT_ENABLE) | INT_EN | FRAME_START_INT_EN,
+-	       decon->regs + INTERRUPT_ENABLE);
++	writel((readl(decon->regs + INTERRUPT_ENABLE) & ~FRAME_START_INT_EN) |
++	       INT_EN, decon->regs + INTERRUPT_ENABLE);
+ 	ret = devm_request_irq(dev, irq, decon_frame_start_irq, 0,
+ 			       dev_name(dev), decon);
+ 	if (ret)
+-- 
+2.53.0
+

@@ -1,0 +1,37 @@
+--- a/src/panfrost/compiler/bifrost/bi_quirks.h
++++ b/src/panfrost/compiler/bifrost/bi_quirks.h
+@@ -23,12 +23,17 @@
+ 
+ #define BIFROST_LIMITED_CLPER (1 << 1)
+ 
++/* CLPER_OLD reads 0 whatever the lane (own lane, lane 0, swapped operands
++ * all tried on G71 r0p0): no cross-lane access, so derivatives are 0 */
++#define BIFROST_NO_CLPER (1 << 2)
++
+ static inline unsigned
+ bifrost_get_quirks(unsigned gpu_id)
+ {
+    switch (gpu_id >> 24) {
+    case 0x60: /* G71 */
+-      return BIFROST_NO_FP32_TRANSCENDENTALS | BIFROST_LIMITED_CLPER;
++      return BIFROST_NO_FP32_TRANSCENDENTALS | BIFROST_LIMITED_CLPER |
++             BIFROST_NO_CLPER;
+    case 0x62: /* G72 */
+    case 0x70: /* G31 */
+       return BIFROST_LIMITED_CLPER;
+--- a/src/panfrost/compiler/bifrost/bifrost_compile.c
++++ b/src/panfrost/compiler/bifrost/bifrost_compile.c
+@@ -1911,6 +1911,13 @@
+ 
+    unsigned sz = instr->def.bit_size;
+ 
++   /* A zero derivative turns analytic anti-aliasing (fwidth) into hard
++    * edges; CLPER_OLD's 0 made it -value: blurry squares in WebRender/GSK */
++   if (b->shader->quirks & BIFROST_NO_CLPER) {
++      bi_mov_i32_to(b, dst, bi_zero());
++      return;
++   }
++
+    /* If all uses are fabs, the sign of the derivative doesn't matter. This is
+     * inherently based on fine derivatives so we can't do it for coarse.
+     */

@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 07/34] arm64: dts: gta3xlwifi: S2MU005 fuel gauge, secure
+ memory reservation
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts     | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index 082b9c60f..1ea278a96 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -69,6 +69,12 @@ ramoops@91500000 {
+ 			ecc-size = <0>;
+ 		};
+ 
++		/* /memreserve/ in the downstream DT (secure world) */
++		secure@e0000000 {
++			reg = <0x0 0xe0000000 0xd00000>;
++			no-map;
++		};
++
+ 		tima@b8000000 {
+ 			reg = <0x0 0xb8000000 0x200000>;
+ 			no-map;
+@@ -146,6 +152,15 @@ power-key {
+ 	};
+ };
+ 
++&i2c_0 {
++	status = "okay";
++
++	fuel-gauge@3b {
++		compatible = "samsung,s2mu005-fuel-gauge";
++		reg = <0x3b>;
++	};
++};
++
+ &i2c_4 {
+ 	clock-frequency = <400000>;
+ 	status = "okay";
+-- 
+2.53.0
+

@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 28/34] soc: samsung: exynos-pmu: Exynos 7885 CPU power down
+ for cpuidle
+
+The EL3 monitor's PSCI CPU_SUSPEND only executes WFI; the PMU gates the
+core when its CLUSTERx_CPUy_CONFIGURATION local power request is cleared
+beforehand (downstream exynos-powermode cpu_disable()). A CPU PM notifier,
+last in the chain, clears it on entry and sets it again on exit or a failed
+entry, so a later plain WFI never powers the core down.
+
+S-Boot leaves automatic cluster power down armed for the A73 and the second
+A53 cluster: with both cores asleep the PMU cut the cluster with its L2,
+never cleaned for a core-level request, and memory got corrupted. At init
+every cluster sequencer is set to keep the cluster on (downstream
+cluster_enable()).
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/soc/samsung/Makefile         |   1 +
+ drivers/soc/samsung/exynos-pmu.c     |   5 ++
+ drivers/soc/samsung/exynos-pmu.h     |   3 +
+ drivers/soc/samsung/exynos7885-pmu.c | 103 +++++++++++++++++++++++++++
+ 4 files changed, 112 insertions(+)
+ create mode 100644 drivers/soc/samsung/exynos7885-pmu.c
+
+diff --git a/drivers/soc/samsung/Makefile b/drivers/soc/samsung/Makefile
+index 636a76260..79131154d 100644
+--- a/drivers/soc/samsung/Makefile
++++ b/drivers/soc/samsung/Makefile
+@@ -8,6 +8,7 @@ obj-$(CONFIG_EXYNOS_USI)	+= exynos-usi.o
+ 
+ obj-$(CONFIG_EXYNOS_PMU)	+= exynos_pmu.o
+ exynos_pmu-y			+= exynos-pmu.o gs101-pmu.o
++exynos_pmu-$(CONFIG_ARM64)	+= exynos7885-pmu.o
+ 
+ obj-$(CONFIG_EXYNOS_PMU_ARM_DRIVERS)	+= exynos3250-pmu.o exynos4-pmu.o \
+ 					exynos5250-pmu.o exynos5420-pmu.o
+diff --git a/drivers/soc/samsung/exynos-pmu.c b/drivers/soc/samsung/exynos-pmu.c
+index efccdd63e..395bc0182 100644
+--- a/drivers/soc/samsung/exynos-pmu.c
++++ b/drivers/soc/samsung/exynos-pmu.c
+@@ -147,6 +147,11 @@ static const struct of_device_id exynos_pmu_of_device_ids[] = {
+ 		.compatible = "samsung,exynos5433-pmu",
+ 	}, {
+ 		.compatible = "samsung,exynos7-pmu",
++#ifdef CONFIG_ARM64
++	}, {
++		.compatible = "samsung,exynos7885-pmu",
++		.data = &exynos7885_pmu_data,
++#endif
+ 	}, {
+ 		.compatible = "samsung,exynos850-pmu",
+ 	},
+diff --git a/drivers/soc/samsung/exynos-pmu.h b/drivers/soc/samsung/exynos-pmu.h
+index fbe381e2a..82281c8c9 100644
+--- a/drivers/soc/samsung/exynos-pmu.h
++++ b/drivers/soc/samsung/exynos-pmu.h
+@@ -71,6 +71,9 @@ extern const struct exynos_pmu_data exynos5250_pmu_data;
+ extern const struct exynos_pmu_data exynos5420_pmu_data;
+ #endif
+ extern const struct exynos_pmu_data gs101_pmu_data;
++#ifdef CONFIG_ARM64
++extern const struct exynos_pmu_data exynos7885_pmu_data;
++#endif
+ 
+ extern void pmu_raw_writel(u32 val, u32 offset);
+ extern u32 pmu_raw_readl(u32 offset);
+diff --git a/drivers/soc/samsung/exynos7885-pmu.c b/drivers/soc/samsung/exynos7885-pmu.c
+new file mode 100644
+index 000000000..198a3c703
+--- /dev/null
++++ b/drivers/soc/samsung/exynos7885-pmu.c
+@@ -0,0 +1,103 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Exynos 7885/7904 PMU: CPU power-down for cpuidle
++ *
++ * The EL3 monitor's PSCI CPU_SUSPEND saves the core's secure state and
++ * executes WFI, but leaves the PMU alone: the core is only power gated when
++ * its CLUSTERx_CPUy_CONFIGURATION local power request is cleared before
++ * (downstream exynos-powermode cpu_disable()). The register must be set again
++ * on wakeup, otherwise the next plain WFI powers the core down without its
++ * context saved.
++ *
++ * S-Boot leaves the A73 and the second A53 cluster with automatic cluster
++ * power down armed: once both cores sleep, the PMU cuts the cluster with its
++ * L2, which nobody cleaned for a core-level PSCI request, and memory gets
++ * corrupted. Keep every cluster powered (downstream cluster_enable()).
++ */
++
++#include <linux/array_size.h>
++#include <linux/bits.h>
++#include <linux/cpu_pm.h>
++#include <linux/cpumask.h>
++#include <linux/notifier.h>
++#include <linux/smp.h>
++#include <linux/soc/samsung/exynos-pmu.h>
++
++#include <asm/cputype.h>
++#include <asm/smp_plat.h>
++
++#include "exynos-pmu.h"
++
++#define EXYNOS7885_CPU_LOCAL_PWR_CFG	GENMASK(3, 0)
++
++#define EXYNOS7885_CLUSTER_SEQ_OPTION(cl)	(0x2488 + (cl) * 0x20)
++#define EXYNOS7885_CLUSTER_PWRDN_EN		BIT(0)
++#define EXYNOS7885_CLUSTER_KEEP_ON		BIT(4)
++
++/*
++ * MPIDR Aff1 0: Cortex-A73 pair, 1: Cortex-A53 quad (CPUs 0-3, boots),
++ * 2: Cortex-A53 pair; the PMU orders their blocks 0, 2, 1.
++ */
++static const u16 exynos7885_cluster_cfg[] = { 0x2000, 0x2200, 0x2100 };
++
++static u32 exynos7885_cpu_cfg(unsigned int cpu)
++{
++	u64 mpidr = cpu_logical_map(cpu);
++
++	return exynos7885_cluster_cfg[MPIDR_AFFINITY_LEVEL(mpidr, 1)] +
++	       MPIDR_AFFINITY_LEVEL(mpidr, 0) * 0x80;
++}
++
++static void exynos7885_cpu_set_power(unsigned int cpu, bool on)
++{
++	u32 offset = exynos7885_cpu_cfg(cpu);
++	u32 val = pmu_raw_readl(offset) & ~EXYNOS7885_CPU_LOCAL_PWR_CFG;
++
++	if (on)
++		val |= EXYNOS7885_CPU_LOCAL_PWR_CFG;
++	pmu_raw_writel(val, offset);
++}
++
++/* called on the CPU itself with interrupts off; each CPU owns its register */
++static int exynos7885_cpu_pm_notify(struct notifier_block *nb,
++				    unsigned long action, void *v)
++{
++	unsigned int cpu = smp_processor_id();
++
++	switch (action) {
++	case CPU_PM_ENTER:
++		exynos7885_cpu_set_power(cpu, false);
++		break;
++	case CPU_PM_ENTER_FAILED:
++	case CPU_PM_EXIT:
++		exynos7885_cpu_set_power(cpu, true);
++		break;
++	}
++
++	return NOTIFY_OK;
++}
++
++static struct notifier_block exynos7885_cpu_pm_nb = {
++	.notifier_call = exynos7885_cpu_pm_notify,
++	/* last on entry: only runs once every other notifier agreed */
++	.priority = INT_MIN,
++};
++
++static void exynos7885_pmu_init(void)
++{
++	unsigned int cl;
++	u32 val;
++
++	for (cl = 0; cl < ARRAY_SIZE(exynos7885_cluster_cfg); cl++) {
++		val = pmu_raw_readl(EXYNOS7885_CLUSTER_SEQ_OPTION(cl));
++		val &= ~EXYNOS7885_CLUSTER_PWRDN_EN;
++		val |= EXYNOS7885_CLUSTER_KEEP_ON;
++		pmu_raw_writel(val, EXYNOS7885_CLUSTER_SEQ_OPTION(cl));
++	}
++
++	cpu_pm_register_notifier(&exynos7885_cpu_pm_nb);
++}
++
++const struct exynos_pmu_data exynos7885_pmu_data = {
++	.pmu_init = exynos7885_pmu_init,
++};
+-- 
+2.53.0
+

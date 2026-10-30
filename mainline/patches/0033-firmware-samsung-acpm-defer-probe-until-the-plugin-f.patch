@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 33/34] firmware: samsung: acpm: defer probe until the plugin
+ firmware is there
+
+The fvp DVFS plugin is Samsung's and is no longer built into the kernel
+(CONFIG_EXTRA_FIRMWARE): it reaches /lib/firmware with the root file
+system. Return -EPROBE_DEFER while it is missing instead of leaving the
+plugin detached; userspace re-probes the device once the file is in
+place, and cpufreq and the GPU wait for the ACPM clocks meanwhile.
+
+The check runs before any mailbox channel is requested: a channel freed
+on deferral comes back from mbox_free_channel() in TXDONE_BY_POLL mode,
+and the Exynos mailbox has no poll timer, so the next probe crashed in
+hrtimer_start() on its first message.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/firmware/samsung/exynos-acpm.c | 72 +++++++++++++++++++++-----
+ 1 file changed, 60 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/firmware/samsung/exynos-acpm.c b/drivers/firmware/samsung/exynos-acpm.c
+index 29adee1ed..71a0e75e1 100644
+--- a/drivers/firmware/samsung/exynos-acpm.c
++++ b/drivers/firmware/samsung/exynos-acpm.c
+@@ -733,40 +733,82 @@ static void acpm_read_sram_string(struct acpm_info *acpm, u32 off, char *buf,
+ 	buf[len - 1] = '\0';
+ }
+ 
++/*
++ * Descriptor of plugin @i if the kernel has to load and attach it (the
++ * firmware left it detached but wants it to stay attached), with its file
++ * name in @name; NULL otherwise.
++ */
++static void __iomem *acpm_plugin_to_attach(struct acpm_info *acpm, u32 i,
++					   char *name, size_t len)
++{
++	void __iomem *initdata = (void __iomem *)acpm->shmem;
++	void __iomem *desc = acpm->sram_base +
++			     readl(initdata + ACPM_FW_PLUGINS) +
++			     i * ACPM_PLUGIN_DESC_SIZE;
++
++	if (readl(desc + ACPM_PLUGIN_IS_ATTACHED) & 0xff ||
++	    !(readl(desc + ACPM_PLUGIN_STAY_ATTACHED) & 0xff) ||
++	    !readl(desc + ACPM_PLUGIN_FW_NAME))
++		return NULL;
++
++	acpm_read_sram_string(acpm, readl(desc + ACPM_PLUGIN_FW_NAME), name, len);
++	return desc;
++}
++
++/*
++ * Plugin images are Samsung's and not built into the kernel: they reach
++ * /lib/firmware with the root file system, and userspace re-probes the device
++ * then. Check for them before any mailbox channel is requested: a channel
++ * freed on deferral comes back in TXDONE_BY_POLL mode, and this controller
++ * has no poll timer. Clock consumers (cpufreq, the GPU) wait for us meanwhile.
++ */
++static int acpm_plugins_available(struct acpm_info *acpm)
++{
++	void __iomem *initdata = (void __iomem *)acpm->shmem;
++	u32 num = readl(initdata + ACPM_FW_NUM_PLUGINS);
++	char name[ACPM_PLUGIN_FW_NAME_MAX];
++	const struct firmware *fw;
++	u32 i;
++
++	for (i = 0; i < num; i++) {
++		if (!acpm_plugin_to_attach(acpm, i, name, sizeof(name)))
++			continue;
++		if (firmware_request_nowarn(&fw, name, acpm->dev))
++			return dev_err_probe(acpm->dev, -EPROBE_DEFER,
++					     "waiting for %s\n", name);
++		release_firmware(fw);
++	}
++
++	return 0;
++}
++
+ static int acpm_attach_plugins(struct acpm_info *acpm, unsigned int chan)
+ {
+ 	struct device *dev = acpm->dev;
+ 	void __iomem *initdata = (void __iomem *)acpm->shmem;
+-	u32 plugins = readl(initdata + ACPM_FW_PLUGINS);
+ 	u32 num = readl(initdata + ACPM_FW_NUM_PLUGINS);
+ 	u32 i;
+ 
+ 	for (i = 0; i < num; i++) {
+-		void __iomem *desc = acpm->sram_base + plugins +
+-				     i * ACPM_PLUGIN_DESC_SIZE;
+ 		char name[ACPM_PLUGIN_FW_NAME_MAX];
+ 		const struct firmware *fw;
+ 		struct acpm_xfer xfer;
++		void __iomem *desc;
+ 		u32 id, base, size, cmd[4] = { };
+ 		size_t j;
+ 		int ret;
+ 
+-		if (readl(desc + ACPM_PLUGIN_IS_ATTACHED) & 0xff ||
+-		    !(readl(desc + ACPM_PLUGIN_STAY_ATTACHED) & 0xff) ||
+-		    !readl(desc + ACPM_PLUGIN_FW_NAME))
++		desc = acpm_plugin_to_attach(acpm, i, name, sizeof(name));
++		if (!desc)
+ 			continue;
+ 
+ 		id = readl(desc + ACPM_PLUGIN_ID);
+ 		base = readl(desc + ACPM_PLUGIN_BASE) & ~1;
+ 		size = readl(desc + ACPM_PLUGIN_SIZE);
+-		acpm_read_sram_string(acpm, readl(desc + ACPM_PLUGIN_FW_NAME),
+-				      name, sizeof(name));
+ 
+ 		ret = firmware_request_nowarn(&fw, name, dev);
+-		if (ret) {
+-			dev_info(dev, "plugin %u: no %s, left detached\n", id, name);
+-			continue;
+-		}
++		if (ret)
++			return dev_err_probe(dev, ret, "plugin %u: no %s\n", id, name);
+ 		if (fw->size > size || !base) {
+ 			dev_err(dev, "plugin %u: %s does not fit (%zu > %u)\n",
+ 				id, name, fw->size, size);
+@@ -826,6 +868,12 @@ static int acpm_probe(struct platform_device *pdev)
+ 	acpm->shmem = acpm->sram_base + match_data->initdata_base;
+ 	acpm->dev = dev;
+ 
++	if (match_data->plugin_chan) {
++		ret = acpm_plugins_available(acpm);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = acpm_channels_init(acpm);
+ 	if (ret)
+ 		return ret;
+-- 
+2.53.0
+

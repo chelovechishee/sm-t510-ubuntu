@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=LightDM GTK Greeter (SM-T510)
+Comment=lightdm-gtk-greeter at 2x scale for the 1200x1920 screen
+Exec=env GDK_SCALE=2 lightdm-gtk-greeter
+Type=Application

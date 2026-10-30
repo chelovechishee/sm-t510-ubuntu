@@ -1,0 +1,304 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 32/34] power: supply: s2m-charger: set currents from the MUIC
+ BC1.2 result without a MUIC node
+
+On the Galaxy Tab A 10.1 2019 the USB-C port is behind an S2MM005 CC
+controller and there is no MUIC node; the bootloader leaves the input limit
+at 500 mA. Without a muic child, read VBUS and MUIC DEV1 on the vbus/attach/
+detach interrupts and set the vendor kernel's input/charge currents
+(DCP 1500/2300 mA, CDP 1500/1500, otherwise 500/500), the float voltage from
+monitored-battery, and report input/charge current and voltage. gta3xlwifi:
+pmic@3d on i2c_1 with its IRQ (gpa2-2).
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts |  14 +-
+ drivers/mfd/sec-common.c                      |   8 +-
+ drivers/power/supply/Kconfig                  |   2 +-
+ drivers/power/supply/s2m-charger.c            | 155 +++++++++++++++++-
+ 4 files changed, 169 insertions(+), 10 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index 40be269eb..c94c9f9bb 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -368,9 +368,21 @@ fuel-gauge@3b {
+ 	};
+ };
+ 
+-/* S2MU005 charger/MUIC/flash at 0x3d */
+ &i2c_1 {
+ 	status = "okay";
++
++	/*
++	 * S2MU005 charger/MUIC/flash. No muic node: the USB-C port is behind
++	 * the S2MM005 CC controller; the charger driver reads the MUIC's BC1.2
++	 * result itself.
++	 */
++	pmic@3d {
++		compatible = "samsung,s2mu005-pmic";
++		reg = <0x3d>;
++		interrupt-parent = <&gpa2>;
++		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
++		monitored-battery = <&battery>;
++	};
+ };
+ 
+ &usi2 {
+diff --git a/drivers/mfd/sec-common.c b/drivers/mfd/sec-common.c
+index 6eedef60b..3aa1568a9 100644
+--- a/drivers/mfd/sec-common.c
++++ b/drivers/mfd/sec-common.c
+@@ -116,8 +116,14 @@ static const struct resource s2mu005_muic_resources[] = {
+ 	DEFINE_RES_IRQ_NAMED(S2MU005_IRQ_MUIC_DETACH, "detach"),
+ };
+ 
++static const struct resource s2mu005_chgr_resources[] = {
++	DEFINE_RES_IRQ_NAMED(S2MU005_IRQ_CHGR_VBUS, "vbus"),
++	DEFINE_RES_IRQ_NAMED(S2MU005_IRQ_MUIC_ATTACH, "attach"),
++	DEFINE_RES_IRQ_NAMED(S2MU005_IRQ_MUIC_DETACH, "detach"),
++};
++
+ static const struct mfd_cell s2mu005_devs[] = {
+-	MFD_CELL_NAME("s2mu005-charger"),
++	MFD_CELL_RES("s2mu005-charger", s2mu005_chgr_resources),
+ 	MFD_CELL_OF("s2mu005-flash", NULL, NULL, 0, 0, "samsung,s2mu005-flash"),
+ 	MFD_CELL_OF("s2mu005-muic", s2mu005_muic_resources, NULL, 0, 0, "samsung,s2mu005-muic"),
+ 	MFD_CELL_OF("s2mu005-rgb", NULL, NULL, 0, 0, "samsung,s2mu005-rgb"),
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index b89ef40df..5421b6583 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -865,7 +865,7 @@ config CHARGER_RK817
+ 
+ config CHARGER_S2M
+ 	tristate "Samsung S2M series PMIC battery charger support"
+-	depends on EXTCON_S2M
++	depends on EXTCON
+ 	depends on MFD_SEC_CORE
+ 	help
+ 	  This option enables support for charger devices found in
+diff --git a/drivers/power/supply/s2m-charger.c b/drivers/power/supply/s2m-charger.c
+index 4d1f2c2c7..c0bbaace4 100644
+--- a/drivers/power/supply/s2m-charger.c
++++ b/drivers/power/supply/s2m-charger.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/devm-helpers.h>
+ #include <linux/extcon.h>
++#include <linux/interrupt.h>
+ #include <linux/mfd/samsung/core.h>
+ #include <linux/mfd/samsung/s2mu005.h>
+ #include <linux/module.h>
+@@ -25,6 +26,10 @@ struct s2m_chgr {
+ 	struct extcon_dev *extcon;
+ 	struct work_struct extcon_work;
+ 	struct notifier_block extcon_nb;
++
++	/* without a MUIC node: BC1.2 result read by this driver */
++	struct delayed_work detect_work;
++	int usb_type;
+ };
+ 
+ static int s2mu005_chgr_get_online(struct s2m_chgr *priv, int *value)
+@@ -45,6 +50,11 @@ static int s2mu005_chgr_get_online(struct s2m_chgr *priv, int *value)
+ 
+ static void s2mu005_chgr_get_usb_type(struct s2m_chgr *priv, int *value)
+ {
++	if (!priv->extcon) {
++		*value = priv->usb_type;
++		return;
++	}
++
+ 	if (extcon_get_state(priv->extcon, EXTCON_CHG_USB_CDP) > 0)
+ 		*value = POWER_SUPPLY_USB_TYPE_CDP;
+ 	else if (extcon_get_state(priv->extcon, EXTCON_CHG_USB_SDP) > 0)
+@@ -60,6 +70,7 @@ static int s2mu005_chgr_get_property(struct power_supply *psy,
+ 				     union power_supply_propval *val)
+ {
+ 	struct s2m_chgr *priv = power_supply_get_drvdata(psy);
++	unsigned int reg;
+ 	int ret;
+ 
+ 	switch (psp) {
+@@ -71,6 +82,25 @@ static int s2mu005_chgr_get_property(struct power_supply *psy,
+ 	case POWER_SUPPLY_PROP_USB_TYPE:
+ 		s2mu005_chgr_get_usb_type(priv, &val->intval);
+ 		break;
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		ret = regmap_read(priv->regmap, S2MU005_REG_CHGR_CTRL2, &reg);
++		if (ret)
++			return ret;
++		val->intval = (100 + 50 * FIELD_GET(S2MU005_CHGR_IN_CURR_LIM, reg)) * 1000;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		ret = regmap_read(priv->regmap, S2MU005_REG_CHGR_CTRL7, &reg);
++		if (ret)
++			return ret;
++		reg = FIELD_GET(S2MU005_CHGR_FAST_CHG_CURR, reg);
++		val->intval = (reg ? 100 + 50 * (reg - 1) : 100) * 1000;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		ret = regmap_read(priv->regmap, S2MU005_REG_CHGR_CTRL8, &reg);
++		if (ret)
++			return ret;
++		val->intval = (3900 + 10 * FIELD_GET(S2MU005_CHGR_VF_VBAT, reg)) * 1000;
++		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -207,9 +237,117 @@ static void s2mu005_chgr_extcon_work(struct work_struct *work)
+ 	power_supply_changed(priv->psy);
+ }
+ 
++/*
++ * Boards with the USB-C port behind a separate CC controller (Galaxy Tab A
++ * 10.1 2019) have no MUIC node: the MUIC still runs BC1.2 detection on its
++ * own, so read its result on VBUS/attach/detach and set the input and charge
++ * currents the vendor kernel uses for that cable. The bootloader leaves the
++ * input limit at 500 mA whatever is plugged in.
++ */
++static void s2mu005_chgr_set_currents(struct s2m_chgr *priv, unsigned int input_ma,
++				      unsigned int charge_ma)
++{
++	regmap_update_bits(priv->regmap, S2MU005_REG_CHGR_CTRL2,
++			   S2MU005_CHGR_IN_CURR_LIM,
++			   FIELD_PREP(S2MU005_CHGR_IN_CURR_LIM, (input_ma - 100) / 50));
++	regmap_update_bits(priv->regmap, S2MU005_REG_CHGR_CTRL7,
++			   S2MU005_CHGR_FAST_CHG_CURR,
++			   FIELD_PREP(S2MU005_CHGR_FAST_CHG_CURR, (charge_ma - 100) / 50 + 1));
++}
++
++static void s2mu005_chgr_detect_work(struct work_struct *work)
++{
++	struct s2m_chgr *priv = container_of(to_delayed_work(work), struct s2m_chgr,
++					     detect_work);
++	unsigned int status, dev1;
++	int type;
++
++	if (regmap_read(priv->regmap, S2MU005_REG_CHGR_STATUS0, &status) ||
++	    regmap_read(priv->regmap, S2MU005_REG_MUIC_DEV1, &dev1)) {
++		dev_err(priv->dev, "failed to read cable state\n");
++		return;
++	}
++
++	if (!(status & S2MU005_CHGR_VBUS)) {
++		/* the next plug starts from the USB default */
++		type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
++		s2mu005_chgr_set_currents(priv, 500, 500);
++	} else if (dev1 & (S2MU005_MUIC_DCP | S2MU005_MUIC_T1_T2_CHG)) {
++		type = POWER_SUPPLY_USB_TYPE_DCP;
++		s2mu005_chgr_set_currents(priv, 1500, 2300);
++	} else if (dev1 & S2MU005_MUIC_CDP) {
++		type = POWER_SUPPLY_USB_TYPE_CDP;
++		s2mu005_chgr_set_currents(priv, 1500, 1500);
++	} else {
++		type = dev1 & S2MU005_MUIC_SDP ? POWER_SUPPLY_USB_TYPE_SDP :
++						 POWER_SUPPLY_USB_TYPE_UNKNOWN;
++		s2mu005_chgr_set_currents(priv, 500, 500);
++	}
++
++	if (type != priv->usb_type)
++		dev_info(priv->dev, "VBUS %s, MUIC DEV1 0x%02x\n",
++			 status & S2MU005_CHGR_VBUS ? "on" : "off", dev1);
++	priv->usb_type = type;
++	power_supply_changed(priv->psy);
++}
++
++static irqreturn_t s2mu005_chgr_cable_irq(int irq, void *data)
++{
++	struct s2m_chgr *priv = data;
++
++	/* BC1.2 finishes a moment after VBUS; attach comes then */
++	mod_delayed_work(system_wq, &priv->detect_work, msecs_to_jiffies(100));
++
++	return IRQ_HANDLED;
++}
++
++static int s2mu005_chgr_probe_standalone(struct s2m_chgr *priv,
++					 struct platform_device *pdev)
++{
++	static const char * const irqs[] = { "vbus", "attach", "detach" };
++	struct power_supply_battery_info *info;
++	int i, irq, ret;
++
++	ret = devm_delayed_work_autocancel(priv->dev, &priv->detect_work,
++					   s2mu005_chgr_detect_work);
++	if (ret)
++		return ret;
++
++	if (!power_supply_get_battery_info(priv->psy, &info)) {
++		int uv = info->constant_charge_voltage_max_uv > 0 ?
++			 info->constant_charge_voltage_max_uv :
++			 info->voltage_max_design_uv;
++
++		if (uv >= 3900000 && uv <= 4400000)
++			regmap_update_bits(priv->regmap, S2MU005_REG_CHGR_CTRL8,
++					   S2MU005_CHGR_VF_VBAT,
++					   FIELD_PREP(S2MU005_CHGR_VF_VBAT,
++						      (uv / 1000 - 3900) / 10));
++	}
++
++	for (i = 0; i < ARRAY_SIZE(irqs); i++) {
++		irq = platform_get_irq_byname(pdev, irqs[i]);
++		if (irq < 0)
++			return irq;
++		ret = devm_request_threaded_irq(priv->dev, irq, NULL,
++						s2mu005_chgr_cable_irq, IRQF_ONESHOT,
++						irqs[i], priv);
++		if (ret)
++			return dev_err_probe(priv->dev, ret, "failed to request %s IRQ\n",
++					     irqs[i]);
++	}
++
++	schedule_delayed_work(&priv->detect_work, 0);
++
++	return 0;
++}
++
+ static const enum power_supply_property s2mu005_chgr_properties[] = {
+ 	POWER_SUPPLY_PROP_ONLINE,
+ 	POWER_SUPPLY_PROP_USB_TYPE,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
+ };
+ 
+ static const struct power_supply_desc s2mu005_chgr_psy_desc = {
+@@ -264,15 +402,15 @@ static int s2m_chgr_probe(struct platform_device *pdev)
+ 				     pmic_drvdata->device_type);
+ 	}
+ 
+-	/* MUIC is mandatory. If unavailable, request probe deferral */
++	/* with a MUIC node, wait for its extcon; without one, detect here */
+ 	extcon_node = of_get_child_by_name(dev->parent->of_node, "muic");
+-	if (!extcon_node)
+-		return dev_err_probe(dev, -ENODEV, "MUIC node required but not found\n");
+-
+-	priv->extcon = extcon_find_edev_by_node(extcon_node);
+-	if (IS_ERR(priv->extcon))
+-		return -EPROBE_DEFER;
++	if (extcon_node) {
++		priv->extcon = extcon_find_edev_by_node(extcon_node);
++		if (IS_ERR(priv->extcon))
++			return -EPROBE_DEFER;
++	}
+ 
++	priv->usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
+ 	psy_cfg.drv_data = priv;
+ 	psy_cfg.fwnode = dev_fwnode(dev->parent);
+ 	priv->psy = devm_power_supply_register(dev, psy_desc, &psy_cfg);
+@@ -280,6 +418,9 @@ static int s2m_chgr_probe(struct platform_device *pdev)
+ 		return dev_err_probe(dev, PTR_ERR(priv->psy),
+ 				     "failed to register power supply subsystem\n");
+ 
++	if (!priv->extcon)
++		return s2mu005_chgr_probe_standalone(priv, pdev);
++
+ 	ret = devm_work_autocancel(dev, &priv->extcon_work, extcon_work_func);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to initialize extcon work\n");
+-- 
+2.53.0
+

@@ -1,0 +1,518 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 21/34] ASoC: samsung: abox: keep the DSP on, defer DSP
+ component controls, 64K RDMA buffer
+
+- probe by default (snd_soc_abox.enable=0 keeps it off); keep ABOX
+  runtime-active: without the DISPAUD domain driver nothing calls
+  abox_disable_callback(), and each runtime resume re-ran abox_enable()
+  over the running DSP (failsafe, random hangs when PipeWire starts)
+- DSP component controls (ERAP info, Forte Media) are added once the
+  card is bound; their values, the sampling rates, RDMA synchronization,
+  ERAP and sound type are cached and sent only to a running DSP, and
+  restored when it boots
+- the DSP wraps the RDMA position at 64 KiB: limit the playback buffer
+- routes of the missing UAIF4/DSIF go to their AIF widgets; guard the
+  component work against an unbound card
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ sound/soc/samsung/abox/abox.c      | 230 +++++++++++++++++++++++------
+ sound/soc/samsung/abox/abox.h      |   9 ++
+ sound/soc/samsung/abox/abox_rdma.c |  15 +-
+ 3 files changed, 201 insertions(+), 53 deletions(-)
+
+diff --git a/sound/soc/samsung/abox/abox.c b/sound/soc/samsung/abox/abox.c
+index cc2f697f2..add86554c 100644
+--- a/sound/soc/samsung/abox/abox.c
++++ b/sound/soc/samsung/abox/abox.c
+@@ -1607,11 +1607,31 @@ static int abox_codec_probe(struct snd_soc_component *codec)
+ 			ABOX_FUNC_CHAIN_RSRC_RECP_MASK,
+ 			ABOX_FUNC_CHAIN_RSRC_RECP_MASK);
+ 
++	/* controls of the DSP components that registered before the card */
++	schedule_work(&data->register_component_work);
++
+ 	return 0;
+ }
+ 
+ static void abox_codec_remove(struct snd_soc_component *codec)
+ {
++	struct abox_data *data = dev_get_drvdata(codec->dev);
++	struct abox_component *component;
++	struct abox_component_kcontrol_value *value, *tmp;
++
++	cancel_work_sync(&data->register_component_work);
++	data->codec = NULL;
++	/* their controls went away with the card */
++	for (component = data->components;
++			component - data->components < ARRAY_SIZE(data->components);
++			component++)
++		component->registered = false;
++	mutex_lock(&data->component_lock);
++	list_for_each_entry_safe(value, tmp, &data->component_values, list) {
++		list_del(&value->list);
++		devm_kfree(codec->dev, value);
++	}
++	mutex_unlock(&data->component_lock);
+ 	dev_info(codec->dev, "%s\n", __func__);
+ 
+ }
+@@ -1663,10 +1683,19 @@ static int abox_output_rate_put(struct snd_kcontrol *kcontrol,
+ 	struct device *dev = codec->dev;
+ 	unsigned int val = (unsigned int)ucontrol->value.integer.value[0];
+ 
++	struct abox_data *data = dev_get_drvdata(dev);
++	int ret;
++
+ 	dev_info(dev, "%s(%u, %d)\n", __func__, val, configmsg);
+ 
+-	pm_runtime_barrier(dev);
+-	return abox_output_rate_put_ipc(dev, val, configmsg);
++	/* DSP off: abox_restore_data() sends it when it boots */
++	if (pm_runtime_get_if_active(dev) <= 0) {
++		data->out_rate[configmsg] = val;
++		return 0;
++	}
++	ret = abox_output_rate_put_ipc(dev, val, configmsg);
++	pm_runtime_put_autosuspend(dev);
++	return ret;
+ }
+ 
+ static int abox_output_rate_get_mixer(struct snd_kcontrol *kcontrol,
+@@ -1860,10 +1889,19 @@ static int abox_synchronize_put(struct snd_kcontrol *kcontrol,
+ 	struct device *dev = codec->dev;
+ 	unsigned int val = (unsigned int)ucontrol->value.integer.value[0];
+ 
++	struct abox_data *data = dev_get_drvdata(dev);
++	int ret;
++
+ 	dev_info(dev, "%s(%u, %d)\n", __func__, val, id);
+ 
+-	pm_runtime_barrier(dev);
+-	return abox_synchronize_put_ipc(dev, val, id);
++	/* DSP off: abox_restore_data() sends it when it boots */
++	if (pm_runtime_get_if_active(dev) <= 0) {
++		data->rdma_synchronizer[id] = val;
++		return 0;
++	}
++	ret = abox_synchronize_put_ipc(dev, val, id);
++	pm_runtime_put_autosuspend(dev);
++	return ret;
+ }
+ 
+ static int abox_synchronize_get_rdma0(struct snd_kcontrol *kcontrol,
+@@ -2016,10 +2054,19 @@ static int abox_erap_handler_put(struct snd_kcontrol *kcontrol,
+ 	enum ABOX_ERAP_TYPE type = (enum ABOX_ERAP_TYPE)mc->reg;
+ 	unsigned int val = (unsigned int)ucontrol->value.integer.value[0];
+ 
++	struct abox_data *data = dev_get_drvdata(dev);
++	int ret;
++
+ 	dev_dbg(dev, "%s(%u, %d)\n", __func__, val, type);
+ 
+-	pm_runtime_barrier(dev);
+-	return abox_erap_handler_put_ipc(dev, type, val);
++	/* DSP off: abox_restore_data() sends it when it boots */
++	if (pm_runtime_get_if_active(dev) <= 0) {
++		data->erap_status[type] = val;
++		return 0;
++	}
++	ret = abox_erap_handler_put_ipc(dev, type, val);
++	pm_runtime_put_autosuspend(dev);
++	return ret;
+ }
+ 
+ static int abox_bt_sco_get_spk(struct snd_kcontrol *kcontrol,
+@@ -2223,10 +2270,15 @@ static int abox_sound_type_put(struct snd_kcontrol *kcontrol,
+ 
+ 	data->sound_type = snd_soc_enum_item_to_val(e, item[0]);
+ 
+-	msg.ipcid = IPC_SYSTEM;
+-	system_msg->msgtype = ABOX_SET_TYPE;
+-	system_msg->param1 = data->sound_type;
+-	abox_start_ipc_transaction(dev, msg.ipcid, &msg, sizeof(msg), 0, 0);
++	/* DSP off: abox_restore_data() sends it when it boots */
++	if (pm_runtime_get_if_active(dev) > 0) {
++		msg.ipcid = IPC_SYSTEM;
++		system_msg->msgtype = ABOX_SET_TYPE;
++		system_msg->param1 = data->sound_type;
++		abox_start_ipc_transaction(dev, msg.ipcid, &msg, sizeof(msg),
++				0, 0);
++		pm_runtime_put_autosuspend(dev);
++	}
+ 
+ 	dev_info(dev, "%s(%u)\n", __func__, data->sound_type);
+ 
+@@ -2930,7 +2982,7 @@ static const struct snd_soc_dapm_route abox_codec_dapm_routes[] = {
+ 	{"SPUSM", "UAIF1", "UAIF1 Capture"},
+ 	{"SPUSM", "UAIF2", "UAIF2 Capture"},
+ 	{"SPUSM", "UAIF3", "UAIF3 Capture"},
+-	{"SPUSM", "UAIF4", "UAIF4 Capture"},
++	{"SPUSM", "UAIF4", "UAIF4IN"},
+ 	{"SPUSM", "SPEEDY", "SPEEDY Capture"},
+ 
+ 	{"SIFSM", NULL, "SPUSM"},
+@@ -3063,8 +3115,8 @@ static const struct snd_soc_dapm_route abox_codec_dapm_routes[] = {
+ 	{"UAIF1 Playback", NULL, "UAIF SPK1"},
+ 	{"UAIF2 Playback", NULL, "UAIF SPK2"},
+ 	{"UAIF3 Playback", NULL, "UAIF SPK3"},
+-	{"UAIF4 Playback", NULL, "UAIF SPK4"},
+-	{"DSIF Playback", NULL, "DSIF SPK"},
++	{"UAIF4OUT", NULL, "UAIF SPK4"},
++	{"DSIFOUT", NULL, "DSIF SPK"},
+ 
+ 	{"RSRC0", "SIFS0", "Internal Capture"},
+ 	{"RSRC0", "SIFS1", "Internal Capture"},
+@@ -3088,7 +3140,7 @@ static const struct snd_soc_dapm_route abox_codec_dapm_routes[] = {
+ 	{"NSRC0", "UAIF1", "UAIF1 Capture"},
+ 	{"NSRC0", "UAIF2", "UAIF2 Capture"},
+ 	{"NSRC0", "UAIF3", "UAIF3 Capture"},
+-	{"NSRC0", "UAIF4", "UAIF4 Capture"},
++	{"NSRC0", "UAIF4", "UAIF4IN"},
+ 	{"NSRC0", "SPEEDY", "SPEEDY Capture"},
+ 	{"NSRC1", "SIFS0", "Internal Capture"},
+ 	{"NSRC1", "SIFS1", "Internal Capture"},
+@@ -3097,7 +3149,7 @@ static const struct snd_soc_dapm_route abox_codec_dapm_routes[] = {
+ 	{"NSRC1", "UAIF1", "UAIF1 Capture"},
+ 	{"NSRC1", "UAIF2", "UAIF2 Capture"},
+ 	{"NSRC1", "UAIF3", "UAIF3 Capture"},
+-	{"NSRC1", "UAIF4", "UAIF4 Capture"},
++	{"NSRC1", "UAIF4", "UAIF4IN"},
+ 	{"NSRC1", "SPEEDY", "SPEEDY Capture"},
+ 	{"NSRC2", "SIFS0", "Internal Capture"},
+ 	{"NSRC2", "SIFS1", "Internal Capture"},
+@@ -3106,7 +3158,7 @@ static const struct snd_soc_dapm_route abox_codec_dapm_routes[] = {
+ 	{"NSRC2", "UAIF1", "UAIF1 Capture"},
+ 	{"NSRC2", "UAIF2", "UAIF2 Capture"},
+ 	{"NSRC2", "UAIF3", "UAIF3 Capture"},
+-	{"NSRC2", "UAIF4", "UAIF4 Capture"},
++	{"NSRC2", "UAIF4", "UAIF4IN"},
+ 	{"NSRC2", "SPEEDY", "SPEEDY Capture"},
+ 	{"NSRC3", "SIFS0", "Internal Capture"},
+ 	{"NSRC3", "SIFS1", "Internal Capture"},
+@@ -3115,7 +3167,7 @@ static const struct snd_soc_dapm_route abox_codec_dapm_routes[] = {
+ 	{"NSRC3", "UAIF1", "UAIF1 Capture"},
+ 	{"NSRC3", "UAIF2", "UAIF2 Capture"},
+ 	{"NSRC3", "UAIF3", "UAIF3 Capture"},
+-	{"NSRC3", "UAIF4", "UAIF4 Capture"},
++	{"NSRC3", "UAIF4", "UAIF4IN"},
+ 	{"NSRC3", "SPEEDY", "SPEEDY Capture"},
+ 
+ 	{"PIFS0", NULL, "RSRC0"},
+@@ -4226,6 +4278,25 @@ static int abox_component_control_info(struct snd_kcontrol *kcontrol,
+ 
+ static ABOX_IPC_MSG abox_component_control_get_msg;
+ 
++static int abox_component_control_send(struct device *dev,
++		struct abox_component_kcontrol_value *value)
++{
++	ABOX_IPC_MSG msg;
++	struct IPC_SYSTEM_MSG *system_msg = &msg.msg.system;
++	unsigned int count = min_t(unsigned int, value->control->count,
++			ABOX_COMPONENT_CACHE_MAX);
++	int i;
++
++	for (i = 0; i < count; i++)
++		system_msg->bundle.param_s32[i] = value->cache[i];
++	msg.ipcid = IPC_SYSTEM;
++	system_msg->msgtype = ABOX_UPDATE_COMPONENT_CONTROL;
++	system_msg->param1 = value->desc->id;
++	system_msg->param2 = value->control->id;
++
++	return abox_request_ipc(dev, msg.ipcid, &msg, sizeof(msg), 0, 1);
++}
++
+ static int abox_component_control_get(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+@@ -4238,9 +4309,20 @@ static int abox_component_control_get(struct snd_kcontrol *kcontrol,
+ 	struct IPC_SYSTEM_MSG *system_msg = &msg->msg.system;
+ 	int i, result;
+ 
++	unsigned int count = min_t(unsigned int, value->control->count,
++			ABOX_COMPONENT_CACHE_MAX);
++
+ 	dev_dbg(dev, "%s\n", __func__);
+ 
+-	pm_runtime_barrier(dev);
++	mutex_lock(&data->component_lock);
++	/* an IPC to the powered off DSP reads garbage and trips failsafe */
++	if (pm_runtime_get_if_active(dev) <= 0) {
++		for (i = 0; i < count; i++)
++			ucontrol->value.integer.value[i] = value->cached ?
++					value->cache[i] : value->control->min;
++		mutex_unlock(&data->component_lock);
++		return 0;
++	}
+ 
+ 	msg->ipcid = IPC_SYSTEM;
+ 	system_msg->msgtype = ABOX_REQUEST_COMPONENT_CONTROL;
+@@ -4248,21 +4330,28 @@ static int abox_component_control_get(struct snd_kcontrol *kcontrol,
+ 	system_msg->param2 = value->control->id;
+ 	result = abox_request_ipc(dev, msg->ipcid, msg, sizeof(*msg), 0, 1);
+ 	if (IS_ERR_VALUE(result))
+-		return result;
++		goto out;
+ 
+ 	result = wait_event_timeout(data->ipc_wait_queue,
+ 			system_msg->msgtype == ABOX_REPORT_COMPONENT_CONTROL,
+ 			msecs_to_jiffies(1000));
+-	if (system_msg->msgtype != ABOX_REPORT_COMPONENT_CONTROL)
+-		return -ETIME;
++	if (system_msg->msgtype != ABOX_REPORT_COMPONENT_CONTROL) {
++		result = -ETIME;
++		goto out;
++	}
+ 
+-	for (i = 0; i < value->control->count; i++) {
+-		long val = (long)system_msg->bundle.param_s32[i];
++	for (i = 0; i < count; i++) {
++		int val = system_msg->bundle.param_s32[i];
+ 
+ 		ucontrol->value.integer.value[i] = val;
++		value->cache[i] = val;
+ 	}
+-
+-	return 0;
++	value->cached = true;
++	result = 0;
++out:
++	pm_runtime_put_autosuspend(dev);
++	mutex_unlock(&data->component_lock);
++	return result;
+ }
+ 
+ static int abox_component_control_put(struct snd_kcontrol *kcontrol,
+@@ -4270,29 +4359,42 @@ static int abox_component_control_put(struct snd_kcontrol *kcontrol,
+ {
+ 	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
+ 	struct device *dev = codec->dev;
++	struct abox_data *data = dev_get_drvdata(dev);
+ 	struct abox_component_kcontrol_value *value =
+ 			(void *)kcontrol->private_value;
+-	ABOX_IPC_MSG msg;
+-	struct IPC_SYSTEM_MSG *system_msg = &msg.msg.system;
+-	int i;
++	unsigned int count = min_t(unsigned int, value->control->count,
++			ABOX_COMPONENT_CACHE_MAX);
++	int i, ret = 0;
+ 
+ 	dev_dbg(dev, "%s\n", __func__);
+ 
+-	pm_runtime_barrier(dev);
+-
+-	for (i = 0; i < value->control->count; i++) {
+-		int val = (int)ucontrol->value.integer.value[i];
+-
+-		system_msg->bundle.param_s32[i] = val;
+-		dev_dbg(dev, "%s[%d] <= %d", kcontrol->id.name, i, val);
++	mutex_lock(&data->component_lock);
++	for (i = 0; i < count; i++) {
++		value->cache[i] = (int)ucontrol->value.integer.value[i];
++		dev_dbg(dev, "%s[%d] <= %d", kcontrol->id.name, i,
++				value->cache[i]);
++	}
++	value->cached = true;
++	value->dirty = true;
++	/* while the DSP is off, abox_restore_data() sends it on boot */
++	if (pm_runtime_get_if_active(dev) > 0) {
++		ret = abox_component_control_send(dev, value);
++		pm_runtime_put_autosuspend(dev);
+ 	}
++	mutex_unlock(&data->component_lock);
++	return ret;
++}
+ 
+-	msg.ipcid = IPC_SYSTEM;
+-	system_msg->msgtype = ABOX_UPDATE_COMPONENT_CONTROL;
+-	system_msg->param1 = value->desc->id;
+-	system_msg->param2 = value->control->id;
++static void abox_restore_component_controls(struct device *dev,
++		struct abox_data *data)
++{
++	struct abox_component_kcontrol_value *value;
+ 
+-	return abox_request_ipc(dev, msg.ipcid, &msg, sizeof(msg), 0, 1);
++	mutex_lock(&data->component_lock);
++	list_for_each_entry(value, &data->component_values, list)
++		if (value->dirty)
++			abox_component_control_send(dev, value);
++	mutex_unlock(&data->component_lock);
+ }
+ 
+ #define ABOX_COMPONENT_KCONTROL(xname, xdesc, xcontrol)	\
+@@ -4317,6 +4419,10 @@ static int __abox_register_component_work_func(struct device *dev,
+ 
+ 	if (!component->desc || component->registered)
+ 		return -EEXIST;
++	/* the DSP announces its components before the card is bound;
++	 * abox_codec_probe() runs this work again */
++	if (!data->codec || !data->codec->card)
++		return -EAGAIN;
+ 
+ 	component->registered = true;
+ 	for (i = 0; i < desc->control_count; i++) {
+@@ -4324,13 +4430,16 @@ static int __abox_register_component_work_func(struct device *dev,
+ 		struct abox_component_kcontrol_value *value;
+ 		char kcontrol_name[64];
+ 
+-		value = devm_kmalloc(dev, sizeof(*value), GFP_KERNEL);
++		value = devm_kzalloc(dev, sizeof(*value), GFP_KERNEL);
+ 		if (IS_ERR_OR_NULL(value)) {
+ 			dev_err(dev, "%s: kmalloc fail\n", __func__);
+ 			continue;
+ 		}
+ 		value->desc = desc;
+ 		value->control = control;
++		mutex_lock(&data->component_lock);
++		list_add_tail(&value->list, &data->component_values);
++		mutex_unlock(&data->component_lock);
+ 
+ 		snprintf(kcontrol_name, sizeof(kcontrol_name), "%s %s",
+ 				desc->name, control->name);
+@@ -4339,10 +4448,8 @@ static int __abox_register_component_work_func(struct device *dev,
+ 				devm_kstrdup(dev, kcontrol_name, GFP_KERNEL);
+ 		abox_component_kcontrols[0].private_value =
+ 				(unsigned long)value;
+-		if (data->codec) {
+-			snd_soc_add_component_controls(data->codec,
+-					abox_component_kcontrols, 1);
+-		}
++		snd_soc_add_component_controls(data->codec,
++				abox_component_kcontrols, 1);
+ 	}
+ 	return 0;
+ }
+@@ -4432,6 +4539,19 @@ static void abox_restore_data(struct device *dev)
+ 	abox_erap_handler_put_ipc(dev, ERAP_VI_SENSE, data->erap_status[ERAP_VI_SENSE]);
+ 	abox_restore_erap_status(dev, data, ERAP_ECHO_CANCEL);
+ 	abox_restore_erap_status(dev, data, ERAP_VI_SENSE);
++
++	if (data->sound_type) {
++		ABOX_IPC_MSG msg;
++		struct IPC_SYSTEM_MSG *system_msg = &msg.msg.system;
++
++		msg.ipcid = IPC_SYSTEM;
++		system_msg->msgtype = ABOX_SET_TYPE;
++		system_msg->param1 = data->sound_type;
++		abox_start_ipc_transaction(dev, msg.ipcid, &msg, sizeof(msg),
++				0, 0);
++	}
++
++	abox_restore_component_controls(dev, data);
+ }
+ 
+ static void abox_boot_done_work_func(struct work_struct *work)
+@@ -5642,14 +5762,14 @@ static DEVICE_ATTR_WO(calliope_debug);
+ static DEVICE_ATTR_WO(calliope_cmd);
+ 
+ /*
+- * Bring-up: the DSP is booted from probe (runtime resume). Keep ABOX off at
+- * boot unless snd_soc_abox.enable=1, or bind it by hand later:
++ * The DSP is booted from probe (runtime resume). snd_soc_abox.enable=0 keeps
++ * ABOX off at boot; it can then be bound by hand:
+  *   echo 1 > /sys/module/snd_soc_abox/parameters/enable
+  *   echo 14a50000.abox > /sys/bus/platform/drivers/samsung-abox/bind
+  */
+-static bool enable;
++static bool enable = true;
+ module_param(enable, bool, 0644);
+-MODULE_PARM_DESC(enable, "Allow probing ABOX");
++MODULE_PARM_DESC(enable, "Allow probing ABOX (default on)");
+ 
+ static int samsung_abox_probe(struct platform_device *pdev)
+ {
+@@ -5688,6 +5808,8 @@ static int samsung_abox_probe(struct platform_device *pdev)
+ 	INIT_WORK(&data->change_big_freq_work, abox_change_big_freq_work_func);
+ 	INIT_WORK(&data->change_hmp_boost_work,
+ 			abox_change_hmp_boost_work_func);
++	INIT_LIST_HEAD(&data->component_values);
++	mutex_init(&data->component_lock);
+ 	INIT_WORK(&data->register_component_work,
+ 			abox_register_component_work_func);
+ 	INIT_WORK(&data->boot_done_work, abox_boot_done_work_func);
+@@ -5902,6 +6024,16 @@ static int samsung_abox_probe(struct platform_device *pdev)
+ 			&abox_codec_regmap_config);
+ 
+ 	pm_runtime_enable(dev);
++	/*
++	 * Downstream, the DISPAUD power domain driver calls
++	 * abox_disable_callback() before it cuts the power, and the next
++	 * runtime resume boots the DSP from scratch. Mainline has no such
++	 * domain: runtime suspend only cleared data->enabled while the DSP kept
++	 * running, and every resume ran abox_enable() over it ("abox early wake
++	 * up"), which tripped failsafe and could hang the SoC. Keep ABOX on;
++	 * when idle it runs at the lowest CPU gear.
++	 */
++	pm_runtime_forbid(dev);
+ 	pm_runtime_get(dev);
+ 
+ 	data->pm_nb.notifier_call = abox_pm_notifier;
+diff --git a/sound/soc/samsung/abox/abox.h b/sound/soc/samsung/abox/abox.h
+index 2c3769953..78c1e385b 100644
+--- a/sound/soc/samsung/abox/abox.h
++++ b/sound/soc/samsung/abox/abox.h
+@@ -559,9 +559,16 @@ struct abox_component {
+ 	bool registered;
+ };
+ 
++#define ABOX_COMPONENT_CACHE_MAX 8
++
+ struct abox_component_kcontrol_value {
+ 	struct ABOX_COMPONENT_DESCRIPTIOR *desc;
+ 	struct ABOX_COMPONENT_CONTROL *control;
++	/* last value, served and kept while the DSP is off */
++	struct list_head list;
++	int cache[ABOX_COMPONENT_CACHE_MAX];
++	bool cached;	/* cache holds a value */
++	bool dirty;	/* set from userspace, resent when the DSP boots */
+ };
+ 
+ struct abox_data {
+@@ -635,6 +642,8 @@ struct abox_data {
+ 	unsigned int erap_status[ERAP_TYPE_COUNT];
+ 	struct work_struct register_component_work;
+ 	struct abox_component components[16];
++	struct list_head component_values;
++	struct mutex component_lock;	/* cache and component_values */
+ 	struct list_head irq_actions;
+ 	bool enabled;
+ 	enum calliope_state calliope_state;
+diff --git a/sound/soc/samsung/abox/abox_rdma.c b/sound/soc/samsung/abox/abox_rdma.c
+index 70949def2..8e56ea806 100644
+--- a/sound/soc/samsung/abox/abox_rdma.c
++++ b/sound/soc/samsung/abox/abox_rdma.c
+@@ -1090,6 +1090,13 @@ static const struct snd_kcontrol_new abox_rdma_compr_controls[] = {
+ };
+ #endif /* ABOX_RDMA_COMPRESS */
+ 
++/*
++ * The DSP wraps the RDMA read position at 64 KiB: with a 128 KiB buffer the
++ * pointer jumped back to 0 in the middle of it (stale audio from aplay,
++ * PipeWire restarting the stream every 0.34 s at 48 kHz S16 stereo).
++ */
++#define RDMA_BUFFER_BYTES_MAX	(SZ_64K)
++
+ static const struct snd_pcm_hardware abox_rdma_hardware = {
+ 	.info			= SNDRV_PCM_INFO_INTERLEAVED
+ 				| SNDRV_PCM_INFO_BLOCK_TRANSFER
+@@ -1098,11 +1105,11 @@ static const struct snd_pcm_hardware abox_rdma_hardware = {
+ 	.formats		= ABOX_SAMPLE_FORMATS,
+ 	.channels_min		= 1,
+ 	.channels_max		= 8,
+-	.buffer_bytes_max	= BUFFER_BYTES_MAX,
++	.buffer_bytes_max	= RDMA_BUFFER_BYTES_MAX,
+ 	.period_bytes_min	= PERIOD_BYTES_MIN,
+-	.period_bytes_max	= PERIOD_BYTES_MAX,
+-	.periods_min		= BUFFER_BYTES_MAX / PERIOD_BYTES_MAX,
+-	.periods_max		= BUFFER_BYTES_MAX / PERIOD_BYTES_MIN,
++	.period_bytes_max	= RDMA_BUFFER_BYTES_MAX / 2,
++	.periods_min		= 2,
++	.periods_max		= RDMA_BUFFER_BYTES_MAX / PERIOD_BYTES_MIN,
+ };
+ 
+ static irqreturn_t abox_rdma_irq_handler(int irq, void *dev_id,
+-- 
+2.53.0
+

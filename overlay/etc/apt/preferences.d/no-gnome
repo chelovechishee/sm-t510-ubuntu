@@ -1,0 +1,7 @@
+# The desktop is Xfce with LightDM. network-manager-applet recommends
+# "gnome-shell | notification-daemon", and apt takes the first: GNOME Shell,
+# then GDM as the display manager and the GNOME session as the default.
+# With these never installable apt takes xfce4-notifyd instead
+Package: gnome-shell gdm3 ubuntu-session nautilus xdg-desktop-portal-gnome
+Pin: release a=*
+Pin-Priority: -1

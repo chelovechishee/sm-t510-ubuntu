@@ -1,0 +1,14 @@
+[Unit]
+Description=Samsung firmware for the audio DSP and DVFS, re-probe their drivers
+DefaultDependencies=no
+WantsMountsFor=/vendor
+After=systemd-remount-fs.service systemd-udevd.service
+Before=sysinit.target display-manager.service t510-audio.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/t510-firmware
+
+[Install]
+WantedBy=sysinit.target

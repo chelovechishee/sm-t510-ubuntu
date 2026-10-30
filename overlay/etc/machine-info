@@ -1,0 +1,4 @@
+# hostnamectl / GNOME "About" read the model from DMI, which ARM boards lack
+CHASSIS=tablet
+HARDWARE_VENDOR=Samsung
+HARDWARE_MODEL="Galaxy Tab A 10.1 (2019) SM-T510"

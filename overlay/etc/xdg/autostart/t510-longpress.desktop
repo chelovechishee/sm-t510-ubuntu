@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Long-press right click (t510)
+Comment=Hold a finger still for 0.7 s: right click when the time is up
+Exec=/usr/local/bin/longpress 700 30
+OnlyShowIn=XFCE;

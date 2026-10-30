@@ -1,0 +1,248 @@
+#!/usr/bin/python3
+"""Rotate the SM-T510 screen and touchscreen, then restart the X session.
+
+The rotation is part of the X configuration (fbdev can only rotate at
+start-up), so the graphical session is restarted and open windows are closed.
+Both device configurations are written: /etc/X11/t510/kms.conf (modesetting
++ glamor on the exynos7885-decon KMS device) and fbdev.conf (fallback); the X
+wrapper /usr/local/sbin/t510-xorg picks one.
+
+usage: t510-rotate auto | portrait | portrait-inverted | landscape |
+                  landscape-cw | landscape-ccw | next | status | refresh
+       "auto" turns the screen the way the tablet is held, any of the four
+       (nothing changes when it lies flat or there is no accelerometer);
+       "portrait" and "landscape" pick the side from the accelerometer
+       (portrait / landscape-cw when it is flat or absent); "status" also
+       prints the orientation the tablet is held in; "next" turns the screen
+       90 degrees clockwise; "refresh" rewrites the configuration files for
+       the current rotation without a restart.
+"""
+import glob
+import os
+import pwd
+import subprocess
+import sys
+
+STATE = "/var/lib/t510/rotation"
+FBDEV_CONF = "/etc/X11/t510/fbdev.conf"
+KMS_CONF = "/etc/X11/t510/kms.conf"
+KMS_DEV = "/dev/dri/by-path/platform-14860000.display-controller-card"
+TOUCH_CONF = "/etc/X11/xorg.conf.d/30-t510-touch.conf"
+AUDIO_CONF = "/etc/pipewire/pipewire.conf.d/t510-audio.conf"
+ROTATE_AUTOLOGIN = "/etc/lightdm/lightdm.conf.d/60-t510-rotate-autologin.conf"
+
+# The two speakers are fixed in the case: verified L/R in landscape-ccw,
+# so the other landscape side swaps them
+CHANNELS = {
+    "portrait": "FL FR",
+    "landscape-cw": "FR FL",
+    "portrait-inverted": "FR FL",
+    "landscape-ccw": "FL FR",
+}
+
+# fbdev "Rotate", the same rotation for RandR (modesetting) and the matching
+# libinput calibration matrix
+ROTATIONS = {
+    "portrait": (None, "normal", "1 0 0 0 1 0 0 0 1"),
+    "landscape-cw": ("CW", "right", "0 1 0 -1 0 1 0 0 1"),
+    "portrait-inverted": ("UD", "inverted", "-1 0 1 0 -1 1 0 0 1"),
+    "landscape-ccw": ("CCW", "left", "0 -1 1 1 0 0 0 0 1"),
+}
+
+# "next": each step turns the picture 90 degrees clockwise
+CYCLE = ["portrait", "landscape-cw", "portrait-inverted", "landscape-ccw"]
+
+SERVER_FLAGS = (
+    "# Blanking: xfce4-power-manager drives DPMS \"off\" (KMS: CRTC off, backlight\n"
+    "# off); only the off timeout is used. The render-only GPU (Panfrost) is not\n"
+    "# a separate X screen.\n"
+    'Section "ServerFlags"\n'
+    '\tOption "BlankTime" "0"\n'
+    '\tOption "AutoAddGPU" "false"\n'
+    "EndSection\n")
+
+# Accelerometer (ST LIS2DS12, IIO): the axis and sign of gravity for each
+# screen orientation that is upright for the way the tablet is held
+# (measured: upside down +x, lying on the right side -y).
+GRAVITY = {
+    "portrait": ("x", -1),
+    "landscape-ccw": ("y", -1),
+    "portrait-inverted": ("x", 1),
+    "landscape-cw": ("y", 1),
+}
+# gravity must lie mostly in the screen plane (not lying flat) and clearly
+# along one screen axis
+MIN_PLANAR = 0.6
+MIN_DOMINANCE = 1.5
+
+
+def accel_device():
+    for path in sorted(glob.glob("/sys/bus/iio/devices/iio:device*")):
+        if os.path.exists(path + "/in_accel_x_raw"):
+            return path
+    return None
+
+
+def read_accel():
+    """Return {"x", "y", "z"} raw accelerometer counts, or None."""
+    dev = accel_device()
+    if not dev:
+        return None
+    try:
+        return {a: int(open("%s/in_accel_%s_raw" % (dev, a)).read()) for a in "xyz"}
+    except (OSError, ValueError):
+        return None
+
+
+def sense(acc=None):
+    """Screen orientation that is upright for how the tablet is held, or None."""
+    acc = acc or read_accel()
+    if not acc:
+        return None
+    g = sum(v * v for v in acc.values()) ** 0.5
+    x, y = acc["x"], acc["y"]
+    if not g or max(abs(x), abs(y)) < MIN_PLANAR * g:
+        return None
+    if abs(x) >= MIN_DOMINANCE * abs(y):
+        axis, sign = "x", 1 if x > 0 else -1
+    elif abs(y) >= MIN_DOMINANCE * abs(x):
+        axis, sign = "y", 1 if y > 0 else -1
+    else:
+        return None
+    for name, grav in GRAVITY.items():
+        if grav == (axis, sign):
+            return name
+    return None
+
+
+def write_configs(name):
+    rotate, randr, matrix = ROTATIONS[name]
+    rotate_line = '\tOption "Rotate" "%s"\n' % rotate if rotate else ""
+    os.makedirs(os.path.dirname(KMS_CONF), exist_ok=True)
+    with open(FBDEV_CONF, "w") as f:
+        f.write(
+            "# SM-T510 fallback: Samsung decon framebuffer, plain fbdev with shadow fb\n"
+            "# Written by t510-rotate (%s)\n"
+            'Section "Device"\n'
+            '\tIdentifier "decon"\n'
+            '\tDriver "fbdev"\n'
+            '\tOption "fbdev" "/dev/fb0"\n'
+            '\tOption "ShadowFB" "on"\n'
+            "%s"
+            "EndSection\n\n%s" % (name, rotate_line, SERVER_FLAGS))
+    with open(KMS_CONF, "w") as f:
+        f.write(
+            "# SM-T510: KMS (exynos7885-decon) + glamor on the Mali GPU (Panfrost)\n"
+            "# Written by t510-rotate (%s)\n"
+            'Section "Device"\n'
+            '\tIdentifier "t510-kms"\n'
+            '\tDriver "modesetting"\n'
+            '\tOption "kmsdev" "%s"\n'
+            '\tOption "AccelMethod" "glamor"\n'
+            '\tOption "Monitor-DSI-1" "t510-panel"\n'
+            "EndSection\n\n"
+            'Section "Monitor"\n'
+            '\tIdentifier "t510-panel"\n'
+            '\tOption "Rotate" "%s"\n'
+            "EndSection\n\n%s" % (name, KMS_DEV, randr, SERVER_FLAGS))
+    with open(TOUCH_CONF, "w") as f:
+        f.write(
+            "# Written by t510-rotate (%s): keep touch aligned with the rotated screen\n"
+            'Section "InputClass"\n'
+            '\tIdentifier "t510 touchscreen rotation"\n'
+            '\tMatchIsTouchscreen "on"\n'
+            '\tMatchDriver "libinput"\n'
+            '\tOption "CalibrationMatrix" "%s"\n'
+            "EndSection\n" % (name, matrix))
+    with open(AUDIO_CONF, "w") as f:
+        f.write(
+            "# SM-T510: ABOX PCMs are not auto-probed (the DSP firmware crashes on odd\n"
+            "# formats, see /etc/wireplumber/main.lua.d/51-t510.lua). One fixed-format sink\n"
+            "# on RDMA0; t510-audio.service routes it to the speakers or the headphones.\n"
+            "# Channel order written by t510-rotate (%s).\n"
+            "context.objects = [\n"
+            "    {   factory = adapter\n"
+            "        args = {\n"
+            "            factory.name           = api.alsa.pcm.sink\n"
+            '            node.name              = "t510-output"\n'
+            '            node.description       = "Built-in Audio"\n'
+            '            media.class            = "Audio/Sink"\n'
+            '            api.alsa.path          = "hw:0,0"\n'
+            '            audio.format           = "S16LE"\n'
+            "            audio.rate             = 48000\n"
+            "            audio.channels         = 2\n"
+            "            audio.position         = [ %s ]\n"
+            "            api.alsa.period-size   = 1024\n"
+            "            api.alsa.headroom      = 1024\n"
+            "            priority.session       = 1000\n"
+            "            priority.driver        = 1000\n"
+            "        }\n"
+            "        # no ABOX card on the mainline kernel yet: keep PipeWire running\n"
+            "        flags = [ nofail ]\n"
+            "    }\n"
+            "]\n" % (name, CHANNELS[name]))
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as f:
+        f.write(name + "\n")
+
+
+def current():
+    try:
+        with open(STATE) as f:
+            return f.read().strip()
+    except OSError:
+        return "portrait"
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    want = sys.argv[1]
+    if want == "status":
+        print(current(), sense(), read_accel())
+        return
+    if os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", "-n", sys.argv[0], want])
+
+    if want == "refresh":
+        write_configs(current())
+        return
+    if want == "next":
+        cur = current()
+        want = CYCLE[(CYCLE.index(cur) + 1) % len(CYCLE)] if cur in CYCLE else CYCLE[1]
+    if want == "auto":
+        want = sense() or current()
+    elif want == "landscape":
+        held = sense()
+        want = held if held in ("landscape-cw", "landscape-ccw") else "landscape-cw"
+    elif want == "portrait":
+        # like "landscape": the side the tablet is held, upside down included
+        held = sense()
+        want = held if held == "portrait-inverted" else "portrait"
+    if want not in ROTATIONS:
+        sys.exit(__doc__)
+    if want == current():
+        return
+
+    write_configs(want)
+    # PipeWire runs in the user manager, which can outlive the X session
+    for uid in os.listdir("/run/user"):
+        if uid.isdigit() and int(uid) >= 1000:
+            user = pwd.getpwuid(int(uid)).pw_name
+            subprocess.run(["systemctl", "--user", "--machine=%s@.host" % user,
+                            "--no-block", "restart",
+                            "pipewire", "pipewire-pulse", "wireplumber"])
+    # The restart would end at the password prompt: log the session user
+    # straight back in, once (t510-display-setup removes this file)
+    session_user = os.environ.get("SUDO_USER")
+    if session_user:
+        with open(ROTATE_AUTOLOGIN, "w") as f:
+            f.write("# written by t510-rotate, removed by t510-display-setup\n"
+                    "[Seat:*]\nautologin-user=%s\nautologin-user-timeout=0\n"
+                    "autologin-session=xfce\n" % session_user)
+    # this script usually runs inside the session it is about to end
+    subprocess.run(["systemctl", "--no-block", "restart", "lightdm"], check=True)
+
+
+if __name__ == "__main__":
+    main()

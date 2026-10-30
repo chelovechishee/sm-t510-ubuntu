@@ -1,0 +1,18 @@
+[Unit]
+Description=Disable the Android low-memory killer (Ubuntu uses the kernel OOM killer)
+# The Samsung kernel's lowmemorykiller counts "cache" as file pages minus
+# shmem. DRM/KMS buffers (t510_drm) are shmem, so with the desktop on the GPU
+# that count goes negative and LMK kills session processes (dbus, pipewire...)
+# with plenty of memory free. All thresholds at 0 means it never fires.
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=sysinit.target
+ConditionPathExists=/sys/module/lowmemorykiller/parameters/minfree
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo 0,0,0,0 > /sys/module/lowmemorykiller/parameters/minfree'
+
+[Install]
+WantedBy=sysinit.target

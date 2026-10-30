@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 03/34] phy: exynos5-usbdrd: add Exynos7885 support; arm64:
+ dts: exynos7885/gta3xlwifi: add USB DRD
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../bindings/phy/samsung,usb3-drd-phy.yaml    |  2 ++
+ .../bindings/usb/samsung,exynos-dwc3.yaml     |  4 ++-
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi    | 34 +++++++++++++++++++
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts | 13 +++++++
+ drivers/phy/samsung/phy-exynos5-usbdrd.c      | 15 ++++++++
+ include/linux/soc/samsung/exynos-regs-pmu.h   |  3 ++
+ 6 files changed, 70 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/phy/samsung,usb3-drd-phy.yaml b/Documentation/devicetree/bindings/phy/samsung,usb3-drd-phy.yaml
+index a1b3d9e6a..f644a4aa1 100644
+--- a/Documentation/devicetree/bindings/phy/samsung,usb3-drd-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/samsung,usb3-drd-phy.yaml
+@@ -32,6 +32,7 @@ properties:
+       - samsung,exynos5433-usbdrd-phy
+       - samsung,exynos7-usbdrd-phy
+       - samsung,exynos7870-usbdrd-phy
++      - samsung,exynos7885-usbdrd-phy
+       - samsung,exynos850-usbdrd-phy
+       - samsung,exynos990-usbdrd-phy
+       - samsung,exynosautov920-usb31drd-combo-ssphy
+@@ -234,6 +235,7 @@ allOf:
+               - samsung,exynos5250-usbdrd-phy
+               - samsung,exynos5420-usbdrd-phy
+               - samsung,exynos7870-usbdrd-phy
++              - samsung,exynos7885-usbdrd-phy
+               - samsung,exynos850-usbdrd-phy
+               - samsung,exynos990-usbdrd-phy
+               - samsung,exynosautov920-usb31drd-combo-ssphy
+diff --git a/Documentation/devicetree/bindings/usb/samsung,exynos-dwc3.yaml b/Documentation/devicetree/bindings/usb/samsung,exynos-dwc3.yaml
+index 8af0143c3..25536859e 100644
+--- a/Documentation/devicetree/bindings/usb/samsung,exynos-dwc3.yaml
++++ b/Documentation/devicetree/bindings/usb/samsung,exynos-dwc3.yaml
+@@ -25,7 +25,9 @@ properties:
+           - const: samsung,exynos8890-dwusb3
+           - const: samsung,exynos7-dwusb3
+       - items:
+-          - const: samsung,exynos990-dwusb3
++          - enum:
++              - samsung,exynos7885-dwusb3
++              - samsung,exynos990-dwusb3
+           - const: samsung,exynos850-dwusb3
+ 
+   '#address-cells':
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index 6b994b487..20c28f6ba 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -316,6 +316,40 @@ mmc_0: mmc@13500000 {
+ 			status = "disabled";
+ 		};
+ 
++		usbdrd_phy: phy@135d0000 {
++			compatible = "samsung,exynos7885-usbdrd-phy";
++			reg = <0x135d0000 0x100>;
++			clocks = <&cmu_fsys CLK_FSYS_USB30DRD_ACLK_20PHYCTRL>,
++				 <&cmu_fsys CLK_FSYS_USB20PHY_CLKCORE>;
++			clock-names = "phy", "ref";
++			samsung,pmu-syscon = <&pmu_system_controller>;
++			#phy-cells = <1>;
++
++			status = "disabled";
++		};
++
++		usbdrd: usb@13600000 {
++			compatible = "samsung,exynos7885-dwusb3",
++				     "samsung,exynos850-dwusb3";
++			ranges = <0x0 0x13600000 0x10000>;
++			clocks = <&cmu_fsys CLK_FSYS_USB30DRD_BUS_CLK_EARLY>,
++				 <&cmu_fsys CLK_FSYS_USB30DRD_REF_CLK>;
++			clock-names = "bus_early", "ref";
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			status = "disabled";
++
++			usbdrd_dwc3: usb@0 {
++				compatible = "snps,dwc3";
++				reg = <0x0 0x10000>;
++				interrupts = <GIC_SPI 135 IRQ_TYPE_LEVEL_HIGH>;
++				phys = <&usbdrd_phy 0>;
++				phy-names = "usb2-phy";
++				maximum-speed = "high-speed";
++			};
++		};
++
+ 		serial_0: serial@13800000 {
+ 			compatible = "samsung,exynos7885-uart",
+ 				     "samsung,exynos5433-uart";
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index 543c9c21b..ddcbf1ae6 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -149,6 +149,19 @@ &oscclk {
+ 	clock-frequency = <26000000>;
+ };
+ 
++&usbdrd {
++	status = "okay";
++};
++
++&usbdrd_dwc3 {
++	/* VBUS and role come from the S2MM005 CCIC, not supported yet */
++	dr_mode = "peripheral";
++};
++
++&usbdrd_phy {
++	status = "okay";
++};
++
+ &pinctrl_alive {
+ 	key_volup: key-volup-pins {
+ 		samsung,pins = "gpa1-5";
+diff --git a/drivers/phy/samsung/phy-exynos5-usbdrd.c b/drivers/phy/samsung/phy-exynos5-usbdrd.c
+index 8711a3b62..9aed922ad 100644
+--- a/drivers/phy/samsung/phy-exynos5-usbdrd.c
++++ b/drivers/phy/samsung/phy-exynos5-usbdrd.c
+@@ -2079,6 +2079,18 @@ static const struct exynos5_usbdrd_phy_drvdata exynos850_usbdrd_phy = {
+ 	.n_regulators		= ARRAY_SIZE(exynos5_regulator_names),
+ };
+ 
++static const struct exynos5_usbdrd_phy_drvdata exynos7885_usbdrd_phy = {
++	.phy_cfg		= phy_cfg_exynos850,
++	.phy_ops		= &exynos850_usbdrd_phy_ops,
++	.pmu_offset_usbdrd0_phy	= EXYNOS7885_USBDRD_PHY_CONTROL,
++	.clk_names		= exynos5_clk_names,
++	.n_clks			= ARRAY_SIZE(exynos5_clk_names),
++	.core_clk_names		= exynos5_core_clk_names,
++	.n_core_clks		= ARRAY_SIZE(exynos5_core_clk_names),
++	.regulator_names	= exynos5_regulator_names,
++	.n_regulators		= ARRAY_SIZE(exynos5_regulator_names),
++};
++
+ static const struct exynos5_usbdrd_phy_tuning exynos990_tunes_utmi_postinit[] = {
+ 	PHY_TUNING_ENTRY_PHY(EXYNOS850_DRD_HSPPARACON,
+ 			     (HSPPARACON_TXVREF |
+@@ -2897,6 +2909,9 @@ static const struct of_device_id exynos5_usbdrd_phy_of_match[] = {
+ 	}, {
+ 		.compatible = "samsung,exynos7870-usbdrd-phy",
+ 		.data = &exynos7870_usbdrd_phy
++	}, {
++		.compatible = "samsung,exynos7885-usbdrd-phy",
++		.data = &exynos7885_usbdrd_phy
+ 	}, {
+ 		.compatible = "samsung,exynos850-usbdrd-phy",
+ 		.data = &exynos850_usbdrd_phy
+diff --git a/include/linux/soc/samsung/exynos-regs-pmu.h b/include/linux/soc/samsung/exynos-regs-pmu.h
+index db8a7ca81..07c4220a0 100644
+--- a/include/linux/soc/samsung/exynos-regs-pmu.h
++++ b/include/linux/soc/samsung/exynos-regs-pmu.h
+@@ -665,6 +665,9 @@
+ /* For Exynos990 */
+ #define EXYNOS990_PHY_CTRL_USB20				(0x72C)
+ 
++/* For Exynos7885 */
++#define EXYNOS7885_USBDRD_PHY_CONTROL				(0x0674)
++
+ /* For Exynos7870 */
+ #define EXYNOS7870_MIPI_PHY_CONTROL0				(0x070c)
+ #define EXYNOS7870_MIPI_PHY_CONTROL1				(0x0714)
+-- 
+2.53.0
+

@@ -1,0 +1,108 @@
+# Packages scripts/image-from-system.sh purges from a working tablet's system
+# before it becomes the public image. One name or dpkg pattern per line ("*"
+# globs); "#" starts a comment. What they pulled in goes with apt autoremove,
+# everything of scripts/image-packages.txt and xubuntu-desktop stays.
+
+# games
+aisleriot
+enigma*
+gnome-mines
+gnome-sudoku
+pokerth*
+sgt-*
+sl
+
+# programs of the one who set the tablet up, not of the image
+claude-desktop
+happ
+hexchat*
+
+# building, debugging and benchmarking (the image builds its own small
+# programs from tools/ and drops the compilers again); never gcc-NN-base,
+# the runtime libraries of everything
+build-essential
+dpkg-dev
+make-guile
+gcc
+gcc-[0-9][0-9]
+gcc-[0-9][0-9]-aarch64-linux-gnu
+gcc-aarch64-linux-gnu
+g++
+g++-[0-9][0-9]
+g++-[0-9][0-9]-aarch64-linux-gnu
+g++-aarch64-linux-gnu
+gdb
+strace
+bison
+flex
+make
+m4
+meson
+ninja-build
+pkgconf
+pkgconf-bin
+pkg-config
+fakeroot
+lintian
+mkdocs*
+ghp-import
+pipx
+python3.*-dbg
+python3.*-venv
+python3.14-tk
+kmscube
+mesa-utils*
+vulkan-tools
+nvtop
+sysbench
+iperf3
+inxi
+hardinfo*
+socat
+xdotool
+zbar-tools
+squashfs-tools
+lzip
+lzop
+
+# a braille display daemon (and its X client): retried polkit at every boot
+brltty
+brltty-x11
+xbrlapi
+
+# virtual machines
+qemu-*
+ubuntu-virt
+seabios
+ipxe-qemu*
+virgl-server
+virtiofsd
+xserver-xephyr
+
+# GNOME: the tablet runs Xfce under LightDM
+gdm3
+gnome-shell*
+gnome-session-bin
+ubuntu-session
+gnome-control-center*
+gnome-remote-desktop
+yaru-theme-gnome-shell
+xdg-desktop-portal-gnome
+mutter-common-bin
+nautilus
+
+# Google Chrome may not be redistributed: t510-chrome.service installs it
+# from Google on the first boot online. Snaps are blocked (no-snap).
+google-chrome-stable
+snapd
+wslu
+
+# Russian: the image is in English
+language-pack-ru*
+language-pack-gnome-ru*
+*-l10n-ru
+*-help-ru
+gnome-user-docs-ru
+hunspell-ru
+hyphen-ru
+mythes-ru

@@ -1,0 +1,31 @@
+# Packages of the SM-T510 image on top of ubuntu-base, installed with their
+# recommends. One per line; "#" starts a comment.
+
+# desktop: Xfce, LightDM, NetworkManager, PipeWire, Mesa
+xubuntu-desktop-minimal
+xserver-xorg-video-fbdev
+light-locker
+onboard
+xfce4-genmon-plugin
+x11-xserver-utils
+# these came only through GNOME (no-gnome in overlay/etc/apt/preferences.d):
+# ALSA programs through PipeWire, Thunar's MTP/network places, locale-gen
+pipewire-audio
+gvfs-backends
+locales
+
+# used by the overlay scripts
+alsa-utils
+python3-gi
+gir1.2-gtk-3.0
+busybox-static
+
+# system
+openssh-server
+sudo
+curl
+cloud-init
+iw
+wireless-regdb
+rfkill
+e2fsprogs

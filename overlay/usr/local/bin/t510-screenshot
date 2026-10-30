@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+"""Screenshot of the whole screen into Pictures/Screenshots and the clipboard.
+
+Called by t510-powerkey on a long press. There is no clipboard manager in the
+session, so the process keeps serving the image until something else takes
+the clipboard (the next screenshot included), then exits.
+"""
+import os
+import subprocess
+import time
+
+import gi
+
+gi.require_version("Gdk", "3.0")
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+FOLDER = "Screenshots"
+
+
+def main():
+    pictures = (GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES)
+                or os.path.expanduser("~"))
+    folder = os.path.join(pictures, FOLDER)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, time.strftime("Screenshot %Y-%m-%d %H-%M-%S.png"))
+
+    root = Gdk.get_default_root_window()
+    pixbuf = Gdk.pixbuf_get_from_window(root, 0, 0, root.get_width(),
+                                        root.get_height())
+    if pixbuf is None:
+        return 1
+    pixbuf.savev(path, "png", [], [])
+
+    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+    clipboard.set_image(pixbuf)
+
+    def owner_change(_clipboard, _event):
+        # owned by a window of this process, or someone else's now
+        if Gdk.selection_owner_get(Gdk.SELECTION_CLIPBOARD) is None:
+            Gtk.main_quit()
+
+    clipboard.connect("owner-change", owner_change)
+    subprocess.run(["notify-send", "-i", path, "Screenshot",
+                    "Saved to " + FOLDER + " and copied to the clipboard"])
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

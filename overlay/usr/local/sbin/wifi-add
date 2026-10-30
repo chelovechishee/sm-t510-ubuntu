@@ -1,0 +1,8 @@
+#!/bin/sh
+# Add a Wi-Fi network from the console (the panel's network icon does the same).
+# Asks SSID and password; NetworkManager stores the connection system-wide.
+set -e
+[ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+printf 'SSID: '; read -r SSID
+nmcli --ask device wifi connect "$SSID" ifname wlan0
+nmcli -t -f DEVICE,STATE,CONNECTION device | grep '^wlan0'

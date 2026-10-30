@@ -1,0 +1,5 @@
+# Snaps do not run on this kernel: keep snapd and the deb packages that only
+# install a snap (the browser is Google Chrome from Google's repository)
+Package: snapd firefox thunderbird chromium-browser
+Pin: release a=*
+Pin-Priority: -1

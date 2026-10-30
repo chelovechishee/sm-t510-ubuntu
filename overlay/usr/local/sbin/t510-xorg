@@ -1,0 +1,24 @@
+#!/bin/sh
+# X server for LightDM (xserver-command). With the KMS device of the DECON
+# setup S-Boot leaves running (exynos7885-decon) X runs modesetting + glamor
+# on the Mali GPU (Panfrost); without it, the old fbdev setup. The device
+# sections live in /etc/X11/t510/, written by t510-rotate. Touch
+# /etc/X11/t510/force-fbdev to keep the fbdev setup even when KMS is available.
+KMS=/dev/dri/by-path/platform-14860000.display-controller-card
+# losing X ends the whole session: let the OOM killer pick an app instead
+echo -100 > /proc/self/oom_score_adj
+if [ -e "$KMS" ] && [ -e /etc/X11/t510/kms.conf ] &&
+   [ ! -e /etc/X11/t510/force-fbdev ]; then
+	exec /usr/lib/xorg/Xorg -config /etc/X11/t510/kms.conf "$@"
+fi
+# fbdev: X rotates every update in software; keep it on the big cores
+# (Cortex-A73, the CPUs with the highest cpu_capacity)
+BIG=$(awk -v FS=/ 'FNR == 1 { cap[FILENAME] = $0 } END {
+	for (f in cap) if (cap[f] > max) max = cap[f]
+	for (f in cap) if (cap[f] == max) { split(f, p, "/"); c = c sep substr(p[6], 4); sep = "," }
+	print c }' /sys/devices/system/cpu/cpu[0-9]*/cpu_capacity 2>/dev/null)
+NCPU=$(ls -d /sys/devices/system/cpu/cpu[0-9]* | wc -l)
+if [ -n "$BIG" ] && [ "$(echo "$BIG" | tr , '\n' | wc -l)" -lt "$NCPU" ]; then
+	exec taskset -c "$BIG" /usr/lib/xorg/Xorg -config /etc/X11/t510/fbdev.conf "$@"
+fi
+exec /usr/lib/xorg/Xorg -config /etc/X11/t510/fbdev.conf "$@"

@@ -1,0 +1,29 @@
+#!/bin/sh
+# CPU and GPU temperature for the XFCE panel (Generic Monitor plugin):
+# the cpu-thermal and gpu-thermal zones (Exynos 7885 TMU). Orange from the
+# 75 C throttling point, red from 90 C.
+zone() {
+	for z in /sys/class/thermal/thermal_zone*; do
+		[ "$(cat "$z/type" 2>/dev/null)" = "$1" ] || continue
+		echo $(($(cat "$z/temp") / 1000))
+		return
+	done
+	echo "?"
+}
+
+paint() {
+	case $1 in
+	\?) echo "$1" ;;
+	*) if [ "$1" -ge 90 ]; then echo "<span foreground='#e53935'>$1°</span>"
+	   elif [ "$1" -ge 75 ]; then echo "<span foreground='#fb8c00'>$1°</span>"
+	   else echo "$1°"; fi ;;
+	esac
+}
+
+cpu=$(zone cpu-thermal)
+gpu=$(zone gpu-thermal)
+echo "<txt>CPU $(paint "$cpu")
+GPU $(paint "$gpu")</txt>"
+echo "<tool>CPU: $cpu °C
+GPU: $gpu °C
+Throttling from 75 °C</tool>"

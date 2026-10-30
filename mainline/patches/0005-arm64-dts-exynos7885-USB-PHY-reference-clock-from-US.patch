@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 05/34] arm64: dts: exynos7885: USB PHY reference clock from
+ USB PLL
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index 20c28f6ba..0936275d5 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -322,6 +322,11 @@ usbdrd_phy: phy@135d0000 {
+ 			clocks = <&cmu_fsys CLK_FSYS_USB30DRD_ACLK_20PHYCTRL>,
+ 				 <&cmu_fsys CLK_FSYS_USB20PHY_CLKCORE>;
+ 			clock-names = "phy", "ref";
++			/* PHY reference clock: USB PLL at 50 MHz */
++			assigned-clocks = <&cmu_fsys CLK_MOUT_USB_PLL>,
++					  <&cmu_fsys CLK_FOUT_USB_PLL>;
++			assigned-clock-parents = <&cmu_fsys CLK_FOUT_USB_PLL>;
++			assigned-clock-rates = <0>, <50000000>;
+ 			samsung,pmu-syscon = <&pmu_system_controller>;
+ 			#phy-cells = <1>;
+ 
+@@ -335,6 +340,8 @@ usbdrd: usb@13600000 {
+ 			clocks = <&cmu_fsys CLK_FSYS_USB30DRD_BUS_CLK_EARLY>,
+ 				 <&cmu_fsys CLK_FSYS_USB30DRD_REF_CLK>;
+ 			clock-names = "bus_early", "ref";
++			assigned-clocks = <&cmu_fsys CLK_MOUT_FSYS_USB30DRD_USER>;
++			assigned-clock-parents = <&cmu_top CLK_DOUT_FSYS_USB30DRD>;
+ 			#address-cells = <1>;
+ 			#size-cells = <1>;
+ 
+-- 
+2.53.0
+

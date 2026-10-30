@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=blueman
+# hidden on SM-T510 (see mainline/README.md, "Session")
+Hidden=true

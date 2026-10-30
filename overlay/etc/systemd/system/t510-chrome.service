@@ -1,0 +1,21 @@
+[Unit]
+Description=Install Google Chrome from Google's repository (first time online)
+# Chrome may not be redistributed, so the image carries only Google's apt
+# source and key; the browser comes straight from dl.google.com
+ConditionPathExists=!/opt/google/chrome/chrome
+Wants=network-online.target
+After=network-online.target
+# no network yet (Wi-Fi not set up): try again until it works
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+Environment=DEBIAN_FRONTEND=noninteractive
+ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=600 update
+ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=600 -y install google-chrome-stable
+TimeoutStartSec=30min
+Restart=on-failure
+RestartSec=2min
+
+[Install]
+WantedBy=multi-user.target

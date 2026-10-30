@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SM-T510: large window buttons; no compositing (saves the GPU), outline move/resize -->
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default-xhdpi"/>
+    <property name="title_font" type="string" value="Sans Bold 10"/>
+    <property name="button_layout" type="string" value="O|SHMC"/>
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="box_move" type="bool" value="true"/>
+    <property name="box_resize" type="bool" value="true"/>
+  </property>
+</channel>

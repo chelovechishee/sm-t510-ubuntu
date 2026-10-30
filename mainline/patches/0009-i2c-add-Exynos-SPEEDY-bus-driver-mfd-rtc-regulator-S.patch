@@ -1,0 +1,1142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 09/34] i2c: add Exynos SPEEDY bus driver; mfd/rtc/regulator:
+ S2MPU08; arm64: dts: gta3xlwifi: PMIC, RTC, microSD
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../bindings/mmc/samsung,exynos-dw-mshc.yaml  |   3 +
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi    |  25 +
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts |  63 ++-
+ drivers/i2c/busses/Kconfig                    |   8 +
+ drivers/i2c/busses/Makefile                   |   1 +
+ drivers/i2c/busses/i2c-exynos-speedy.c        | 472 ++++++++++++++++++
+ drivers/mfd/sec-common.c                      |   9 +
+ drivers/mfd/sec-i2c.c                         |  12 +
+ drivers/mfd/sec-irq.c                         |   1 +
+ drivers/regulator/s2mps11.c                   |  77 +++
+ drivers/rtc/rtc-s5m.c                         |  36 +-
+ include/linux/mfd/samsung/core.h              |   1 +
+ include/linux/mfd/samsung/s2mpu08.h           | 106 ++++
+ 13 files changed, 804 insertions(+), 10 deletions(-)
+ create mode 100644 drivers/i2c/busses/i2c-exynos-speedy.c
+ create mode 100644 include/linux/mfd/samsung/s2mpu08.h
+
+diff --git a/Documentation/devicetree/bindings/mmc/samsung,exynos-dw-mshc.yaml b/Documentation/devicetree/bindings/mmc/samsung,exynos-dw-mshc.yaml
+index 223fcc9f6..da93c9ac7 100644
+--- a/Documentation/devicetree/bindings/mmc/samsung,exynos-dw-mshc.yaml
++++ b/Documentation/devicetree/bindings/mmc/samsung,exynos-dw-mshc.yaml
+@@ -34,6 +34,9 @@ properties:
+               - samsung,exynos8890-dw-mshc-smu
+               - samsung,exynos8895-dw-mshc-smu
+           - const: samsung,exynos7-dw-mshc-smu
++      - items:
++          - const: samsung,exynos7885-dw-mshc
++          - const: samsung,exynos7-dw-mshc
+ 
+   reg:
+     maxItems: 1
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index 0936275d5..f115a51b9 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -277,6 +277,16 @@ wakeup-interrupt-controller {
+ 			};
+ 		};
+ 
++		speedy: i2c@11ce0000 {
++			compatible = "samsung,exynos7885-speedy";
++			reg = <0x11ce0000 0x2000>;
++			interrupts = <GIC_SPI 34 IRQ_TYPE_LEVEL_HIGH>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			status = "disabled";
++		};
++
+ 		pinctrl_fsys: pinctrl@13430000 {
+ 			compatible = "samsung,exynos7885-pinctrl";
+ 			reg = <0x13430000 0x1000>;
+@@ -357,6 +367,21 @@ usbdrd_dwc3: usb@0 {
+ 			};
+ 		};
+ 
++		mmc_2: mmc@13550000 {
++			compatible = "samsung,exynos7885-dw-mshc",
++				     "samsung,exynos7-dw-mshc";
++			reg = <0x13550000 0x2000>;
++			interrupts = <GIC_SPI 147 IRQ_TYPE_LEVEL_HIGH>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			clocks = <&cmu_fsys CLK_GOUT_MMC_CARD_ACLK>,
++				 <&cmu_fsys CLK_GOUT_MMC_CARD_SDCLKIN>;
++			clock-names = "biu", "ciu";
++			fifo-depth = <0x40>;
++
++			status = "disabled";
++		};
++
+ 		serial_0: serial@13800000 {
+ 			compatible = "samsung,exynos7885-uart",
+ 				     "samsung,exynos5433-uart";
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index d04d80c9d..32a92560d 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -19,6 +19,7 @@ / {
+ 
+ 	aliases {
+ 		mmc0 = &mmc_0;
++		mmc1 = &mmc_2;
+ 	};
+ 
+ 	chosen {
+@@ -197,10 +198,57 @@ &mmc_0 {
+ 	status = "okay";
+ };
+ 
++&mmc_2 {
++	bus-width = <4>;
++	cap-sd-highspeed;
++	disable-wp;
++	card-detect-delay = <200>;
++	cd-gpios = <&gpa0 7 GPIO_ACTIVE_LOW>;
++	vmmc-supply = <&vmmc_sd>;
++	vqmmc-supply = <&vqmmc_sd>;
++	samsung,dw-mshc-ciu-div = <3>;
++	samsung,dw-mshc-sdr-timing = <0 2>;
++	samsung,dw-mshc-ddr-timing = <1 2>;
++
++	pinctrl-names = "default";
++	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd_cd>;
++
++	status = "okay";
++};
++
+ &oscclk {
+ 	clock-frequency = <26000000>;
+ };
+ 
++&speedy {
++	status = "okay";
++
++	/* PMIC block (SPEEDY device 1); the RTC block is device 2 */
++	pmic@1 {
++		compatible = "samsung,s2mpu08-pmic";
++		reg = <0x1>;
++
++		/*
++		 * Only regulators with a consumer are listed: the others keep
++		 * the state left by the bootloader and the ACPM firmware
++		 * (buck1-5 are its DVFS rails).
++		 */
++		regulators {
++			vqmmc_sd: ldo2 {
++				regulator-name = "vqmmc_sd";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++
++			vmmc_sd: ldo35 {
++				regulator-name = "vmmc_sd";
++				regulator-min-microvolt = <3000000>;
++				regulator-max-microvolt = <3000000>;
++			};
++		};
++	};
++};
++
+ &usbdrd {
+ 	status = "okay";
+ };
+@@ -241,6 +289,12 @@ tsp_irq: tsp-irq-pins {
+ 		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+ 	};
+ 
++	sd_cd: sd-cd-pins {
++		samsung,pins = "gpa0-7";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	};
++
+ 	key_power: key-power-pins {
+ 		samsung,pins = "gpa1-7";
+ 		samsung,pin-function = <EXYNOS_PIN_FUNC_F>;
+@@ -258,15 +312,6 @@ reboot: syscon-reboot {
+ 		mask = <0x1>;
+ 	};
+ 
+-	/* Downstream power off: PS_HOLD low */
+-	poweroff: syscon-poweroff {
+-		compatible = "syscon-poweroff";
+-		regmap = <&pmu_system_controller>;
+-		offset = <0x330c>; /* PS_HOLD_CONTROL */
+-		mask = <0x100>;
+-		value = <0x0>;
+-	};
+-
+ 	/* Samsung sec_reboot reason (INFORM3), read by S-Boot */
+ 	reboot-mode {
+ 		compatible = "syscon-reboot-mode";
+diff --git a/drivers/i2c/busses/Kconfig b/drivers/i2c/busses/Kconfig
+index d7b895083..e8dc76472 100644
+--- a/drivers/i2c/busses/Kconfig
++++ b/drivers/i2c/busses/Kconfig
+@@ -672,6 +672,14 @@ config I2C_EMEV2
+ 	  If you say yes to this option, support will be included for the
+ 	  I2C interface on the Renesas Electronics EM/EV family of processors.
+ 
++config I2C_EXYNOS_SPEEDY
++	tristate "Exynos SPEEDY bus master"
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	help
++	  Say Y here to include support for the SPEEDY one-wire bus master
++	  found on Samsung Exynos 7885/7904 SoCs, which connects the
++	  PMIC and the audio codec.
++
+ config I2C_EXYNOS5
+ 	tristate "Exynos high-speed I2C driver"
+ 	depends on OF
+diff --git a/drivers/i2c/busses/Makefile b/drivers/i2c/busses/Makefile
+index 3755c54b3..d9a1ed497 100644
+--- a/drivers/i2c/busses/Makefile
++++ b/drivers/i2c/busses/Makefile
+@@ -64,6 +64,7 @@ i2c-designware-pci-y					:= i2c-designware-pcidrv.o
+ obj-$(CONFIG_I2C_DIGICOLOR)	+= i2c-digicolor.o
+ obj-$(CONFIG_I2C_EG20T)		+= i2c-eg20t.o
+ obj-$(CONFIG_I2C_EMEV2)		+= i2c-emev2.o
++obj-$(CONFIG_I2C_EXYNOS_SPEEDY)	+= i2c-exynos-speedy.o
+ obj-$(CONFIG_I2C_EXYNOS5)	+= i2c-exynos5.o
+ obj-$(CONFIG_I2C_GPIO)		+= i2c-gpio.o
+ obj-$(CONFIG_I2C_HIGHLANDER)	+= i2c-highlander.o
+diff --git a/drivers/i2c/busses/i2c-exynos-speedy.c b/drivers/i2c/busses/i2c-exynos-speedy.c
+new file mode 100644
+index 000000000..6e9f4f75e
+--- /dev/null
++++ b/drivers/i2c/busses/i2c-exynos-speedy.c
+@@ -0,0 +1,472 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Exynos SPEEDY (Serial Protocol in an EffEctive Digital waY) master
++ *
++ * SPEEDY is a one-wire bus to the PMIC (and the audio codec inside it) on
++ * Exynos 7885/7904 and similar SoCs. The ACPM firmware on the APM core uses
++ * the same bus, so every transfer goes through the IP batcher: the AP writes a
++ * list of register writes into the batcher, the batcher takes the shared
++ * hardware semaphore, replays the list and releases the semaphore.
++ *
++ * A SPEEDY address is 12 bits: device id (bits 11:8) and register (7:0).
++ * Clients are I2C devices at the device id; the usual "write register number,
++ * then read" pair of messages becomes a single SPEEDY read, and a write of
++ * "register, data..." a single SPEEDY write, so regmap-i2c works unchanged.
++ *
++ * Based on the Samsung downstream driver by Youngmin Nam.
++ */
++
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#define SPEEDY_CTRL			0x000
++#define SPEEDY_FIFO_CTRL		0x004
++#define SPEEDY_CMD			0x008
++#define SPEEDY_INT_ENABLE		0x00c
++#define SPEEDY_INT_STATUS		0x010
++#define SPEEDY_TX_DATA			0x034
++#define SPEEDY_RX_DATA			0x038
++
++/* SPEEDY_CTRL; 0x30050 is the reset value */
++#define SPEEDY_CTRL_RESET_VALUE		0x30050
++#define SPEEDY_ENABLE			BIT(0)
++#define SPEEDY_REMOTE_RESET_REQ		BIT(30)
++#define SPEEDY_SW_RST			BIT(31)
++
++#define SPEEDY_RX_TRIGGER_LEVEL(x)	((x) << 0)
++#define SPEEDY_TX_TRIGGER_LEVEL(x)	((x) << 8)
++#define SPEEDY_FIFO_RESET		BIT(31)
++
++#define SPEEDY_BURST_LENGTH(x)		((x) << 0)
++#define SPEEDY_BURST_INCR		(1 << 5)
++#define SPEEDY_ADDRESS(x)		(((x) & 0xfff) << 7)
++#define SPEEDY_ACCESS_RANDOM		BIT(19)
++#define SPEEDY_DIRECTION_WRITE		BIT(20)
++
++/* SPEEDY_INT_ENABLE / SPEEDY_INT_STATUS */
++#define SPEEDY_TRANSFER_DONE		BIT(0)
++#define SPEEDY_TIMEOUT_CMD		BIT(1)
++#define SPEEDY_TIMEOUT_STANDBY		BIT(2)
++#define SPEEDY_TIMEOUT_DATA		BIT(3)
++#define SPEEDY_FIFO_TX_ALMOST_EMPTY	BIT(4)
++#define SPEEDY_FIFO_RX_ALMOST_FULL	BIT(8)
++#define SPEEDY_RX_FIFO_INT_TRAILER	BIT(9)
++#define SPEEDY_RX_MODEBIT_ERR		BIT(16)
++#define SPEEDY_RX_GLITCH_ERR		BIT(17)
++#define SPEEDY_RX_ENDBIT_ERR		BIT(18)
++#define SPEEDY_TX_LINE_BUSY_ERR		BIT(20)
++#define SPEEDY_TX_STOPBIT_ERR		BIT(21)
++#define SPEEDY_TIMEOUTS			(SPEEDY_TIMEOUT_CMD | SPEEDY_TIMEOUT_STANDBY | \
++					 SPEEDY_TIMEOUT_DATA)
++#define SPEEDY_ERRORS			(SPEEDY_TIMEOUTS | SPEEDY_RX_MODEBIT_ERR | \
++					 SPEEDY_RX_GLITCH_ERR | SPEEDY_RX_ENDBIT_ERR | \
++					 SPEEDY_TX_LINE_BUSY_ERR | SPEEDY_TX_STOPBIT_ERR)
++
++#define SPEEDY_FIFO_EMPTY		BIT(6)
++
++/* IP batcher */
++#define IPBATCHER_SEMA_REL		0x0200
++#define IPBATCHER_CON			0x0500
++#define IPBATCHER_STATE			0x0504
++#define IPBATCHER_INT_EN		0x0508
++#define IPBATCHER_FSM_UNEXPEN		0x050c
++#define IPBATCHER_FSM_TXEN		0x0510
++#define IPBATCHER_FSM_RXFIFO		0x0514
++#define IPBATCHER_FSM_CON		0x0518
++#define IP_INT_STATUS			0x0520
++#define BATCHER_OPCODE			0x0600
++#define BATCHER_PAYLOAD			0x1000
++#define BATCHER_PAYLOAD_SLOTS		25
++
++#define BATCHER_ENABLE			BIT(0)
++#define DEDICATED_BATCHER_APB		BIT(1)
++#define START_BATCHER			BIT(4)
++#define IP_SW_RST			BIT(6)
++#define MP_APBSEMA_SW_RST		BIT(7)
++#define BATCHER_SW_RESET		BIT(31)
++
++#define BATCHER_OPERATION_COMPLETE	BIT(0)
++#define UNEXPECTED_IP_INTR		BIT(1)
++#define BATCHER_FSM_STATE_IDLE		BIT(3)
++#define BATCHER_FSM_STATE_INIT		BIT(4)
++#define BATCHER_FSM_STATE_WAIT_INT	BIT(7)
++#define MP_APBSEMA_CH_LOCK_STATUS	BIT(20)
++
++#define BATCHER_INTERRUPT_ENABLE	BIT(0)
++#define DISABLE_STOP_CMD		BIT(0)
++
++#define BATCHER_INIT_CMD		0xffffffff
++#define BATCHER_OPCODE_END		0xff
++
++#define SPEEDY_TIMEOUT_US		500000
++/* payload slots left for data after the per-transfer setup */
++#define SPEEDY_MAX_BURST		16
++#define SPEEDY_SRP_COUNT		3
++
++struct exynos_speedy {
++	struct device *dev;
++	struct i2c_adapter adap;
++	void __iomem *regs;
++	/* batcher program being built */
++	u32 cmd_buffer;
++	unsigned int cmd_index;
++	unsigned int cmd_pointer;
++	unsigned int desc_pointer;
++	u32 int_en;
++};
++
++static void batcher_reset_program(struct exynos_speedy *speedy)
++{
++	speedy->cmd_buffer = BATCHER_INIT_CMD;
++	speedy->cmd_index = 0;
++	speedy->cmd_pointer = 0;
++	speedy->desc_pointer = 0;
++}
++
++/* Queue "write @value to SPEEDY register @reg" into the batcher program. */
++static void batcher_write(struct exynos_speedy *speedy, u32 value, u8 reg)
++{
++	if (WARN_ON(speedy->desc_pointer >= BATCHER_PAYLOAD_SLOTS))
++		return;
++
++	speedy->cmd_buffer &= ~(0xff << (8 * speedy->cmd_index));
++	speedy->cmd_buffer |= reg << (8 * speedy->cmd_index);
++	writel(speedy->cmd_buffer,
++	       speedy->regs + BATCHER_OPCODE + speedy->cmd_pointer * 4);
++	writel(value, speedy->regs + BATCHER_PAYLOAD + speedy->desc_pointer * 4);
++	speedy->desc_pointer++;
++
++	if (++speedy->cmd_index == 4) {
++		speedy->cmd_index = 0;
++		speedy->cmd_pointer++;
++		speedy->cmd_buffer = BATCHER_INIT_CMD;
++	}
++}
++
++static void batcher_con_set(struct exynos_speedy *speedy, u32 bits)
++{
++	writel(readl(speedy->regs + IPBATCHER_CON) | bits,
++	       speedy->regs + IPBATCHER_CON);
++}
++
++static void batcher_con_pulse(struct exynos_speedy *speedy, u32 bits)
++{
++	u32 con = readl(speedy->regs + IPBATCHER_CON);
++
++	writel(con | bits, speedy->regs + IPBATCHER_CON);
++	writel(con & ~bits, speedy->regs + IPBATCHER_CON);
++}
++
++static void batcher_program_fsm(struct exynos_speedy *speedy)
++{
++	/* IP interrupts handled as errors, as Tx events and as Rx FIFO status */
++	writel(SPEEDY_ERRORS, speedy->regs + IPBATCHER_FSM_UNEXPEN);
++	writel(SPEEDY_TRANSFER_DONE | SPEEDY_FIFO_TX_ALMOST_EMPTY,
++	       speedy->regs + IPBATCHER_FSM_TXEN);
++	writel(SPEEDY_FIFO_EMPTY, speedy->regs + IPBATCHER_FSM_RXFIFO);
++	writel(DISABLE_STOP_CMD, speedy->regs + IPBATCHER_FSM_CON);
++}
++
++static int batcher_wait_ready(struct exynos_speedy *speedy)
++{
++	u32 state;
++
++	return readl_poll_timeout_atomic(speedy->regs + IPBATCHER_STATE, state,
++					 state & (BATCHER_FSM_STATE_IDLE |
++						  BATCHER_FSM_STATE_INIT),
++					 10, SPEEDY_TIMEOUT_US);
++}
++
++/* Recover the IP and the batcher after a failed transfer. */
++static void speedy_swreset(struct exynos_speedy *speedy)
++{
++	u32 state = readl(speedy->regs + IPBATCHER_STATE);
++
++	if (state & MP_APBSEMA_CH_LOCK_STATUS) {
++		if (state & BATCHER_FSM_STATE_WAIT_INT)
++			batcher_con_set(speedy, IP_SW_RST);
++		else
++			writel(readl(speedy->regs + SPEEDY_CTRL) | SPEEDY_SW_RST,
++			       speedy->regs + SPEEDY_CTRL);
++		udelay(110);
++
++		state = readl(speedy->regs + IPBATCHER_STATE);
++		if (!(state & BATCHER_FSM_STATE_INIT)) {
++			batcher_con_pulse(speedy, MP_APBSEMA_SW_RST);
++			udelay(100);
++			batcher_con_pulse(speedy, BATCHER_SW_RESET);
++			batcher_program_fsm(speedy);
++			if (batcher_wait_ready(speedy))
++				dev_err(speedy->dev, "batcher stuck after reset\n");
++		}
++		writel(0x01, speedy->regs + IPBATCHER_SEMA_REL);
++	} else {
++		batcher_con_pulse(speedy, BATCHER_SW_RESET);
++		batcher_program_fsm(speedy);
++	}
++
++	if (batcher_wait_ready(speedy))
++		dev_err(speedy->dev, "batcher not idle after reset\n");
++}
++
++static void speedy_queue_cmd(struct exynos_speedy *speedy, bool write,
++			     u16 address, unsigned int len)
++{
++	u32 fifo_ctl = SPEEDY_FIFO_RESET;
++	u32 int_en = SPEEDY_TIMEOUTS;
++	u32 cmd = SPEEDY_ADDRESS(address);
++
++	if (len > 1) {
++		cmd |= SPEEDY_BURST_INCR | SPEEDY_BURST_LENGTH(len - 1);
++		fifo_ctl |= SPEEDY_RX_TRIGGER_LEVEL(len) | SPEEDY_TX_TRIGGER_LEVEL(1);
++	} else {
++		cmd |= SPEEDY_ACCESS_RANDOM;
++		fifo_ctl |= SPEEDY_RX_TRIGGER_LEVEL(1) | SPEEDY_TX_TRIGGER_LEVEL(1);
++	}
++	batcher_write(speedy, fifo_ctl, SPEEDY_FIFO_CTRL);
++
++	if (write) {
++		cmd |= SPEEDY_DIRECTION_WRITE;
++		int_en |= SPEEDY_TRANSFER_DONE | SPEEDY_FIFO_TX_ALMOST_EMPTY |
++			  SPEEDY_TX_LINE_BUSY_ERR | SPEEDY_TX_STOPBIT_ERR;
++	} else {
++		int_en |= SPEEDY_FIFO_RX_ALMOST_FULL | SPEEDY_RX_FIFO_INT_TRAILER |
++			  SPEEDY_RX_MODEBIT_ERR | SPEEDY_RX_GLITCH_ERR |
++			  SPEEDY_RX_ENDBIT_ERR;
++	}
++	speedy->int_en = int_en;
++
++	batcher_write(speedy, 0xffffffff, SPEEDY_INT_STATUS);
++	batcher_write(speedy, int_en, SPEEDY_INT_ENABLE);
++	batcher_write(speedy, cmd, SPEEDY_CMD);
++}
++
++static int batcher_run(struct exynos_speedy *speedy)
++{
++	u32 state, status;
++	int ret;
++
++	batcher_write(speedy, 0x00, BATCHER_OPCODE_END);
++	writel(BATCHER_INTERRUPT_ENABLE, speedy->regs + IPBATCHER_INT_EN);
++	batcher_con_set(speedy, START_BATCHER);
++
++	ret = readl_poll_timeout_atomic(speedy->regs + IPBATCHER_STATE, state,
++			(state & BATCHER_OPERATION_COMPLETE) ||
++			((state & UNEXPECTED_IP_INTR) &&
++			 (readl(speedy->regs + IP_INT_STATUS) & SPEEDY_ERRORS)),
++			10, SPEEDY_TIMEOUT_US);
++	status = readl(speedy->regs + IP_INT_STATUS);
++	if (!ret && (status & SPEEDY_ERRORS))
++		ret = -EIO;
++
++	if (state & BATCHER_OPERATION_COMPLETE)
++		writel(state | BATCHER_OPERATION_COMPLETE,
++		       speedy->regs + IPBATCHER_STATE);
++	writel(0, speedy->regs + IPBATCHER_INT_EN);
++
++	if (ret)
++		dev_dbg(speedy->dev, "transfer failed: %d, state %#x, status %#x\n",
++			ret, state, status);
++	return ret;
++}
++
++static void batcher_begin(struct exynos_speedy *speedy)
++{
++	batcher_reset_program(speedy);
++	/* IDLE, then IDLE -> INIT */
++	writel(0, speedy->regs + IPBATCHER_CON);
++	batcher_con_set(speedy, BATCHER_ENABLE | DEDICATED_BATCHER_APB);
++}
++
++/* Remote reset of the slaves, after an error (SRP in the downstream driver). */
++static void speedy_remote_reset(struct exynos_speedy *speedy)
++{
++	u32 ctl = SPEEDY_CTRL_RESET_VALUE | SPEEDY_ENABLE;
++	int i;
++
++	for (i = 0; i < SPEEDY_SRP_COUNT; i++) {
++		batcher_begin(speedy);
++		speedy_queue_cmd(speedy, true, 0x0, 1);
++		batcher_write(speedy, ctl | SPEEDY_REMOTE_RESET_REQ, SPEEDY_CTRL);
++		batcher_write(speedy, 0x00, SPEEDY_TX_DATA);
++		batcher_write(speedy, ctl, SPEEDY_CTRL);
++		if (!batcher_run(speedy)) {
++			writel(0, speedy->regs + IPBATCHER_CON);
++			return;
++		}
++		writel(0, speedy->regs + IPBATCHER_CON);
++		speedy_swreset(speedy);
++	}
++	dev_err(speedy->dev, "remote reset failed\n");
++}
++
++static int speedy_transfer(struct exynos_speedy *speedy, bool write,
++			   u16 address, u8 *buf, unsigned int len)
++{
++	unsigned int i, rx_slot;
++	int ret;
++
++	batcher_begin(speedy);
++	batcher_write(speedy, SPEEDY_CTRL_RESET_VALUE | SPEEDY_ENABLE, SPEEDY_CTRL);
++	speedy_queue_cmd(speedy, write, address, len);
++
++	rx_slot = speedy->desc_pointer;
++	if (write) {
++		for (i = 0; i < len; i++)
++			batcher_write(speedy, buf[i], SPEEDY_TX_DATA);
++		/* a pending TX_ALMOST_EMPTY would hold the line */
++		batcher_write(speedy, speedy->int_en & ~SPEEDY_FIFO_TX_ALMOST_EMPTY,
++			      SPEEDY_INT_ENABLE);
++	} else {
++		for (i = 0; i < len; i++)
++			batcher_write(speedy, 0x77, SPEEDY_RX_DATA);
++	}
++
++	ret = batcher_run(speedy);
++	if (!ret && !write)
++		for (i = 0; i < len; i++)
++			buf[i] = readl(speedy->regs + BATCHER_PAYLOAD +
++				       (rx_slot + i) * 4);
++	writel(0, speedy->regs + IPBATCHER_CON);
++
++	if (ret) {
++		speedy_swreset(speedy);
++		speedy_remote_reset(speedy);
++		/* the I2C core retries -EAGAIN adap->retries times */
++		ret = -EAGAIN;
++	}
++	return ret;
++}
++
++static int speedy_xfer_chunked(struct exynos_speedy *speedy, bool write,
++			       u16 addr, u8 reg, u8 *buf, unsigned int len)
++{
++	unsigned int done, n;
++	int ret;
++
++	for (done = 0; done < len; done += n) {
++		n = min_t(unsigned int, len - done, SPEEDY_MAX_BURST);
++		ret = speedy_transfer(speedy, write, (addr << 8) | (u8)(reg + done),
++				      buf + done, n);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static int exynos_speedy_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
++			      int num)
++{
++	struct exynos_speedy *speedy = i2c_get_adapdata(adap);
++	int ret;
++
++	if (msgs[0].addr > 0xf || (msgs[0].flags & I2C_M_RD) || !msgs[0].len)
++		return -EOPNOTSUPP;
++
++	if (num == 2 && msgs[0].len == 1 && (msgs[1].flags & I2C_M_RD) &&
++	    msgs[1].addr == msgs[0].addr)
++		ret = speedy_xfer_chunked(speedy, false, msgs[0].addr,
++					  msgs[0].buf[0], msgs[1].buf, msgs[1].len);
++	else if (num == 1 && msgs[0].len > 1)
++		ret = speedy_xfer_chunked(speedy, true, msgs[0].addr,
++					  msgs[0].buf[0], msgs[0].buf + 1,
++					  msgs[0].len - 1);
++	else
++		return -EOPNOTSUPP;
++
++	return ret ? ret : num;
++}
++
++static u32 exynos_speedy_func(struct i2c_adapter *adap)
++{
++	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_BYTE_DATA | I2C_FUNC_SMBUS_WORD_DATA |
++	       I2C_FUNC_SMBUS_I2C_BLOCK;
++}
++
++static const struct i2c_algorithm exynos_speedy_algo = {
++	.xfer = exynos_speedy_xfer,
++	.functionality = exynos_speedy_func,
++};
++
++static const struct i2c_adapter_quirks exynos_speedy_quirks = {
++	.flags = I2C_AQ_COMB_WRITE_THEN_READ,
++	.max_comb_1st_msg_len = 1,
++};
++
++static int exynos_speedy_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct exynos_speedy *speedy;
++	struct clk *clk;
++
++	speedy = devm_kzalloc(dev, sizeof(*speedy), GFP_KERNEL);
++	if (!speedy)
++		return -ENOMEM;
++	speedy->dev = dev;
++
++	speedy->regs = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(speedy->regs))
++		return PTR_ERR(speedy->regs);
++
++	/* the APM firmware keeps the bus clocked; the gate is optional */
++	clk = devm_clk_get_optional_enabled(dev, NULL);
++	if (IS_ERR(clk))
++		return dev_err_probe(dev, PTR_ERR(clk), "failed to get clock\n");
++
++	/* the bootloader may have used the IP directly */
++	writel(0xffffffff, speedy->regs + SPEEDY_INT_STATUS);
++	writel(readl(speedy->regs + SPEEDY_CTRL) | SPEEDY_SW_RST,
++	       speedy->regs + SPEEDY_CTRL);
++	udelay(10);
++	writel(0x01, speedy->regs + IPBATCHER_SEMA_REL);
++	batcher_con_pulse(speedy, BATCHER_SW_RESET);
++	batcher_program_fsm(speedy);
++
++	strscpy(speedy->adap.name, "exynos-speedy", sizeof(speedy->adap.name));
++	speedy->adap.owner = THIS_MODULE;
++	speedy->adap.algo = &exynos_speedy_algo;
++	speedy->adap.quirks = &exynos_speedy_quirks;
++	speedy->adap.retries = 2;
++	speedy->adap.dev.parent = dev;
++	speedy->adap.dev.of_node = dev->of_node;
++	i2c_set_adapdata(&speedy->adap, speedy);
++	platform_set_drvdata(pdev, speedy);
++
++	return devm_i2c_add_adapter(dev, &speedy->adap);
++}
++
++static const struct of_device_id exynos_speedy_of_match[] = {
++	{ .compatible = "samsung,exynos7885-speedy" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, exynos_speedy_of_match);
++
++static struct platform_driver exynos_speedy_driver = {
++	.probe = exynos_speedy_probe,
++	.driver = {
++		.name = "exynos-speedy",
++		.of_match_table = exynos_speedy_of_match,
++	},
++};
++
++static int __init exynos_speedy_init(void)
++{
++	return platform_driver_register(&exynos_speedy_driver);
++}
++/* the PMIC behind it supplies the RTC and regulators: register early */
++subsys_initcall(exynos_speedy_init);
++
++static void __exit exynos_speedy_exit(void)
++{
++	platform_driver_unregister(&exynos_speedy_driver);
++}
++module_exit(exynos_speedy_exit);
++
++MODULE_DESCRIPTION("Samsung Exynos SPEEDY bus driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/mfd/sec-common.c b/drivers/mfd/sec-common.c
+index fe92bc4a3..6eedef60b 100644
+--- a/drivers/mfd/sec-common.c
++++ b/drivers/mfd/sec-common.c
+@@ -106,6 +106,11 @@ static const struct mfd_cell s2mpu05_devs[] = {
+ 	MFD_CELL_RES("s2mps15-rtc", s2mpu05_rtc_resources),
+ };
+ 
++static const struct mfd_cell s2mpu08_devs[] = {
++	MFD_CELL_NAME("s2mpu08-regulator"),
++	MFD_CELL_NAME("s2mpu08-rtc"),
++};
++
+ static const struct resource s2mu005_muic_resources[] = {
+ 	DEFINE_RES_IRQ_NAMED(S2MU005_IRQ_MUIC_ATTACH, "attach"),
+ 	DEFINE_RES_IRQ_NAMED(S2MU005_IRQ_MUIC_DETACH, "detach"),
+@@ -271,6 +276,10 @@ int sec_pmic_probe(struct device *dev, int device_type, unsigned int irq,
+ 		sec_devs = s2mpu05_devs;
+ 		num_sec_devs = ARRAY_SIZE(s2mpu05_devs);
+ 		break;
++	case S2MPU08:
++		sec_devs = s2mpu08_devs;
++		num_sec_devs = ARRAY_SIZE(s2mpu08_devs);
++		break;
+ 	case S2MU005:
+ 		sec_devs = s2mu005_devs;
+ 		num_sec_devs = ARRAY_SIZE(s2mu005_devs);
+diff --git a/drivers/mfd/sec-i2c.c b/drivers/mfd/sec-i2c.c
+index 4eec8f7ce..2c10b9320 100644
+--- a/drivers/mfd/sec-i2c.c
++++ b/drivers/mfd/sec-i2c.c
+@@ -143,6 +143,12 @@ static const struct regmap_config s2mpu05_regmap_config = {
+ 	.val_bits = 8,
+ };
+ 
++/* PMIC block of the S2MPU08, behind the Exynos SPEEDY bus */
++static const struct regmap_config s2mpu08_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++};
++
+ static const struct regmap_config s2mu005_regmap_config = {
+ 	.reg_bits = 8,
+ 	.val_bits = 8,
+@@ -225,6 +231,11 @@ static const struct sec_pmic_i2c_platform_data s2mpu05_data = {
+ 	.device_type = S2MPU05,
+ };
+ 
++static const struct sec_pmic_i2c_platform_data s2mpu08_data = {
++	.regmap_cfg = &s2mpu08_regmap_config,
++	.device_type = S2MPU08,
++};
++
+ static const struct sec_pmic_i2c_platform_data s2mu005_data = {
+ 	.regmap_cfg = &s2mu005_regmap_config,
+ 	.device_type = S2MU005,
+@@ -244,6 +255,7 @@ static const struct of_device_id sec_pmic_i2c_of_match[] = {
+ 	{ .compatible = "samsung,s2mps15-pmic", .data = &s2mps15_data, },
+ 	{ .compatible = "samsung,s2mpu02-pmic", .data = &s2mpu02_data, },
+ 	{ .compatible = "samsung,s2mpu05-pmic", .data = &s2mpu05_data, },
++	{ .compatible = "samsung,s2mpu08-pmic", .data = &s2mpu08_data, },
+ 	{ .compatible = "samsung,s2mu005-pmic", .data = &s2mu005_data, },
+ 	{ .compatible = "samsung,s5m8767-pmic", .data = &s5m8767_data, },
+ 	{ },
+diff --git a/drivers/mfd/sec-irq.c b/drivers/mfd/sec-irq.c
+index 42862807b..b459e74cc 100644
+--- a/drivers/mfd/sec-irq.c
++++ b/drivers/mfd/sec-irq.c
+@@ -487,6 +487,7 @@ struct regmap_irq_chip_data *sec_irq_init(struct sec_pmic_dev *sec_pmic)
+ 		sec_irq_chip = &s5m8767_irq_chip;
+ 		break;
+ 	case S2DOS05:
++	case S2MPU08:	/* PMIC interrupts not supported yet */
+ 		return NULL;
+ 	case S2MPA01:
+ 		sec_irq_chip = &s2mps14_irq_chip;
+diff --git a/drivers/regulator/s2mps11.c b/drivers/regulator/s2mps11.c
+index 0fb54617b..9faf30246 100644
+--- a/drivers/regulator/s2mps11.c
++++ b/drivers/regulator/s2mps11.c
+@@ -25,6 +25,7 @@
+ #include <linux/mfd/samsung/s2mps15.h>
+ #include <linux/mfd/samsung/s2mpu02.h>
+ #include <linux/mfd/samsung/s2mpu05.h>
++#include <linux/mfd/samsung/s2mpu08.h>
+ 
+ enum {
+ 	S2MPG10_REGULATOR_OPS_STD,
+@@ -273,6 +274,7 @@ static int s2mps11_regulator_enable(struct regulator_dev *rdev)
+ 			val = rdev->desc->enable_mask;
+ 		break;
+ 	case S2MPU05:
++	case S2MPU08:
+ 		val = rdev->desc->enable_mask;
+ 		break;
+ 	default:
+@@ -2127,6 +2129,75 @@ static const struct regulator_desc s2mpu05_regulators[] = {
+ 	regulator_desc_s2mpu05_buck45(5),
+ };
+ 
++#define regulator_desc_s2mpu08_ldo(num, reg, min, step) {	\
++	.name		= "ldo"#num,				\
++	.id		= S2MPU08_LDO##num,			\
++	.of_match	= of_match_ptr("ldo"#num),		\
++	.regulators_node = of_match_ptr("regulators"),		\
++	.ops		= &s2mpu02_ldo_ops,			\
++	.type		= REGULATOR_VOLTAGE,			\
++	.owner		= THIS_MODULE,				\
++	.min_uV		= S2MPU08_LDO_MIN##min,			\
++	.uV_step	= S2MPU08_LDO_STEP##step,		\
++	.n_voltages	= S2MPU08_LDO_N_VOLTAGES,		\
++	.vsel_reg	= reg,					\
++	.vsel_mask	= S2MPU08_LDO_VSEL_MASK,		\
++	.enable_reg	= reg,					\
++	.enable_mask	= S2MPU08_ENABLE_MASK,			\
++	.enable_time	= S2MPU08_ENABLE_TIME_LDO		\
++}
++
++#define regulator_desc_s2mpu08_ldon(num, min, step) \
++	regulator_desc_s2mpu08_ldo(num, S2MPU08_REG_LCTRL(num), min, step)
++
++#define regulator_desc_s2mpu08_buck(num, ctrl1, ctrl2, which, time) {	\
++	.name		= "buck"#num,				\
++	.id		= S2MPU08_BUCK##num,			\
++	.of_match	= of_match_ptr("buck"#num),		\
++	.regulators_node = of_match_ptr("regulators"),		\
++	.ops		= &s2mpu02_buck_ops,			\
++	.type		= REGULATOR_VOLTAGE,			\
++	.owner		= THIS_MODULE,				\
++	.min_uV		= S2MPU08_BUCK_MIN##which,		\
++	.uV_step	= S2MPU08_BUCK_STEP##which,		\
++	.n_voltages	= S2MPU08_BUCK_N_VOLTAGES,		\
++	.vsel_reg	= ctrl2,				\
++	.vsel_mask	= S2MPU08_BUCK_VSEL_MASK,		\
++	.enable_reg	= ctrl1,				\
++	.enable_mask	= S2MPU08_ENABLE_MASK,			\
++	.enable_time	= S2MPU08_ENABLE_TIME_BUCK##time	\
++}
++
++static const struct regulator_desc s2mpu08_regulators[] = {
++	regulator_desc_s2mpu08_ldo(1, S2MPU08_REG_L1CTRL, 1, 1),
++	regulator_desc_s2mpu08_ldo(2, S2MPU08_REG_L2CTRL1, 3, 2),
++	regulator_desc_s2mpu08_ldon(3, 1, 2),
++	regulator_desc_s2mpu08_ldon(4, 2, 1),
++	regulator_desc_s2mpu08_ldon(5, 1, 1),
++	regulator_desc_s2mpu08_ldon(6, 1, 1),
++	regulator_desc_s2mpu08_ldon(7, 1, 2),
++	regulator_desc_s2mpu08_ldon(8, 4, 2),
++	regulator_desc_s2mpu08_ldon(9, 4, 2),
++	regulator_desc_s2mpu08_ldon(10, 4, 2),
++	regulator_desc_s2mpu08_ldon(11, 4, 2),
++	regulator_desc_s2mpu08_ldon(12, 1, 1),
++	regulator_desc_s2mpu08_ldon(13, 1, 2),
++	regulator_desc_s2mpu08_ldon(14, 3, 2),
++	regulator_desc_s2mpu08_ldon(33, 1, 2),
++	regulator_desc_s2mpu08_ldon(34, 3, 2),
++	regulator_desc_s2mpu08_ldon(35, 3, 2),
++	regulator_desc_s2mpu08_ldon(36, 1, 2),
++	regulator_desc_s2mpu08_ldon(37, 3, 2),
++	regulator_desc_s2mpu08_buck(1, S2MPU08_REG_B1CTRL1, S2MPU08_REG_B1CTRL2, 1, 123),
++	regulator_desc_s2mpu08_buck(2, S2MPU08_REG_B2CTRL1, S2MPU08_REG_B2CTRL2, 1, 123),
++	regulator_desc_s2mpu08_buck(3, S2MPU08_REG_B3CTRL1, S2MPU08_REG_B3CTRL2, 1, 123),
++	regulator_desc_s2mpu08_buck(4, S2MPU08_REG_B4CTRL1, S2MPU08_REG_B4CTRL2, 1, 45678),
++	regulator_desc_s2mpu08_buck(5, S2MPU08_REG_B5CTRL1, S2MPU08_REG_B5CTRL2, 1, 45678),
++	regulator_desc_s2mpu08_buck(6, S2MPU08_REG_B6CTRL1, S2MPU08_REG_B6CTRL2, 1, 45678),
++	regulator_desc_s2mpu08_buck(7, S2MPU08_REG_B7CTRL1, S2MPU08_REG_B7CTRL2, 2, 45678),
++	regulator_desc_s2mpu08_buck(8, S2MPU08_REG_B8CTRL1, S2MPU08_REG_B8CTRL2, 2, 45678),
++};
++
+ static int s2mps11_handle_ext_control(struct s2mps11_info *s2mps11,
+ 				      struct regulator_dev *rdev)
+ {
+@@ -2217,6 +2288,11 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
+ 		regulators = s2mpu05_regulators;
+ 		BUILD_BUG_ON(ARRAY_SIZE(s2mpu05_regulators) > S2MPS_REGULATOR_MAX);
+ 		break;
++	case S2MPU08:
++		rdev_num = ARRAY_SIZE(s2mpu08_regulators);
++		regulators = s2mpu08_regulators;
++		BUILD_BUG_ON(ARRAY_SIZE(s2mpu08_regulators) > S2MPS_REGULATOR_MAX);
++		break;
+ 	default:
+ 		return dev_err_probe(&pdev->dev, -ENODEV,
+ 				     "Unsupported device type %d\n",
+@@ -2274,6 +2350,7 @@ static const struct platform_device_id s2mps11_pmic_id[] = {
+ 	{ .name = "s2mps15-regulator", .driver_data = S2MPS15X },
+ 	{ .name = "s2mpu02-regulator", .driver_data = S2MPU02 },
+ 	{ .name = "s2mpu05-regulator", .driver_data = S2MPU05 },
++	{ .name = "s2mpu08-regulator", .driver_data = S2MPU08 },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(platform, s2mps11_pmic_id);
+diff --git a/drivers/rtc/rtc-s5m.c b/drivers/rtc/rtc-s5m.c
+index aa706074e..a8da01cec 100644
+--- a/drivers/rtc/rtc-s5m.c
++++ b/drivers/rtc/rtc-s5m.c
+@@ -159,6 +159,23 @@ static const struct s5m_rtc_reg_config s2mps15_rtc_regs = {
+ 	.write_alarm_udr_mask	= S2MPS15_RTC_AUDR_MASK,
+ };
+ 
++/*
++ * Register map for S2MPU08 - the S2MPS15 update bits, but with a millisecond
++ * register before the time, so time and alarms are one register later.
++ */
++static const struct s5m_rtc_reg_config s2mpu08_rtc_regs = {
++	.regs_count		= 7,
++	.time			= S2MPS_RTC_SEC + 1,
++	.ctrl			= S2MPS_RTC_CTRL,
++	.alarm0			= S2MPS_ALARM0_SEC + 1,
++	.alarm1			= S2MPS_ALARM1_SEC + 1,
++	.udr_update		= S2MPS_RTC_UDR_CON,
++	.autoclear_udr_mask	= S2MPS_RTC_WUDR_MASK,
++	.read_time_udr_mask	= S2MPS_RTC_RUDR_MASK,
++	.write_time_udr_mask	= S2MPS15_RTC_WUDR_MASK,
++	.write_alarm_udr_mask	= S2MPS15_RTC_AUDR_MASK,
++};
++
+ struct s5m_rtc_info {
+ 	struct device *dev;
+ 	struct sec_pmic_dev *s5m87xx;
+@@ -254,6 +271,7 @@ static int s5m_check_pending_alarm_interrupt(struct s5m_rtc_info *info,
+ 		val &= S5M_ALARM0_STATUS;
+ 		break;
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -302,6 +320,7 @@ static int s5m8767_rtc_set_alarm_reg(struct s5m_rtc_info *info)
+ 		udr_mask |= S5M_RTC_TIME_EN_MASK;
+ 		break;
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -353,6 +372,7 @@ static int s5m_rtc_read_time(struct device *dev, struct rtc_time *tm)
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -377,6 +397,7 @@ static int s5m_rtc_set_time(struct device *dev, struct rtc_time *tm)
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -415,6 +436,7 @@ static int s5m_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -454,6 +476,7 @@ static int s5m_rtc_stop_alarm(struct s5m_rtc_info *info)
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -493,6 +516,7 @@ static int s5m_rtc_start_alarm(struct s5m_rtc_info *info)
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -531,6 +555,7 @@ static int s5m_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -612,6 +637,7 @@ static int s5m8767_rtc_init_reg(struct s5m_rtc_info *info)
+ 		break;
+ 
+ 	case S2MPG10:
++	case S2MPU08:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -676,9 +702,16 @@ static int s5m_rtc_probe(struct platform_device *pdev)
+ 	info->regmap = dev_get_regmap(pdev->dev.parent, "rtc");
+ 	if (!info->regmap) {
+ 		const struct regmap_config *regmap_cfg;
++		u16 rtc_addr = RTC_I2C_ADDR;
+ 		struct i2c_client *i2c;
+ 
+ 		switch (device_type) {
++		case S2MPU08:
++			regmap_cfg = &s2mps14_rtc_regmap_config;
++			info->regs = &s2mpu08_rtc_regs;
++			/* SPEEDY device id of the RTC block */
++			rtc_addr = 0x02;
++			break;
+ 		case S2MPS15X:
+ 			regmap_cfg = &s2mps14_rtc_regmap_config;
+ 			info->regs = &s2mps15_rtc_regs;
+@@ -703,7 +736,7 @@ static int s5m_rtc_probe(struct platform_device *pdev)
+ 
+ 		i2c = devm_i2c_new_dummy_device(&pdev->dev,
+ 						s5m87xx->i2c->adapter,
+-						RTC_I2C_ADDR);
++						rtc_addr);
+ 		if (IS_ERR(i2c))
+ 			return dev_err_probe(&pdev->dev, PTR_ERR(i2c),
+ 					     "Failed to allocate I2C\n");
+@@ -812,6 +845,7 @@ static const struct platform_device_id s5m_rtc_id[] = {
+ 	{ .name = "s2mps13-rtc", .driver_data = S2MPS13X },
+ 	{ .name = "s2mps14-rtc", .driver_data = S2MPS14X },
+ 	{ .name = "s2mps15-rtc", .driver_data = S2MPS15X },
++	{ .name = "s2mpu08-rtc", .driver_data = S2MPU08 },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(platform, s5m_rtc_id);
+diff --git a/include/linux/mfd/samsung/core.h b/include/linux/mfd/samsung/core.h
+index 6191f409d..4e8a2361f 100644
+--- a/include/linux/mfd/samsung/core.h
++++ b/include/linux/mfd/samsung/core.h
+@@ -47,6 +47,7 @@ enum sec_device_type {
+ 	S2MPS15X,
+ 	S2MPU02,
+ 	S2MPU05,
++	S2MPU08,
+ 	S2MU005,
+ };
+ 
+diff --git a/include/linux/mfd/samsung/s2mpu08.h b/include/linux/mfd/samsung/s2mpu08.h
+new file mode 100644
+index 000000000..ab725e202
+--- /dev/null
++++ b/include/linux/mfd/samsung/s2mpu08.h
+@@ -0,0 +1,106 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Samsung S2MPU08 PMIC (Exynos 7885/7904, behind the SPEEDY bus)
++ *
++ * Register map of the PMIC block (SPEEDY device 1), from the Samsung
++ * downstream kernel.
++ */
++
++#ifndef __LINUX_MFD_S2MPU08_H
++#define __LINUX_MFD_S2MPU08_H
++
++#define S2MPU08_REG_INT1		0x00
++#define S2MPU08_REG_INT2		0x01
++#define S2MPU08_REG_INT3		0x02
++#define S2MPU08_REG_INT1M		0x03
++#define S2MPU08_REG_INT2M		0x04
++#define S2MPU08_REG_INT3M		0x05
++#define S2MPU08_REG_STATUS1		0x06
++#define S2MPU08_REG_STATUS2		0x07
++#define S2MPU08_REG_PWRONSRC		0x08
++#define S2MPU08_REG_OFFSRC		0x09
++#define S2MPU08_REG_CTRL1		0x0c
++#define S2MPU08_REG_CTRL2		0x0d
++#define S2MPU08_REG_CTRL3		0x0e
++
++#define S2MPU08_REG_B1CTRL1		0x14
++#define S2MPU08_REG_B1CTRL2		0x15
++#define S2MPU08_REG_B2CTRL1		0x16
++#define S2MPU08_REG_B2CTRL2		0x17
++#define S2MPU08_REG_B3CTRL1		0x18
++#define S2MPU08_REG_B3CTRL2		0x19
++#define S2MPU08_REG_B4CTRL1		0x1a
++#define S2MPU08_REG_B4CTRL2		0x1b
++#define S2MPU08_REG_B5CTRL1		0x1c
++#define S2MPU08_REG_B5CTRL2		0x1d
++#define S2MPU08_REG_B6CTRL1		0x1e
++#define S2MPU08_REG_B6CTRL2		0x1f
++#define S2MPU08_REG_B7CTRL1		0x20
++#define S2MPU08_REG_B7CTRL2		0x21
++#define S2MPU08_REG_B8CTRL1		0x23
++#define S2MPU08_REG_B8CTRL2		0x24
++#define S2MPU08_REG_BUCKRAMP		0x28
++
++#define S2MPU08_REG_L1CTRL		0x2c
++#define S2MPU08_REG_L2CTRL1		0x2d
++#define S2MPU08_REG_L2CTRL2		0x2e
++/* LDO3..LDO37 control registers follow one per LDO from 0x2f */
++#define S2MPU08_REG_LCTRL(n)		(0x2c + (n))
++
++/* S2MPU08 regulator ids (LDO15..LDO32 are not bonded out) */
++enum s2mpu08_regulators {
++	S2MPU08_LDO1,
++	S2MPU08_LDO2,
++	S2MPU08_LDO3,
++	S2MPU08_LDO4,
++	S2MPU08_LDO5,
++	S2MPU08_LDO6,
++	S2MPU08_LDO7,
++	S2MPU08_LDO8,
++	S2MPU08_LDO9,
++	S2MPU08_LDO10,
++	S2MPU08_LDO11,
++	S2MPU08_LDO12,
++	S2MPU08_LDO13,
++	S2MPU08_LDO14,
++	S2MPU08_LDO33,
++	S2MPU08_LDO34,
++	S2MPU08_LDO35,
++	S2MPU08_LDO36,
++	S2MPU08_LDO37,
++	S2MPU08_BUCK1,
++	S2MPU08_BUCK2,
++	S2MPU08_BUCK3,
++	S2MPU08_BUCK4,
++	S2MPU08_BUCK5,
++	S2MPU08_BUCK6,
++	S2MPU08_BUCK7,
++	S2MPU08_BUCK8,
++
++	S2MPU08_REGULATOR_MAX,
++};
++
++#define S2MPU08_BUCK_MIN1		300000
++#define S2MPU08_BUCK_MIN2		600000
++#define S2MPU08_LDO_MIN1		700000
++#define S2MPU08_LDO_MIN2		500000
++#define S2MPU08_LDO_MIN3		1800000
++#define S2MPU08_LDO_MIN4		300000
++#define S2MPU08_BUCK_STEP1		6250
++#define S2MPU08_BUCK_STEP2		12500
++#define S2MPU08_LDO_STEP1		12500
++#define S2MPU08_LDO_STEP2		25000
++
++#define S2MPU08_LDO_VSEL_MASK		0x3f
++#define S2MPU08_BUCK_VSEL_MASK		0xff
++#define S2MPU08_LDO_N_VOLTAGES		(S2MPU08_LDO_VSEL_MASK + 1)
++#define S2MPU08_BUCK_N_VOLTAGES		(S2MPU08_BUCK_VSEL_MASK + 1)
++
++#define S2MPU08_ENABLE_SHIFT		6
++#define S2MPU08_ENABLE_MASK		(0x03 << S2MPU08_ENABLE_SHIFT)
++
++#define S2MPU08_ENABLE_TIME_LDO		128
++#define S2MPU08_ENABLE_TIME_BUCK123	110
++#define S2MPU08_ENABLE_TIME_BUCK45678	150
++
++#endif /* __LINUX_MFD_S2MPU08_H */
+-- 
+2.53.0
+

@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 30/34] arm64: dts: exynos7885: MCT tick and PSCI core power
+ down idle state
+
+MCT at 0x10040000 with its 4 global and 8 local timer interrupts (SPI
+234-245, checked through the GIC pending bits), driving the per-CPU tick.
+Idle state "c2": PSCI CPU_SUSPEND power down (0x10000) with the vendor
+latencies, 750 us residency on the boot cluster, 3 ms on the others.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi | 63 ++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index cccdf7371..4f137dcfa 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -99,6 +99,7 @@ cpu0: cpu@100 {
+ 			#cooling-cells = <2>;
+ 			reg = <0x100>;
+ 			enable-method = "psci";
++			cpu-idle-states = <&cpu_sleep_boot>;
+ 		};
+ 
+ 		cpu1: cpu@101 {
+@@ -110,6 +111,7 @@ cpu1: cpu@101 {
+ 			#cooling-cells = <2>;
+ 			reg = <0x101>;
+ 			enable-method = "psci";
++			cpu-idle-states = <&cpu_sleep_boot>;
+ 		};
+ 
+ 		cpu2: cpu@102 {
+@@ -121,6 +123,7 @@ cpu2: cpu@102 {
+ 			#cooling-cells = <2>;
+ 			reg = <0x102>;
+ 			enable-method = "psci";
++			cpu-idle-states = <&cpu_sleep_boot>;
+ 		};
+ 
+ 		cpu3: cpu@103 {
+@@ -132,6 +135,7 @@ cpu3: cpu@103 {
+ 			#cooling-cells = <2>;
+ 			reg = <0x103>;
+ 			enable-method = "psci";
++			cpu-idle-states = <&cpu_sleep_boot>;
+ 		};
+ 
+ 		cpu4: cpu@200 {
+@@ -143,6 +147,7 @@ cpu4: cpu@200 {
+ 			#cooling-cells = <2>;
+ 			reg = <0x200>;
+ 			enable-method = "psci";
++			cpu-idle-states = <&cpu_sleep>;
+ 		};
+ 
+ 		cpu5: cpu@201 {
+@@ -154,6 +159,7 @@ cpu5: cpu@201 {
+ 			#cooling-cells = <2>;
+ 			reg = <0x201>;
+ 			enable-method = "psci";
++			cpu-idle-states = <&cpu_sleep>;
+ 		};
+ 
+ 		cpu6: cpu@0 {
+@@ -165,6 +171,7 @@ cpu6: cpu@0 {
+ 			#cooling-cells = <2>;
+ 			reg = <0x0>;
+ 			enable-method = "psci";
++			cpu-idle-states = <&cpu_sleep>;
+ 		};
+ 
+ 		cpu7: cpu@1 {
+@@ -176,6 +183,35 @@ cpu7: cpu@1 {
+ 			#cooling-cells = <2>;
+ 			reg = <0x1>;
+ 			enable-method = "psci";
++			cpu-idle-states = <&cpu_sleep>;
++		};
++
++		/*
++		 * Core power down (downstream "c2"): PSCI CPU_SUSPEND with the
++		 * PMU local power request cleared by exynos7885-pmu. The tick
++		 * runs on the MCT local timers, which keep counting. Values
++		 * from the vendor device tree.
++		 */
++		idle-states {
++			entry-method = "psci";
++
++			cpu_sleep_boot: cpu-sleep-boot {
++				compatible = "arm,idle-state";
++				idle-state-name = "c2";
++				arm,psci-suspend-param = <0x10000>;
++				entry-latency-us = <35>;
++				exit-latency-us = <90>;
++				min-residency-us = <750>;
++			};
++
++			cpu_sleep: cpu-sleep {
++				compatible = "arm,idle-state";
++				idle-state-name = "c2";
++				arm,psci-suspend-param = <0x10000>;
++				entry-latency-us = <30>;
++				exit-latency-us = <75>;
++				min-residency-us = <3000>;
++			};
+ 		};
+ 	};
+ 
+@@ -450,6 +486,33 @@ gic: interrupt-controller@12301000 {
+ 			interrupts = <GIC_PPI 9 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_HIGH)>;
+ 		};
+ 
++		/*
++		 * Multi-core timer in the always-on domain. Its per-CPU local
++		 * timers drive the tick (as on the vendor kernel): unlike the
++		 * arch timer they keep running while a core is powered down
++		 * in cpuidle, and their interrupts wake the core.
++		 */
++		timer@10040000 {
++			compatible = "samsung,exynos7885-mct",
++				     "samsung,exynos4210-mct";
++			reg = <0x10040000 0x800>;
++			interrupts = <GIC_SPI 234 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 235 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 236 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 237 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 238 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 239 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 240 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 242 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 243 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 244 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 245 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&oscclk>, <&cmu_peri CLK_GOUT_MCT_PCLK>;
++			clock-names = "fin_pll", "mct";
++			samsung,local-timers-tick;
++		};
++
+ 		cmu_peri: clock-controller@10010000 {
+ 			compatible = "samsung,exynos7885-cmu-peri";
+ 			reg = <0x10010000 0x8000>;
+-- 
+2.53.0
+

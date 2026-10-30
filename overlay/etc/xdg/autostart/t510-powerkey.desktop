@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Power key (t510)
+Comment=Power button: lock and turn the screen off, or turn it back on; hold for a screenshot, 3 s for the power dialog
+Exec=/usr/local/bin/t510-powerkey
+OnlyShowIn=XFCE;

@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 08/34] arm64: dts: gta3xlwifi: power off via PS_HOLD
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index 1ea278a96..d04d80c9d 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -258,6 +258,15 @@ reboot: syscon-reboot {
+ 		mask = <0x1>;
+ 	};
+ 
++	/* Downstream power off: PS_HOLD low */
++	poweroff: syscon-poweroff {
++		compatible = "syscon-poweroff";
++		regmap = <&pmu_system_controller>;
++		offset = <0x330c>; /* PS_HOLD_CONTROL */
++		mask = <0x100>;
++		value = <0x0>;
++	};
++
+ 	/* Samsung sec_reboot reason (INFORM3), read by S-Boot */
+ 	reboot-mode {
+ 		compatible = "syscon-reboot-mode";
+-- 
+2.53.0
+

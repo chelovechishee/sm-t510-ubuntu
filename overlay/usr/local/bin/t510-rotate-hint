@@ -1,0 +1,85 @@
+#!/usr/bin/python3
+"""Screen rotation hint for the SM-T510 X session.
+
+Rotating the screen restarts the X session, so it never happens on its own:
+when the tablet is held in another orientation than the screen for a moment,
+a rotate icon shows up in the panel tray, and tapping it rotates the screen
+there (t510-rotate). The orientation sensing lives in t510-rotate.
+"""
+import importlib.machinery
+import importlib.util
+import subprocess
+import warnings
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import GLib, Gtk  # noqa: E402
+
+# Gtk.StatusIcon is deprecated but is what the XFCE tray (XEmbed) shows
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+ROTATE = "/usr/local/sbin/t510-rotate"
+POLL_MS = 300
+STABLE_MS = 1000
+
+NAMES = {
+    "portrait": "portrait",
+    "landscape-cw": "landscape",
+    "portrait-inverted": "portrait, upside down",
+    "landscape-ccw": "landscape",
+}
+
+
+def load_rotate():
+    loader = importlib.machinery.SourceFileLoader("t510_rotate", ROTATE)
+    spec = importlib.util.spec_from_loader("t510_rotate", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class Hint:
+    def __init__(self):
+        self.rot = load_rotate()
+        self.icon = Gtk.StatusIcon()
+        self.icon.set_visible(False)
+        self.icon.connect("activate", self.on_activate)
+        self.target = None
+        self.candidate = None
+        self.since = 0
+        GLib.timeout_add(POLL_MS, self.poll)
+
+    def poll(self):
+        held = self.rot.sense()
+        now = GLib.get_monotonic_time() // 1000
+        if held != self.candidate:
+            self.candidate, self.since = held, now
+        elif now - self.since >= STABLE_MS:
+            screen = self.rot.current()
+            self.show(held if held and held != screen else None, screen)
+        return True
+
+    def show(self, target, screen):
+        if target == self.target:
+            return
+        self.target = target
+        if not target:
+            self.icon.set_visible(False)
+            return
+        cycle = self.rot.CYCLE
+        clockwise = cycle.index(target) == (cycle.index(screen) + 1) % len(cycle) \
+            if screen in cycle else True
+        self.icon.set_from_icon_name("object-rotate-right" if clockwise else "object-rotate-left")
+        self.icon.set_tooltip_text("Rotate the screen: %s (the session restarts)" % NAMES[target])
+        self.icon.set_visible(True)
+
+    def on_activate(self, _icon):
+        if self.target:
+            self.icon.set_visible(False)
+            subprocess.Popen(["sudo", "-n", ROTATE, self.target])
+
+
+if __name__ == "__main__":
+    Hint()
+    Gtk.main()

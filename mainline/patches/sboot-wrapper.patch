@@ -1,0 +1,115 @@
+diff --git a/Makefile b/Makefile
+index 08ada2c..2c9655a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,8 @@
+ KERNEL_PATH?=kernel
+ DTB_PATH?=dtb
+ CMDLINE?=clk_ignore_unused
++INITRD_START?=0x89000000
++INITRD_END?=0x890FFFFF
+ 
+ CCPREFIX?=aarch64-linux-gnu-
+ CC=$(CCPREFIX)gcc
+@@ -14,6 +16,18 @@ ifdef POWER_KEY_BOOT
+ DEFS += -DPOWER_KEY_BOOT
+ endif
+ 
++ifdef KERNEL_LOAD
++DEFS += -DKERNEL_LOAD=$(KERNEL_LOAD)
++endif
++
++ifdef FB_MARK
++DEFS += -DFB_MARK=$(FB_MARK)
++endif
++
++ifdef SEC_REBOOT_REASON_RESET
++DEFS += -DSEC_REBOOT_REASON_RESET
++endif
++
+ OBJ=boot.o main.o
+ 
+ .PHONY: rebuild clean
+@@ -25,7 +39,7 @@ wrapper.o: $(OBJ) linker.lds tmp.dtb
+ 	$(LD) $(OBJ) -o $@ --script=linker.lds
+ 
+ linker.lds: linker.lds.S $(KERNEL_PATH)
+-	$(CPP) $< -DKERNEL_PATH=$(KERNEL_PATH) -DDTB_PATH=$(DTB_PATH) -P -o $@
++	$(CPP) -undef $< -DKERNEL_PATH=$(KERNEL_PATH) -DDTB_PATH=$(DTB_PATH) -P -o $@
+ 
+ %.o: %.S defs_value
+ 	$(CC) $(DEFS) -c -o $@ $<
+@@ -33,8 +47,8 @@ linker.lds: linker.lds.S $(KERNEL_PATH)
+ %.o: %.c defs_value
+ 	$(CC) -fno-builtin $(DEFS) -c -o $@ $<
+ 
+-tmp.dtb: $(DTB_PATH) cmdline_value
+-	( dtc -O dts $(DTB_PATH) && echo "/ { chosen { bootargs = \"$(CMDLINE)\"; linux,initrd-start = <0x89000000>; linux,initrd-end = <0x890FFFFF>; }; };" ) | dtc -O dtb -o $@
++tmp.dtb: $(DTB_PATH) cmdline_value initrd_value
++	( dtc -O dts $(DTB_PATH) && echo "/ { chosen { bootargs = \"$(CMDLINE)\"; linux,initrd-start = <$(INITRD_START)>; linux,initrd-end = <$(INITRD_END)>; }; };" ) | dtc -O dtb -o $@
+ 
+ defs_value: rebuild
+ 	@echo $(DEFS) > defs.tmp
+@@ -47,4 +61,9 @@ cmdline_value: rebuild
+ 	@rm cmdline.tmp
+ 
+ clean :
+-	-rm *.o linker.lds wrapped_kernel cmdline_value defs_value tmp.dtb
++	-rm *.o linker.lds wrapped_kernel cmdline_value defs_value initrd_value tmp.dtb
++
++initrd_value: rebuild
++	@echo $(INITRD_START) $(INITRD_END) > initrd.tmp
++	@diff initrd_value initrd.tmp || cp initrd.tmp initrd_value
++	@rm initrd.tmp
+diff --git a/main.c b/main.c
+index cdcec7d..1bf9b8e 100644
+--- a/main.c
++++ b/main.c
+@@ -1,3 +1,7 @@
++#ifndef KERNEL_LOAD
++#define KERNEL_LOAD 0x90000000
++#endif
++
+ extern void boot_kernel(void* dtb, void* x1, void* x2, void* x3, void* kernel);
+ 
+ void memcpy(void *dest, void *src, int size)
+@@ -24,10 +28,37 @@ void wait_for_power_key() {
+ }
+ #endif
+ 
++#ifdef SEC_REBOOT_REASON_RESET
++void reset_reboot_reason() {
++	//Samsung sec_reboot reason registers in the PMU (0x11C80000).
++	//INFORM2 = SEC_POWER_RESET: a reset is a reboot, not a charger power-on.
++	//INFORM3 = SEC_RESET_REASON_UNKNOWN: next reset boots the BOOT partition,
++	//so a kernel started from RECOVERY never boots itself again.
++	*((volatile unsigned int*)0x11C80808) = 0x12345678;
++	*((volatile unsigned int*)0x11C8080C) = 0x12345670;
++}
++#endif
++
++#ifdef FB_MARK
++void fb_mark() {
++	//Paint the top of the S-Boot framebuffer (1200 px wide, 4 bytes/px)
++	//so it is visible that the wrapper got control.
++	volatile unsigned int *fb = (unsigned int*)FB_MARK;
++	for (int i=0; i<1200*160; i++)
++		fb[i] = 0xff00ff00;
++}
++#endif
++
+ void main(void* dtb, void* kernel) {
++#ifdef FB_MARK
++	fb_mark();
++#endif
++#ifdef SEC_REBOOT_REASON_RESET
++	reset_reboot_reason();
++#endif
+ #ifdef POWER_KEY_BOOT
+ 	wait_for_power_key();
+ #endif
+-	memcpy((void*)0x90000000, kernel, 0x2000000);
+-	boot_kernel(dtb, 0, 0, 0, (void*)0x90000000);
++	memcpy((void*)KERNEL_LOAD, kernel, 0x2000000);
++	boot_kernel(dtb, 0, 0, 0, (void*)KERNEL_LOAD);
+ }

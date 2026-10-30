@@ -1,0 +1,4 @@
+# Mainline kernel: the display is simplefb (/dev/fb0) without DRM. Since
+# systemd 258 71-seat.rules makes an fbdev a seat master only with nomodeset,
+# so logind never marks seat0 graphical and LightDM starts no X server.
+SUBSYSTEM=="graphics", KERNEL=="fb0", TAG+="master-of-seat"

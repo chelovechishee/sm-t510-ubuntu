@@ -1,0 +1,159 @@
+#!/usr/bin/python3
+"""Power button for the SM-T510 X session: lock + screen off, or screen on.
+
+A press with the screen off turns it on at once. With the screen on, a short
+press (released before LONG_PRESS) locks and turns it off; released after a
+longer hold it takes a screenshot (t510-screenshot: Pictures/Screenshots and
+the clipboard); held for
+POWER_PRESS it opens the Xfce power dialog (log out, restart, shut down) while
+still held. When the session is locked the screenshot and the dialog would
+both land behind the greeter, so they are skipped: the greeter has its own
+power menu.
+
+Reads KEY_POWER from the gpio-keys evdev node ("gpio_keys" on 4.4), readable by
+the seat user via the uaccess udev rule, and drives X DPMS and, on mainline, the
+panel backlight (bl_power, group-writable by 70-t510-backlight.rules). logind
+ignores the key.
+"""
+import glob
+import os
+import select
+import struct
+import subprocess
+import time
+
+EV_KEY = 0x01
+KEY_POWER = 116
+LONG_PRESS = 0.8  # seconds: screenshot instead of lock
+POWER_PRESS = 3.0  # seconds: power dialog
+
+children = []
+
+
+def spawn(cmd):
+    """Start cmd in the background and reap the ones that have exited."""
+    children[:] = [p for p in children if p.poll() is None]
+    children.append(subprocess.Popen(cmd, start_new_session=True))
+
+
+def find_device():
+    for path in glob.glob("/sys/class/input/input*"):
+        try:
+            with open(path + "/name") as f:
+                if f.read().strip() not in ("gpio_keys", "gpio-keys"):
+                    continue
+        except OSError:
+            continue
+        for ev in glob.glob(path + "/event*"):
+            return "/dev/input/" + os.path.basename(ev)
+    return None
+
+
+def backlight_power():
+    """bl_power of the panel backlight (mainline), None without one (4.4)."""
+    for path in glob.glob("/sys/class/backlight/*/bl_power"):
+        return path
+    return None
+
+
+def monitor_on():
+    bl = backlight_power()
+    if bl:
+        # the backlight is the truth: X DPMS cannot blank simplefb
+        with open(bl) as f:
+            return f.read().strip() == "0"
+    out = subprocess.run(["xset", "q"], capture_output=True, text=True).stdout
+    return "Monitor is Off" not in out
+
+
+def set_backlight(on):
+    bl = backlight_power()
+    if bl:
+        try:
+            with open(bl, "w") as f:
+                f.write("0" if on else "4")
+        except OSError:
+            pass
+
+
+def locked():
+    out = subprocess.run(["light-locker-command", "-q"],
+                         capture_output=True, text=True).stdout
+    return "is active" in out
+
+
+def lock_and_off():
+    # light-locker hands the screen to the LightDM greeter (password and
+        # on-screen keyboard as at login); xflock4 if it is not running
+        if subprocess.run(["light-locker-command", "-l"]).returncode != 0:
+            subprocess.run(["xflock4"])
+        time.sleep(0.5)
+        subprocess.run(["xset", "dpms", "force", "off"])
+        set_backlight(False)
+
+
+def screen_on():
+    set_backlight(True)
+    subprocess.run(["xset", "dpms", "force", "on"])
+
+
+def screenshot():
+    if not locked():
+        # stays running while it holds the clipboard
+        spawn(["t510-screenshot"])
+
+
+def power_dialog():
+    if not locked():
+        spawn(["xfce4-session-logout"])
+
+
+def main():
+    while True:
+        dev = find_device()
+        if not dev:
+            time.sleep(5)
+            continue
+        try:
+            fd = os.open(dev, os.O_RDONLY)
+        except OSError:
+            time.sleep(2)
+            continue
+        # pressed: time of a press whose action is still to be decided
+        pressed = None
+        try:
+            while True:
+                timeout = None
+                if pressed is not None:
+                    timeout = max(0, pressed + POWER_PRESS - time.monotonic())
+                if not select.select([fd], [], [], timeout)[0]:
+                    pressed = None
+                    power_dialog()
+                    continue
+                data = os.read(fd, 24 * 16)
+                if not data:
+                    break
+                for off in range(0, len(data) - 23, 24):
+                    _, _, typ, code, value = struct.unpack_from("qqHHi", data, off)
+                    if typ != EV_KEY or code != KEY_POWER:
+                        continue
+                    if value == 1:
+                        if monitor_on():
+                            pressed = time.monotonic()
+                        else:
+                            screen_on()
+                    elif value == 0 and pressed is not None:
+                        held = time.monotonic() - pressed
+                        pressed = None
+                        if held < LONG_PRESS:
+                            lock_and_off()
+                        else:
+                            screenshot()
+        except OSError:
+            time.sleep(2)
+        finally:
+            os.close(fd)
+
+
+if __name__ == "__main__":
+    main()

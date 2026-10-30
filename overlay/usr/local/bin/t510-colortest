@@ -1,0 +1,25 @@
+#!/usr/bin/python3
+# Full-screen colour bars with names, for checking the panel's colours by eye.
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+
+BARS = [('RED', '#ff0000'), ('GREEN', '#00ff00'), ('BLUE', '#0000ff'),
+        ('YELLOW', '#ffff00'), ('WHITE', '#ffffff'), ('BLACK', '#000000')]
+
+css = b''.join(b'#b%d { background: %s; }' % (i, c.encode()) for i, (_, c) in enumerate(BARS))
+prov = Gtk.CssProvider()
+prov.load_from_data(css + b' label { font-size: 40px; color: #808080; }')
+win = Gtk.Window(title='colortest')
+win.get_style_context().add_provider_for_screen(win.get_screen(), prov, 800)
+box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, homogeneous=True)
+for i, (name, _) in enumerate(BARS):
+    ev = Gtk.EventBox(name='b%d' % i)
+    ev.add(Gtk.Label(label=name + '  (tap to close)'))
+    ev.connect('button-press-event', Gtk.main_quit)
+    box.pack_start(ev, True, True, 0)
+win.add(box)
+win.connect('destroy', Gtk.main_quit)
+win.fullscreen()
+win.show_all()
+Gtk.main()

@@ -1,0 +1,20 @@
+# downloads, trees, build outputs
+/dl/
+/src/
+/out/
+/rootfs/
+/mainline/out/
+/mainline/minimal_sboot_wrapper/
+/gpu/mesa-*/
+__pycache__/
+# closed firmware collected by scripts/get-firmware.sh: never commit
+/firmware/
+# binaries built from tools/
+/tools/fbtool
+/tools/longpress
+/tools/*.so
+/tools/gpu/gles-*
+!/tools/gpu/gles-*.c
+/tools/usbregs/*
+!/tools/usbregs/usbregs.c
+!/tools/usbregs/Makefile

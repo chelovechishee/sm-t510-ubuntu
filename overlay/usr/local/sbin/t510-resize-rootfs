@@ -1,0 +1,37 @@
+#!/usr/bin/python3
+"""Grow the mounted root file system to the whole userdata partition.
+
+resize2fs cannot do it on this kernel: it opens the block device for writing
+first, and with CONFIG_BLK_DEV_WRITE_MOUNTED off a mounted device refuses
+that (EBUSY). Growing a mounted ext4 needs only the file system's own resize
+ioctl, which is what resize2fs would end up calling.
+"""
+import fcntl
+import os
+import struct
+import sys
+
+PART = "mmcblk0p33"
+# _IOW('f', 16, __u64)
+EXT4_IOC_RESIZE_FS = 0x40086610
+
+
+def main():
+    with open("/sys/class/block/%s/size" % PART) as f:
+        part_bytes = int(f.read()) * 512
+    st = os.statvfs("/")
+    blocks = part_bytes // st.f_frsize
+    if blocks <= st.f_blocks:
+        print("/ already fills %s" % PART)
+        return 0
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.ioctl(fd, EXT4_IOC_RESIZE_FS, struct.pack("Q", blocks))
+    finally:
+        os.close(fd)
+    print("/ grown to %d MiB" % (part_bytes >> 20))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

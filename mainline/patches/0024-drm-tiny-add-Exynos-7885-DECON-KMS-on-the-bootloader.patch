@@ -1,0 +1,569 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 24/34] drm/tiny: add Exynos 7885 DECON KMS on the bootloader
+ setup; arm64: dts: exynos7885/gta3xlwifi: DECON, Mali-G71
+
+S-Boot leaves DECON0 (video mode), DSIM and the panel running and scans out
+through DPU DMA channel G0. exynos7885-decon keeps that setup and exposes it
+as KMS: page flips write the framebuffer address into IDMA_IN_BASE_ADDR_Y
+and request a shadow update, which DECON latches at the next frame start;
+the frame-start interrupt drives vblank events. Buffers are GEM DMA (CMA):
+the DPU SysMMU is in bypass. CRTC off shows the (blanked) boot framebuffer
+and turns the backlight off.
+
+The Mali-G71 MP2 (r0p0) runs on Panfrost. S-Boot leaves the G3D power
+domain on and PLL_G3D at 343 MHz; the ACPM G3D clock reports that rate
+(no DVFS yet).
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi    |  26 ++
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts |  17 +-
+ drivers/clk/samsung/clk-acpm.c                |   2 +-
+ drivers/gpu/drm/tiny/Kconfig                  |  15 +
+ drivers/gpu/drm/tiny/Makefile                 |   1 +
+ drivers/gpu/drm/tiny/exynos7885-decon.c       | 405 ++++++++++++++++++
+ 6 files changed, 463 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/gpu/drm/tiny/exynos7885-decon.c
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index 8140994ee..bc544d005 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -790,6 +790,32 @@ i2c_7: i2c@11cd0000 {
+ 
+ 			status = "disabled";
+ 		};
++
++		/*
++		 * Scanout as left by the bootloader: DECON0 and the DPU DMA
++		 * channel G0 it reads from
++		 */
++		decon: display-controller@14860000 {
++			compatible = "samsung,exynos7885-decon";
++			reg = <0x14860000 0x1000>, <0x148b1000 0x100>;
++			reg-names = "decon", "idma";
++			interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "frame-start";
++			status = "disabled";
++		};
++
++		/* Mali-G71 MP2; S-Boot leaves the G3D domain on, PLL_G3D at 343 MHz */
++		gpu: gpu@11500000 {
++			compatible = "samsung,exynos7885-mali", "arm,mali-bifrost";
++			reg = <0x11500000 0x5000>;
++			interrupts = <GIC_SPI 159 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "job", "mmu", "gpu";
++			clocks = <&acpm_ipc 4>;	/* G3D */
++			#cooling-cells = <2>;
++			status = "disabled";
++		};
+ 	};
+ };
+ 
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index e046061ce..fa63c4475 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -108,7 +108,7 @@ abox@e9400000 {
+ 			no-map;
+ 		};
+ 
+-		framebuffer@ec000000 {
++		boot_fb: framebuffer@ec000000 {
+ 			reg = <0x0 0xec000000 0x1400000>;
+ 			no-map;
+ 		};
+@@ -140,7 +140,7 @@ tsp_dvdd: regulator-tsp-dvdd {
+ 	};
+ 
+ 	/* panel brightness through the DSIM left running by S-Boot */
+-	backlight@14870000 {
++	backlight: backlight@14870000 {
+ 		compatible = "samsung,gta3xlwifi-backlight";
+ 		reg = <0x0 0x14870000 0x100>;
+ 	};
+@@ -596,3 +596,16 @@ reboot-mode {
+ 		mode-recovery = <0x12345674>;
+ 	};
+ };
++
++&decon {
++	memory-region = <&boot_fb>;
++	backlight = <&backlight>;
++	/* 10.1" 16:10 panel */
++	width-mm = <136>;
++	height-mm = <217>;
++	status = "okay";
++};
++
++&gpu {
++	status = "okay";
++};
+diff --git a/drivers/clk/samsung/clk-acpm.c b/drivers/clk/samsung/clk-acpm.c
+index 6b343b56f..1545caa49 100644
+--- a/drivers/clk/samsung/clk-acpm.c
++++ b/drivers/clk/samsung/clk-acpm.c
+@@ -81,7 +81,7 @@ static const struct acpm_clk_variant exynos7885_acpm_clks[] = {
+ 	ACPM_CLK("int"),
+ 	ACPM_CLK_BOOT("cpucl0", 1352000000),	/* Cortex-A73 */
+ 	ACPM_CLK_BOOT("cpucl1", 1014000000),	/* Cortex-A53 */
+-	ACPM_CLK("g3d"),
++	ACPM_CLK_BOOT("g3d", 343000000),	/* Mali-G71 */
+ 	ACPM_CLK("fsys"),
+ 	ACPM_CLK("cam"),
+ 	ACPM_CLK("disp"),
+diff --git a/drivers/gpu/drm/tiny/Kconfig b/drivers/gpu/drm/tiny/Kconfig
+index f0e72d4b6..8a131c2ca 100644
+--- a/drivers/gpu/drm/tiny/Kconfig
++++ b/drivers/gpu/drm/tiny/Kconfig
+@@ -24,6 +24,21 @@ config DRM_ARCPGU
+ 
+ 	  If M is selected the module will be called arcpgu.
+ 
++config DRM_EXYNOS7885_DECON
++	tristate "Exynos 7885 DECON on the bootloader's display setup"
++	depends on DRM && OF
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	select BACKLIGHT_CLASS_DEVICE
++	select DRM_CLIENT_SELECTION
++	select DRM_GEM_DMA_HELPER
++	select DRM_KMS_HELPER
++	help
++	  KMS for Exynos 7885/7904 boards whose bootloader leaves the panel
++	  running (Samsung Galaxy Tab A 10.1 2019): page flips through the
++	  DPU DMA channel the bootloader scans out from.
++
++	  If M is selected the module will be called exynos7885-decon.
++
+ config DRM_BOCHS
+ 	tristate "DRM Support for bochs dispi vga interface (qemu stdvga)"
+ 	depends on DRM && PCI && MMU
+diff --git a/drivers/gpu/drm/tiny/Makefile b/drivers/gpu/drm/tiny/Makefile
+index 48d30bf61..48380de6b 100644
+--- a/drivers/gpu/drm/tiny/Makefile
++++ b/drivers/gpu/drm/tiny/Makefile
+@@ -2,6 +2,7 @@
+ 
+ obj-$(CONFIG_DRM_APPLETBDRM)		+= appletbdrm.o
+ obj-$(CONFIG_DRM_ARCPGU)		+= arcpgu.o
++obj-$(CONFIG_DRM_EXYNOS7885_DECON)	+= exynos7885-decon.o
+ obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
+ obj-$(CONFIG_DRM_CIRRUS_QEMU)		+= cirrus-qemu.o
+ obj-$(CONFIG_DRM_GM12U320)		+= gm12u320.o
+diff --git a/drivers/gpu/drm/tiny/exynos7885-decon.c b/drivers/gpu/drm/tiny/exynos7885-decon.c
+new file mode 100644
+index 000000000..9c62fb4a4
+--- /dev/null
++++ b/drivers/gpu/drm/tiny/exynos7885-decon.c
+@@ -0,0 +1,405 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * KMS on the Exynos 7885/7904 display path left running by the bootloader.
++ *
++ * S-Boot sets up everything (DECON0 in video mode, DSIM, the panel) and scans
++ * out its splash buffer through DPU DMA channel G0. This driver keeps that
++ * configuration and only exposes it as KMS: one CRTC/plane/connector with
++ * the bootloader's mode and pixel format. A page flip writes the
++ * framebuffer's address into the G0 base address register; DECON latches it
++ * with a shadow update at the next frame start, which also raises the
++ * interrupt used for vblank events.
++ *
++ * Buffers are physically contiguous (GEM DMA): with the DPU SysMMU in bypass
++ * the DMA reads physical addresses.
++ */
++
++#include <linux/aperture.h>
++#include <linux/backlight.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++
++#include <drm/clients/drm_client_setup.h>
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_drv.h>
++#include <drm/drm_fb_dma_helper.h>
++#include <drm/drm_fbdev_dma.h>
++#include <drm/drm_fourcc.h>
++#include <drm/drm_framebuffer.h>
++#include <drm/drm_gem_dma_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_managed.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_simple_kms_helper.h>
++#include <drm/drm_vblank.h>
++
++/* DECON0 */
++#define GLOBAL_CONTROL			0x0000
++#define GLOBAL_CONTROL_RUN_STATUS	BIT(4)
++#define INTERRUPT_ENABLE		0x0040
++#define INT_EN				BIT(0)
++#define FRAME_START_INT_EN		BIT(12)
++#define INTERRUPT_PENDING		0x004c
++#define FRAME_START_INT_PEND		BIT(12)
++#define SHADOW_REG_UPDATE_REQ		0x0060
++#define SHADOW_REG_UPDATE_REQ_GLOBAL	BIT(31)
++#define SHADOW_REG_UPDATE_REQ_WINS	0xf
++
++/* DPU DMA, IDMA channel G0 */
++#define IDMA_SRC_SIZE			0x0010
++#define IDMA_SRC_SIZE_H(v)		(((v) >> 16) & 0x3fff)
++#define IDMA_SRC_SIZE_W(v)		((v) & 0x3fff)
++#define IDMA_IN_BASE_ADDR_Y		0x0040
++
++#define SHADOW_UPDATE	(SHADOW_REG_UPDATE_REQ_GLOBAL | SHADOW_REG_UPDATE_REQ_WINS)
++
++struct decon7885 {
++	struct drm_device drm;
++	struct drm_simple_display_pipe pipe;
++	struct drm_connector connector;
++	struct drm_display_mode mode;
++
++	void __iomem *regs;
++	void __iomem *idma;
++	struct backlight_device *backlight;
++
++	/* the bootloader's buffer, black; shown while the CRTC is off */
++	phys_addr_t boot_fb;
++
++	/* flip completion, sent at the frame start that latched it */
++	struct drm_pending_vblank_event *event;	/* under drm.event_lock */
++	bool vblank_enabled;
++};
++
++#define to_decon(d) container_of(d, struct decon7885, drm)
++
++static void decon_scanout(struct decon7885 *decon, dma_addr_t addr)
++{
++	writel(lower_32_bits(addr), decon->idma + IDMA_IN_BASE_ADDR_Y);
++	writel(SHADOW_UPDATE, decon->regs + SHADOW_REG_UPDATE_REQ);
++}
++
++static irqreturn_t decon_frame_start_irq(int irq, void *arg)
++{
++	struct decon7885 *decon = arg;
++	struct drm_crtc *crtc = &decon->pipe.crtc;
++	u32 pend = readl(decon->regs + INTERRUPT_PENDING);
++
++	if (!(pend & FRAME_START_INT_PEND))
++		return IRQ_NONE;
++	writel(FRAME_START_INT_PEND, decon->regs + INTERRUPT_PENDING);
++
++	if (READ_ONCE(decon->vblank_enabled))
++		drm_crtc_handle_vblank(crtc);
++
++	spin_lock(&decon->drm.event_lock);
++	/* an update requested too late for this frame is latched by the next */
++	if (decon->event &&
++	    !(readl(decon->regs + SHADOW_REG_UPDATE_REQ) & SHADOW_UPDATE)) {
++		drm_crtc_send_vblank_event(crtc, decon->event);
++		decon->event = NULL;
++	}
++	spin_unlock(&decon->drm.event_lock);
++
++	return IRQ_HANDLED;
++}
++
++static enum drm_mode_status decon_mode_valid(struct drm_simple_display_pipe *pipe,
++					     const struct drm_display_mode *mode)
++{
++	struct decon7885 *decon = to_decon(pipe->crtc.dev);
++
++	return drm_mode_match(mode, &decon->mode, DRM_MODE_MATCH_TIMINGS) ?
++	       MODE_OK : MODE_BAD;
++}
++
++static int decon_check(struct drm_simple_display_pipe *pipe,
++		       struct drm_plane_state *plane_state,
++		       struct drm_crtc_state *crtc_state)
++{
++	struct decon7885 *decon = to_decon(pipe->crtc.dev);
++	struct drm_framebuffer *fb = plane_state->fb;
++
++	/* G0 reads lines of the bootloader's width: no other pitch */
++	if (fb && fb->pitches[0] != decon->mode.hdisplay * 4)
++		return -EINVAL;
++	return 0;
++}
++
++static void decon_enable(struct drm_simple_display_pipe *pipe,
++			 struct drm_crtc_state *crtc_state,
++			 struct drm_plane_state *plane_state)
++{
++	struct decon7885 *decon = to_decon(pipe->crtc.dev);
++
++	drm_crtc_vblank_on(&pipe->crtc);
++	backlight_enable(decon->backlight);
++}
++
++static void decon_disable(struct drm_simple_display_pipe *pipe)
++{
++	struct decon7885 *decon = to_decon(pipe->crtc.dev);
++
++	backlight_disable(decon->backlight);
++	/* the plane's buffer may go away: show black until the next enable */
++	decon_scanout(decon, decon->boot_fb);
++	drm_crtc_vblank_off(&pipe->crtc);
++}
++
++static void decon_update(struct drm_simple_display_pipe *pipe,
++			 struct drm_plane_state *old_state)
++{
++	struct decon7885 *decon = to_decon(pipe->crtc.dev);
++	struct drm_crtc *crtc = &pipe->crtc;
++	struct drm_plane_state *state = pipe->plane.state;
++	struct drm_pending_vblank_event *event = crtc->state->event;
++	bool active = crtc->state->active;
++
++	if (active && state->fb)
++		decon_scanout(decon, drm_fb_dma_get_gem_addr(state->fb, state, 0));
++
++	if (!event)
++		return;
++	crtc->state->event = NULL;
++
++	spin_lock_irq(&decon->drm.event_lock);
++	if (decon->event)
++		drm_crtc_send_vblank_event(crtc, decon->event);
++	decon->event = NULL;
++	if (active)
++		decon->event = event;
++	else
++		drm_crtc_send_vblank_event(crtc, event);
++	spin_unlock_irq(&decon->drm.event_lock);
++}
++
++static int decon_enable_vblank(struct drm_simple_display_pipe *pipe)
++{
++	WRITE_ONCE(to_decon(pipe->crtc.dev)->vblank_enabled, true);
++	return 0;
++}
++
++static void decon_disable_vblank(struct drm_simple_display_pipe *pipe)
++{
++	WRITE_ONCE(to_decon(pipe->crtc.dev)->vblank_enabled, false);
++}
++
++static const struct drm_simple_display_pipe_funcs decon_pipe_funcs = {
++	.mode_valid = decon_mode_valid,
++	.check = decon_check,
++	.enable = decon_enable,
++	.disable = decon_disable,
++	.update = decon_update,
++	.enable_vblank = decon_enable_vblank,
++	.disable_vblank = decon_disable_vblank,
++};
++
++static int decon_get_modes(struct drm_connector *connector)
++{
++	struct decon7885 *decon = to_decon(connector->dev);
++
++	return drm_connector_helper_get_modes_fixed(connector, &decon->mode);
++}
++
++static const struct drm_connector_helper_funcs decon_connector_helper_funcs = {
++	.get_modes = decon_get_modes,
++};
++
++static const struct drm_connector_funcs decon_connector_funcs = {
++	.reset = drm_atomic_helper_connector_reset,
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++
++static const struct drm_mode_config_funcs decon_mode_config_funcs = {
++	.fb_create = drm_gem_fb_create,
++	.atomic_check = drm_atomic_helper_check,
++	.atomic_commit = drm_atomic_helper_commit,
++};
++
++static const u32 decon_formats[] = {
++	DRM_FORMAT_XRGB8888,
++};
++
++DEFINE_DRM_GEM_DMA_FOPS(decon_fops);
++
++static const struct drm_driver decon_driver = {
++	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
++	.name = "exynos7885-decon",
++	.desc = "Exynos 7885 DECON (bootloader setup)",
++	.major = 1,
++	.minor = 0,
++	.fops = &decon_fops,
++	DRM_GEM_DMA_DRIVER_OPS,
++	DRM_FBDEV_DMA_DRIVER_OPS,
++};
++
++/* nominal timings around the bootloader's active area; the panel runs at 60 Hz */
++static void decon_init_mode(struct decon7885 *decon, u32 width, u32 height)
++{
++	struct drm_display_mode *mode = &decon->mode;
++	struct device_node *np = decon->drm.dev->of_node;
++	u32 mm;
++
++	mode->hdisplay = width;
++	mode->hsync_start = width + 40;
++	mode->hsync_end = width + 50;
++	mode->htotal = width + 100;
++	mode->vdisplay = height;
++	mode->vsync_start = height + 8;
++	mode->vsync_end = height + 10;
++	mode->vtotal = height + 20;
++	mode->clock = mode->htotal * mode->vtotal * 60 / 1000;
++	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	if (!of_property_read_u32(np, "width-mm", &mm))
++		mode->width_mm = mm;
++	if (!of_property_read_u32(np, "height-mm", &mm))
++		mode->height_mm = mm;
++	drm_mode_set_name(mode);
++}
++
++static int decon_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct decon7885 *decon;
++	struct drm_device *drm;
++	struct device_node *fb_np;
++	struct resource fb_res;
++	void *fb;
++	u32 size;
++	int irq, ret;
++
++	decon = devm_drm_dev_alloc(dev, &decon_driver, struct decon7885, drm);
++	if (IS_ERR(decon))
++		return PTR_ERR(decon);
++	drm = &decon->drm;
++
++	decon->regs = devm_platform_ioremap_resource_byname(pdev, "decon");
++	if (IS_ERR(decon->regs))
++		return PTR_ERR(decon->regs);
++	decon->idma = devm_platform_ioremap_resource_byname(pdev, "idma");
++	if (IS_ERR(decon->idma))
++		return PTR_ERR(decon->idma);
++
++	if (!(readl(decon->regs + GLOBAL_CONTROL) & GLOBAL_CONTROL_RUN_STATUS))
++		return dev_err_probe(dev, -ENODEV, "DECON is not running\n");
++	size = readl(decon->idma + IDMA_SRC_SIZE);
++	if (!IDMA_SRC_SIZE_W(size) || !IDMA_SRC_SIZE_H(size))
++		return dev_err_probe(dev, -ENODEV, "no scanout size: %#x\n", size);
++	decon_init_mode(decon, IDMA_SRC_SIZE_W(size), IDMA_SRC_SIZE_H(size));
++
++	fb_np = of_parse_phandle(dev->of_node, "memory-region", 0);
++	if (!fb_np)
++		return dev_err_probe(dev, -EINVAL, "no memory-region\n");
++	ret = of_address_to_resource(fb_np, 0, &fb_res);
++	of_node_put(fb_np);
++	if (ret)
++		return ret;
++	decon->boot_fb = fb_res.start;
++
++	decon->backlight = devm_of_find_backlight(dev);
++	if (IS_ERR(decon->backlight))
++		return PTR_ERR(decon->backlight);
++
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		return ret;
++
++	/* take the screen over from simplefb, then blank the old buffer */
++	ret = aperture_remove_conflicting_devices(fb_res.start,
++						  resource_size(&fb_res),
++						  decon_driver.name);
++	if (ret)
++		return ret;
++	fb = memremap(fb_res.start, resource_size(&fb_res), MEMREMAP_WC);
++	if (!fb)
++		return -ENOMEM;
++	memset(fb, 0, resource_size(&fb_res));
++	memunmap(fb);
++
++	ret = drmm_mode_config_init(drm);
++	if (ret)
++		return ret;
++	/* a rotated desktop needs framebuffers of the transposed size */
++	drm->mode_config.max_width = max(decon->mode.hdisplay, decon->mode.vdisplay);
++	drm->mode_config.max_height = drm->mode_config.max_width;
++	drm->mode_config.preferred_depth = 24;
++	drm->mode_config.funcs = &decon_mode_config_funcs;
++
++	ret = drmm_connector_init(drm, &decon->connector, &decon_connector_funcs,
++				  DRM_MODE_CONNECTOR_DSI, NULL);
++	if (ret)
++		return ret;
++	drm_connector_helper_add(&decon->connector, &decon_connector_helper_funcs);
++
++	ret = drm_simple_display_pipe_init(drm, &decon->pipe, &decon_pipe_funcs,
++					   decon_formats, ARRAY_SIZE(decon_formats),
++					   NULL, &decon->connector);
++	if (ret)
++		return ret;
++
++	ret = drm_vblank_init(drm, 1);
++	if (ret)
++		return ret;
++	drm_mode_config_reset(drm);
++
++	irq = platform_get_irq_byname(pdev, "frame-start");
++	if (irq < 0)
++		return irq;
++	writel(FRAME_START_INT_PEND, decon->regs + INTERRUPT_PENDING);
++	writel(readl(decon->regs + INTERRUPT_ENABLE) | INT_EN | FRAME_START_INT_EN,
++	       decon->regs + INTERRUPT_ENABLE);
++	ret = devm_request_irq(dev, irq, decon_frame_start_irq, 0,
++			       dev_name(dev), decon);
++	if (ret)
++		return ret;
++
++	platform_set_drvdata(pdev, drm);
++	ret = drm_dev_register(drm, 0);
++	if (ret)
++		return ret;
++
++	drm_client_setup(drm, NULL);
++	return 0;
++}
++
++static void decon_remove(struct platform_device *pdev)
++{
++	struct drm_device *drm = platform_get_drvdata(pdev);
++
++	drm_dev_unplug(drm);
++	drm_atomic_helper_shutdown(drm);
++}
++
++static void decon_shutdown(struct platform_device *pdev)
++{
++	drm_atomic_helper_shutdown(platform_get_drvdata(pdev));
++}
++
++static const struct of_device_id decon_of_match[] = {
++	{ .compatible = "samsung,exynos7885-decon" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, decon_of_match);
++
++static struct platform_driver decon_platform_driver = {
++	.driver = {
++		.name = "exynos7885-decon",
++		.of_match_table = decon_of_match,
++	},
++	.probe = decon_probe,
++	.remove = decon_remove,
++	.shutdown = decon_shutdown,
++};
++module_platform_driver(decon_platform_driver);
++
++MODULE_DESCRIPTION("Exynos 7885 DECON KMS on the bootloader's display setup");
++MODULE_LICENSE("GPL");
+-- 
+2.53.0
+

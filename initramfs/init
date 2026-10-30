@@ -1,0 +1,88 @@
+#!/bin/busybox sh
+# t510 initramfs: mount Ubuntu from userdata and switch_root to systemd.
+# On failure: rescue shell via USB (RNDIS 172.16.42.1 + ACM serial console).
+
+/bin/busybox --install -s /bin
+export PATH=/bin
+
+mkdir -p /proc /sys /dev /newroot /tmp /etc
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+log() { echo "t510-initramfs: $*" > /dev/kmsg; }
+log "start"
+
+# USB gadget: RNDIS (rndis0 on 4.4, usb0 on mainline) + ACM (ttyGS0)
+gadget_up() {
+	CFS=/sys/kernel/config
+	G=$CFS/usb_gadget/g1
+	# busybox here has no mountpoint applet
+	grep -q " $CFS configfs " /proc/mounts || mount -t configfs none $CFS
+	UDC=$(ls /sys/class/udc | head -n1)
+	mkdir -p $G/strings/0x409 $G/functions/rndis.usb0 $G/functions/acm.GS0 $G/configs/c.1/strings/0x409
+	echo 0x1d6b > $G/idVendor
+	echo 0x0104 > $G/idProduct
+	echo t510 > $G/strings/0x409/serialnumber
+	echo "$1" > $G/strings/0x409/product
+	echo "$1" > $G/configs/c.1/strings/0x409/configuration
+	echo 02:00:00:51:05:01 > $G/functions/rndis.usb0/dev_addr
+	echo 02:00:00:51:05:10 > $G/functions/rndis.usb0/host_addr
+	ln -s $G/functions/rndis.usb0 $G/configs/c.1/
+	ln -s $G/functions/acm.GS0 $G/configs/c.1/
+	echo "$UDC" > $G/UDC
+	IF=$(cat $G/functions/rndis.usb0/ifname)
+	sleep 1
+	ip link set "$IF" up
+	ip addr add 172.16.42.1/24 dev "$IF"
+}
+
+ROOT=/dev/mmcblk0p33
+for i in $(seq 100); do
+	[ -b $ROOT ] && break
+	sleep 0.1
+done
+
+# Rescue if: rootfs doesn't mount, /rescue exists, FORCE_RESCUE is set, or the
+# previous boot never reached multi-user (boot-ok.service removes /.boot-attempt).
+FORCE_RESCUE=0
+if [ -e /install ]; then
+	# boot-install.img (install.sh): never start a system, wait on USB for the
+	# PC to write USERDATA and the normal BOOT
+	log "install mode"
+	MODE=install
+elif mount -t ext4 -o rw,noatime $ROOT /newroot && [ -e /newroot/sbin/init ]; then
+	if [ "$FORCE_RESCUE" = 1 ] || [ -e /newroot/rescue ]; then
+		log "rescue requested"
+	elif [ -e /newroot/.boot-attempt ]; then
+		log "previous boot failed, rescue once"
+		rm -f /newroot/.boot-attempt
+		sync
+	else
+		touch /newroot/.boot-attempt
+		sync
+		log "switching to Ubuntu"
+		mount --move /dev /newroot/dev
+		umount /sys /proc
+		exec switch_root /newroot /sbin/init
+	fi
+fi
+
+MODE=${MODE:-rescue}
+log "$MODE mode"
+# keep the reason for later: dmesg tail goes to /tmp/rescue.log
+dmesg | tail -50 > /tmp/rescue.log
+gadget_up "t510 $MODE"
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+# serial console on /dev/ttyGS0 (host: /dev/ttyACM0)
+(while true; do setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done) &
+echo "start 172.16.42.100
+end 172.16.42.120
+interface $IF
+option subnet 255.255.255.0
+lease_file /tmp/udhcpd.leases" > /etc/udhcpd.conf
+touch /tmp/udhcpd.leases
+udhcpd /etc/udhcpd.conf
+telnetd -l /bin/sh
+while true; do sleep 3600; done

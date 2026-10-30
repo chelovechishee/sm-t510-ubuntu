@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 15/34] Input: stm-fts1ba90a: release all contacts on queue
+ overflow/ESD; arm64: dts: gta3xlwifi: battery info
+
+The controller drops queued events, releases included, when its queue
+overflows; a lost release left a finger down (stuck on-screen keys).
+simple-battery gives UPower the technology and capacity for time estimates.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts | 11 +++++
+ drivers/input/touchscreen/stm-fts1ba90a.c     | 43 ++++++++++++++++++-
+ 2 files changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index 7e3a29618..b65edae72 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -155,6 +155,16 @@ wlbt@120c0000 {
+ 		samsung,syscon-phandle = <&pmu_system_controller>;
+ 	};
+ 
++	/* 6000 mAh Li-ion, values from the downstream battery node */
++	battery: battery {
++		compatible = "simple-battery";
++		device-chemistry = "lithium-ion";
++		charge-full-design-microamp-hours = <6000000>;
++		energy-full-design-microwatt-hours = <23100000>;
++		voltage-min-design-microvolt = <3400000>;
++		voltage-max-design-microvolt = <4350000>;
++	};
++
+ 	gpio-keys {
+ 		compatible = "gpio-keys";
+ 		pinctrl-names = "default";
+@@ -187,6 +197,7 @@ &i2c_0 {
+ 	fuel-gauge@3b {
+ 		compatible = "samsung,s2mu005-fuel-gauge";
+ 		reg = <0x3b>;
++		monitored-battery = <&battery>;
+ 	};
+ };
+ 
+diff --git a/drivers/input/touchscreen/stm-fts1ba90a.c b/drivers/input/touchscreen/stm-fts1ba90a.c
+index a5138fc8c..036ddf958 100644
+--- a/drivers/input/touchscreen/stm-fts1ba90a.c
++++ b/drivers/input/touchscreen/stm-fts1ba90a.c
+@@ -51,7 +51,10 @@
+ #define FTS_ACTION_RELEASE		3
+ /* status event */
+ #define FTS_EV_STATUS_TYPE		GENMASK(5, 2)
++#define FTS_STATUS_TYPE_ERROR		1
+ #define FTS_STATUS_TYPE_INFO		2
++#define FTS_ERR_QUEUE_FULL		0x01
++#define FTS_ERR_ESD			0x02
+ #define FTS_INFO_READY			0x00
+ #define FTS_EVENT_STATUS_REPORT		0x43
+ #define FTS_EVENT_ERROR_REPORT		0xf3
+@@ -203,6 +206,33 @@ static void fts_report(struct fts1ba90a *ts, const u8 *ev)
+ 	input_report_abs(ts->input, ABS_MT_PRESSURE, z ?: 1);
+ }
+ 
++/*
++ * The controller drops events when its queue overflows (the IRQ thread was
++ * held up) or after ESD, releases included: let go of every contact, as the
++ * downstream driver does, instead of leaving a finger stuck down.
++ */
++static void fts_release_all(struct fts1ba90a *ts)
++{
++	int i;
++
++	for (i = 0; i < FTS_MAX_FINGERS; i++) {
++		input_mt_slot(ts->input, i);
++		input_mt_report_slot_inactive(ts->input);
++	}
++}
++
++static void fts_status(struct fts1ba90a *ts, const u8 *ev)
++{
++	if (FIELD_GET(FTS_EV_STATUS_TYPE, ev[0]) != FTS_STATUS_TYPE_ERROR)
++		return;
++	if (ev[1] != FTS_ERR_QUEUE_FULL && ev[1] != FTS_ERR_ESD)
++		return;
++
++	dev_warn_ratelimited(&ts->client->dev, "%s, releasing all contacts\n",
++			     ev[1] == FTS_ERR_ESD ? "ESD" : "event queue full");
++	fts_release_all(ts);
++}
++
+ static irqreturn_t fts_irq(int irq, void *dev_id)
+ {
+ 	struct fts1ba90a *ts = dev_id;
+@@ -213,14 +243,23 @@ static irqreturn_t fts_irq(int irq, void *dev_id)
+ 
+ 	left = min_t(int, FIELD_GET(FTS_EV_LEFT, ts->data[7]), FTS_FIFO_MAX - 1);
+ 	if (left && fts_read(ts, FTS_READ_ALL_EVENT, ts->data + FTS_EVENT_SIZE,
+-			     left * FTS_EVENT_SIZE))
++			     left * FTS_EVENT_SIZE)) {
++		/* the lost events may hold releases */
+ 		left = 0;
++		fts_release_all(ts);
++	}
+ 
+ 	for (i = 0; i <= left; i++) {
+ 		const u8 *ev = ts->data + i * FTS_EVENT_SIZE;
+ 
+-		if (FIELD_GET(FTS_EV_ID, ev[0]) == FTS_EV_ID_COORDINATE)
++		switch (FIELD_GET(FTS_EV_ID, ev[0])) {
++		case FTS_EV_ID_COORDINATE:
+ 			fts_report(ts, ev);
++			break;
++		case FTS_EV_ID_STATUS:
++			fts_status(ts, ev);
++			break;
++		}
+ 	}
+ 
+ 	input_mt_sync_frame(ts->input);
+-- 
+2.53.0
+

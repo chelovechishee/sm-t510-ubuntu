@@ -1,0 +1,12 @@
+[Unit]
+Description=Grow root filesystem to the whole userdata partition (first boot)
+ConditionPathExists=!/var/lib/resize-rootfs.done
+
+[Service]
+Type=oneshot
+# not resize2fs: see t510-resize-rootfs
+ExecStart=/usr/local/sbin/t510-resize-rootfs
+ExecStartPost=/usr/bin/touch /var/lib/resize-rootfs.done
+
+[Install]
+WantedBy=multi-user.target

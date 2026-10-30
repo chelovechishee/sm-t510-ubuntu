@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 25/34] arm64: dts: exynos7885: GPU DVFS through ACPM, G3D TMU
+ and GPU thermal zone
+
+Panfrost devfreq (simple_ondemand) over the ACPM G3D clock: the levels of
+the Samsung Exynos 7904 GPU table, 343-845 MHz, voltages chosen by ACPM.
+PLL_G3D follows every request. The G3D TMU (0x10074000, started by S-Boot)
+feeds a gpu-thermal zone that throttles the GPU from 75 C.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi | 62 ++++++++++++++++++++++
+ 1 file changed, 62 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index bc544d005..cccdf7371 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -302,6 +302,34 @@ opp-1690000000 {
+ 		};
+ 	};
+ 
++	gpu_opp_table: opp-table-gpu {
++		/*
++		 * Mali-G71; Exynos 7904 levels from the Samsung GPU DT (845 MHz is
++		 * its limit), voltages are ACPM's
++		 */
++		compatible = "operating-points-v2";
++
++		opp-343000000 {
++			opp-hz = /bits/ 64 <343000000>;
++		};
++
++		opp-450000000 {
++			opp-hz = /bits/ 64 <450000000>;
++		};
++
++		opp-545000000 {
++			opp-hz = /bits/ 64 <545000000>;
++		};
++
++		opp-676000000 {
++			opp-hz = /bits/ 64 <676000000>;
++		};
++
++		opp-845000000 {
++			opp-hz = /bits/ 64 <845000000>;
++		};
++	};
++
+ 	thermal-zones {
+ 		cpu-thermal {
+ 			/* polled: the TMU is read-only, see exynos7885_tmu.c */
+@@ -349,6 +377,33 @@ map-all {
+ 				};
+ 			};
+ 		};
++
++		gpu-thermal {
++			polling-delay = <1000>;
++			polling-delay-passive = <250>;
++			thermal-sensors = <&tmu_g3d 0>;
++
++			trips {
++				gpu_alert: gpu-alert {
++					temperature = <75000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				gpu-crit {
++					temperature = <110000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map-gpu {
++					trip = <&gpu_alert>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
+ 	};
+ 
+ 	soc: soc@0 {
+@@ -377,6 +432,12 @@ tmu_cpu: tmu@10070000 {
+ 			#thermal-sensor-cells = <1>;
+ 		};
+ 
++		tmu_g3d: tmu@10074000 {
++			compatible = "samsung,exynos7885-tmu";
++			reg = <0x10074000 0x400>;
++			#thermal-sensor-cells = <1>;
++		};
++
+ 		gic: interrupt-controller@12301000 {
+ 			compatible = "arm,gic-400";
+ 			#interrupt-cells = <3>;
+@@ -813,6 +874,7 @@ gpu: gpu@11500000 {
+ 				     <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH>;
+ 			interrupt-names = "job", "mmu", "gpu";
+ 			clocks = <&acpm_ipc 4>;	/* G3D */
++			operating-points-v2 = <&gpu_opp_table>;
+ 			#cooling-cells = <2>;
+ 			status = "disabled";
+ 		};
+-- 
+2.53.0
+

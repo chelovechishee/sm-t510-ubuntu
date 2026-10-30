@@ -1,0 +1,37 @@
+# SM-T510 touch defaults: Onboard docked at the bottom, auto-shown on text focus
+[org.onboard]
+start-minimized=true
+show-status-icon=false
+
+[org.onboard.auto-show]
+enabled=true
+
+[org.onboard.window]
+docking-enabled=true
+docking-edge='bottom'
+docking-shrink-workarea=true
+force-to-top=true
+
+[org.onboard.icon-palette]
+in-use=false
+
+[org.gnome.desktop.interface]
+toolkit-accessibility=true
+
+# osk XInput event filter segfaults under Python 3.12 (no GIL in the GDK filter).
+# Touch as pointer events: with touch-input='multi' Onboard misses touch ends
+# now and then and keys stay pressed (red); the kernel has them released.
+[org.onboard.keyboard]
+input-event-source='GTK'
+touch-input='none'
+
+# docked keyboard height in px (1200x1920 panel at scale 1)
+[org.onboard.window.portrait]
+dock-height=650
+
+[org.onboard.window.landscape]
+dock-height=480
+
+# layouts switch through xkb: no ibus EN icon in the tray
+[org.freedesktop.ibus.panel]
+show-icon-on-systray=false

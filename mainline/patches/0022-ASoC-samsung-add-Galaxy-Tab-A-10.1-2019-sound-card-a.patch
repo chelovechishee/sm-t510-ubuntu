@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 22/34] ASoC: samsung: add Galaxy Tab A 10.1 (2019) sound card;
+ arm64: dts: gta3xlwifi: speakers
+
+DPCM card: RDMA0 front end, UAIF3 (I2S, ABOX clock provider) back end to
+the two TFA9896 amplifiers on i2c_3 (0x34 right, 0x35 left). ABOX controls
+get the "ABOX" prefix as with codec_conf on the 4.4 kernel.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts |  26 ++++
+ sound/soc/samsung/Kconfig                     |   7 ++
+ sound/soc/samsung/Makefile                    |   2 +
+ sound/soc/samsung/gta3xl.c                    | 118 ++++++++++++++++++
+ 4 files changed, 153 insertions(+)
+ create mode 100644 sound/soc/samsung/gta3xl.c
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index deba8db64..e046061ce 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -190,6 +190,7 @@ abox_gic: abox-gic@14af0000 {
+ 
+ 	abox: abox@14a50000 {
+ 		compatible = "samsung,abox";
++		sound-name-prefix = "ABOX";
+ 		reg = <0x0 0x14a50000 0x10000>, <0x0 0x14820000 0x10000>,
+ 		      <0x0 0x14b00000 0x28000>;
+ 		reg-names = "sfr", "sysreg", "sram";
+@@ -325,6 +326,12 @@ abox_wdma_4: abox-wdma@14a52400 {
+ 		};
+ 	};
+ 
++	sound {
++		compatible = "samsung,gta3xlwifi-sound";
++		samsung,abox-rdma = <&abox_rdma_0>;
++		samsung,speaker-amps = <&speaker_right>, <&speaker_left>;
++	};
++
+ 	gpio-keys {
+ 		compatible = "gpio-keys";
+ 		pinctrl-names = "default";
+@@ -377,6 +384,25 @@ accelerometer@1d {
+ 	};
+ };
+ 
++&i2c_3 {
++	status = "okay";
++
++	/* TFA9896 speaker amplifiers on UAIF3, used without their DSP */
++	speaker_right: audio-codec@34 {
++		compatible = "nxp,tfa9896";
++		reg = <0x34>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "SpkR";
++	};
++
++	speaker_left: audio-codec@35 {
++		compatible = "nxp,tfa9896";
++		reg = <0x35>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "SpkL";
++	};
++};
++
+ &i2c_4 {
+ 	clock-frequency = <400000>;
+ 	status = "okay";
+diff --git a/sound/soc/samsung/Kconfig b/sound/soc/samsung/Kconfig
+index 1f5a0d2aa..914b076ad 100644
+--- a/sound/soc/samsung/Kconfig
++++ b/sound/soc/samsung/Kconfig
+@@ -150,4 +150,11 @@ config SND_SOC_SAMSUNG_MIDAS_WM1811
+ 
+ source "sound/soc/samsung/abox/Kconfig"
+ 
++config SND_SOC_SAMSUNG_GTA3XL
++	tristate "Sound card of the Samsung Galaxy Tab A 10.1 (2019) SM-T510"
++	depends on SND_SOC_SAMSUNG_ABOX && I2C
++	select SND_SOC_TFA989X
++	help
++	  ABOX playback to the two TFA9896 speaker amplifiers of the SM-T510.
++
+ endif #SND_SOC_SAMSUNG
+diff --git a/sound/soc/samsung/Makefile b/sound/soc/samsung/Makefile
+index 1451b3e89..1c3bba8b0 100644
+--- a/sound/soc/samsung/Makefile
++++ b/sound/soc/samsung/Makefile
+@@ -43,3 +43,5 @@ obj-$(CONFIG_SND_SOC_SAMSUNG_TM2_WM5110) += snd-soc-tm2-wm5110.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_ARIES_WM8994) += snd-soc-aries-wm8994.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_MIDAS_WM1811) += snd-soc-midas-wm1811.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_ABOX) += abox/
++snd-soc-gta3xl-y := gta3xl.o
++obj-$(CONFIG_SND_SOC_SAMSUNG_GTA3XL) += snd-soc-gta3xl.o
+diff --git a/sound/soc/samsung/gta3xl.c b/sound/soc/samsung/gta3xl.c
+new file mode 100644
+index 000000000..e417a86df
+--- /dev/null
++++ b/sound/soc/samsung/gta3xl.c
+@@ -0,0 +1,118 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Sound card of the Samsung Galaxy Tab A 10.1 (2019), SM-T510.
++ *
++ * Playback goes through the ABOX DSP: the RDMA0 front end (the PCM device)
++ * is mixed by ABOX and sent out of UAIF3 to the two TFA9896 speaker
++ * amplifiers. The ABOX mixer route (SPUS OUT0 -> SIFS1 -> UAIF SPK3) is set
++ * from userspace with its ALSA controls. The COD3035 codec (headphones,
++ * microphones) on UAIF0 is not described yet.
++ */
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <sound/samsung/abox.h>
++#include <sound/soc.h>
++
++static const struct snd_soc_dapm_widget gta3xl_widgets[] = {
++	SND_SOC_DAPM_SPK("Speaker", NULL),
++};
++
++static const struct snd_soc_dapm_route gta3xl_routes[] = {
++	{ "Speaker", NULL, "SpkL OUT" },
++	{ "Speaker", NULL, "SpkR OUT" },
++};
++
++static int gta3xl_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct device_node *np = dev->of_node;
++	struct snd_soc_dai_link_component *fe_cpu, *fe_platform, *be_cpu, *amps;
++	struct snd_soc_dai_link *links;
++	struct snd_soc_card *card;
++	int i, n_amps;
++
++	card = devm_kzalloc(dev, sizeof(*card), GFP_KERNEL);
++	links = devm_kcalloc(dev, 2, sizeof(*links), GFP_KERNEL);
++	fe_cpu = devm_kzalloc(dev, sizeof(*fe_cpu), GFP_KERNEL);
++	fe_platform = devm_kzalloc(dev, sizeof(*fe_platform), GFP_KERNEL);
++	be_cpu = devm_kzalloc(dev, sizeof(*be_cpu), GFP_KERNEL);
++	if (!card || !links || !fe_cpu || !fe_platform || !be_cpu)
++		return -ENOMEM;
++
++	n_amps = of_count_phandle_with_args(np, "samsung,speaker-amps", NULL);
++	if (n_amps <= 0)
++		return dev_err_probe(dev, -EINVAL, "no samsung,speaker-amps\n");
++	amps = devm_kcalloc(dev, n_amps, sizeof(*amps), GFP_KERNEL);
++	if (!amps)
++		return -ENOMEM;
++	for (i = 0; i < n_amps; i++) {
++		amps[i].of_node = of_parse_phandle(np, "samsung,speaker-amps", i);
++		amps[i].dai_name = "tfa989x-hifi";
++	}
++
++	/* front end: the RDMA0 PCM, DMA by its ABOX RDMA platform */
++	fe_cpu->dai_name = "RDMA0";
++	fe_platform->of_node = of_parse_phandle(np, "samsung,abox-rdma", 0);
++	if (!fe_platform->of_node)
++		return dev_err_probe(dev, -EINVAL, "no samsung,abox-rdma\n");
++
++	links[0].name = "RDMA0";
++	links[0].stream_name = "RDMA0";
++	links[0].cpus = fe_cpu;
++	links[0].num_cpus = 1;
++	links[0].codecs = &snd_soc_dummy_dlc;
++	links[0].num_codecs = 1;
++	links[0].platforms = fe_platform;
++	links[0].num_platforms = 1;
++	links[0].dynamic = 1;
++	links[0].playback_only = 1;
++	links[0].ignore_suspend = 1;
++	links[0].trigger[SNDRV_PCM_STREAM_PLAYBACK] = SND_SOC_DPCM_TRIGGER_POST;
++
++	/* back end: UAIF3, I2S with ABOX as clock provider, to the amplifiers */
++	be_cpu->dai_name = "UAIF3";
++	links[1].name = "UAIF3";
++	links[1].stream_name = "UAIF3";
++	links[1].cpus = be_cpu;
++	links[1].num_cpus = 1;
++	links[1].codecs = amps;
++	links[1].num_codecs = n_amps;
++	links[1].no_pcm = 1;
++	links[1].playback_only = 1;
++	links[1].ignore_suspend = 1;
++	links[1].ignore_pmdown_time = 1;
++	links[1].dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
++			   SND_SOC_DAIFMT_CBC_CFC;
++	links[1].be_hw_params_fixup = abox_hw_params_fixup_helper;
++
++	card->dev = dev;
++	card->owner = THIS_MODULE;
++	card->name = "SM-T510";
++	card->dai_link = links;
++	card->num_links = 2;
++	card->dapm_widgets = gta3xl_widgets;
++	card->num_dapm_widgets = ARRAY_SIZE(gta3xl_widgets);
++	card->dapm_routes = gta3xl_routes;
++	card->num_dapm_routes = ARRAY_SIZE(gta3xl_routes);
++
++	return devm_snd_soc_register_card(dev, card);
++}
++
++static const struct of_device_id gta3xl_of_match[] = {
++	{ .compatible = "samsung,gta3xlwifi-sound" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, gta3xl_of_match);
++
++static struct platform_driver gta3xl_driver = {
++	.probe = gta3xl_probe,
++	.driver = {
++		.name = "gta3xl-sound",
++		.of_match_table = gta3xl_of_match,
++	},
++};
++module_platform_driver(gta3xl_driver);
++
++MODULE_DESCRIPTION("Samsung Galaxy Tab A 10.1 (2019) sound card");
++MODULE_LICENSE("GPL");
+-- 
+2.53.0
+

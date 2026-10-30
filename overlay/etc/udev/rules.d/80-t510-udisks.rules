@@ -1,0 +1,3 @@
+# SM-T510: hide the internal eMMC (Android partitions, EFS, the Ubuntu root)
+# from the desktop and file manager; the microSD card (mmcblk1) stays visible
+SUBSYSTEM=="block", KERNEL=="mmcblk0*", ENV{UDISKS_IGNORE}="1"

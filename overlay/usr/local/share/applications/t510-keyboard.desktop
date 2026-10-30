@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=On-screen keyboard
+Name[ru]=Клавиатура
+Comment=Show or hide Onboard
+Icon=onboard
+Exec=dbus-send --type=method_call --dest=org.onboard.Onboard /org/onboard/Onboard/Keyboard org.onboard.Onboard.Keyboard.ToggleVisible
+NoDisplay=true

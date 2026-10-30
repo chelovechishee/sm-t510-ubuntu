@@ -1,0 +1,146 @@
+#!/usr/bin/python3
+"""SM-T510 audio routing: ABOX DSP setup + speaker/headphone switching.
+
+Applies the Android mixer_paths.xml defaults once, then routes the main
+playback DMA (RDMA0, the only playback PCM PipeWire uses) to the TFA9896
+speaker amps or to the COD3035 headphone output, and the capture side to the
+built-in or the headset microphone, following the headset jack switches.
+"""
+import fcntl
+import glob
+import os
+import struct
+import subprocess
+import sys
+
+INIT_SCRIPT = "/usr/local/share/t510/audio-init.sh"
+JACK_NAME = "Codec3035 Headset Events"
+
+EV_SW = 0x05
+SW_HEADPHONE_INSERT = 0x02
+SW_MICROPHONE_INSERT = 0x04
+EVIOCGSW = 0x8000451B | (8 << 16)
+
+# COD3035 ADC -> UAIF0 -> NSRC0 -> WDMA1 (hw:0,9). Android records with
+# MIC1 boost 1 + ADC 132; one boost step more gives ~-38 dBFS speech.
+CAPTURE = [
+    ("ABOX NSRC0", "UAIF0"),
+    ("MIC1 Boost Volume", "2"),
+    ("MIC3 Boost Volume", "1"),
+    ("ADC Left Gain", "132"),
+    ("ADC Right Gain", "132"),
+]
+BUILTIN_MIC = [
+    ("MIC3 MIC3 On", "0"),
+    ("ADCL Mixer MIC3L Switch", "0"),
+    ("ADCR Mixer MIC3R Switch", "0"),
+    ("ADCL Mixer MIC1L Switch", "1"),
+    ("ADCR Mixer MIC1R Switch", "1"),
+    ("MIC1 MIC1 On", "1"),
+]
+HEADSET_MIC = [
+    ("MIC1 MIC1 On", "0"),
+    ("ADCL Mixer MIC1L Switch", "0"),
+    ("ADCR Mixer MIC1R Switch", "0"),
+    ("ADCL Mixer MIC3L Switch", "1"),
+    ("ADCR Mixer MIC3R Switch", "1"),
+    ("MIC3 MIC3 On", "1"),
+]
+
+# RDMA0 -> SPUS OUT0 -> SIFS1 -> UAIF3 -> TFA9896 L/R
+SPEAKER = [
+    ("ABOX UAIF SPK0", "RESERVED"),
+    ("HP HP On", "0"),
+    ("ABOX ERAP info Bypass On", "1"),
+    ("ABOX NSRC3", "UAIF3"),
+    ("ABOX SPUS OUT0", "SIFS1"),
+    ("ABOX SIFS1", "SPUS OUT0"),
+    ("ABOX UAIF SPK3", "SIFS1"),
+]
+# RDMA0 -> SPUS OUT0 -> SIFS0 -> UAIF0 -> COD3035 headphone amp
+HEADPHONE = [
+    ("ABOX UAIF SPK3", "RESERVED"),
+    ("ABOX SPUS OUT0", "SIFS0"),
+    ("ABOX UAIF SPK0", "SIFS0"),
+    # gain-media-headset from the Android mixer_gains.xml
+    ("DAC Gain", "139"),
+    ("Headphone Volume", "0"),
+    ("HP Analog Volume AVCBypass", "59"),
+    ("HP HP On", "1"),
+]
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def cset(name, value):
+    r = subprocess.run(["amixer", "-q", "-c0", "cset", "name=" + name, value],
+                       capture_output=True, text=True)
+    if r.returncode:
+        log("amixer %s=%s failed: %s" % (name, value, r.stderr.strip()))
+
+
+def jack_device():
+    for path in glob.glob("/sys/class/input/input*"):
+        try:
+            with open(path + "/name") as f:
+                if f.read().strip() != JACK_NAME:
+                    continue
+        except OSError:
+            continue
+        for ev in glob.glob(path + "/event*"):
+            return "/dev/input/" + os.path.basename(ev)
+    return None
+
+
+def jack_state(fd):
+    """(headphones, headset mic) inserted"""
+    buf = bytearray(8)
+    fcntl.ioctl(fd, EVIOCGSW, buf)
+    bits = int.from_bytes(buf, "little")
+    return (bool(bits & (1 << SW_HEADPHONE_INSERT)),
+            bool(bits & (1 << SW_MICROPHONE_INSERT)))
+
+
+def route(state):
+    headphones, mic = state
+    for name, value in (HEADPHONE if headphones else SPEAKER):
+        cset(name, value)
+    for name, value in (HEADSET_MIC if mic else BUILTIN_MIC):
+        cset(name, value)
+    log("output: %s, input: %s" % ("headphones" if headphones else "speakers",
+                                    "headset mic" if mic else "built-in mic"))
+
+
+def main():
+    if os.path.exists(INIT_SCRIPT):
+        subprocess.run(["sh", INIT_SCRIPT])
+    for name, value in CAPTURE:
+        cset(name, value)
+    dev = jack_device()
+    if not dev:
+        route((False, False))
+        log("no jack device, staying on speakers")
+        return
+    fd = os.open(dev, os.O_RDONLY)
+    current = jack_state(fd)
+    route(current)
+    while True:
+        data = os.read(fd, 24 * 16)
+        if not data:
+            sys.exit("jack device closed")
+        changed = False
+        for i in range(0, len(data) - 23, 24):
+            _, _, typ, code, _ = struct.unpack("qqHHi", data[i:i + 24])
+            if typ == EV_SW and code in (SW_HEADPHONE_INSERT, SW_MICROPHONE_INSERT):
+                changed = True
+        if changed:
+            now = jack_state(fd)
+            if now != current:
+                current = now
+                route(current)
+
+
+if __name__ == "__main__":
+    main()

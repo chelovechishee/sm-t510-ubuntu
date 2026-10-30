@@ -1,0 +1,3 @@
+# SM-T510 panel backlight (mainline gta3xl-backlight): the session user (group
+# video) may switch it off and on, for t510-powerkey
+SUBSYSTEM=="backlight", KERNEL=="panel", RUN+="/bin/chgrp video /sys%p/brightness /sys%p/bl_power", RUN+="/bin/chmod g+w /sys%p/brightness /sys%p/bl_power"

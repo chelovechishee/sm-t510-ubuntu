@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Onboard (t510)
+Comment=On-screen keyboard docked at the bottom, shown when a text field gets focus
+Exec=onboard
+OnlyShowIn=XFCE;

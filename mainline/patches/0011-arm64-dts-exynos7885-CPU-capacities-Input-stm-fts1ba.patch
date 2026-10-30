@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 11/34] arm64: dts: exynos7885: CPU capacities; Input:
+ stm-fts1ba90a: keep resting fingers
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi | 8 ++++++++
+ drivers/input/touchscreen/stm-fts1ba90a.c  | 7 +++++--
+ 2 files changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index f115a51b9..97248466d 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -92,6 +92,7 @@ core1 {
+ 		cpu0: cpu@100 {
+ 			device_type = "cpu";
+ 			compatible = "arm,cortex-a53";
++			capacity-dmips-mhz = <485>;
+ 			reg = <0x100>;
+ 			enable-method = "psci";
+ 		};
+@@ -99,6 +100,7 @@ cpu0: cpu@100 {
+ 		cpu1: cpu@101 {
+ 			device_type = "cpu";
+ 			compatible = "arm,cortex-a53";
++			capacity-dmips-mhz = <485>;
+ 			reg = <0x101>;
+ 			enable-method = "psci";
+ 		};
+@@ -106,6 +108,7 @@ cpu1: cpu@101 {
+ 		cpu2: cpu@102 {
+ 			device_type = "cpu";
+ 			compatible = "arm,cortex-a53";
++			capacity-dmips-mhz = <485>;
+ 			reg = <0x102>;
+ 			enable-method = "psci";
+ 		};
+@@ -113,6 +116,7 @@ cpu2: cpu@102 {
+ 		cpu3: cpu@103 {
+ 			device_type = "cpu";
+ 			compatible = "arm,cortex-a53";
++			capacity-dmips-mhz = <485>;
+ 			reg = <0x103>;
+ 			enable-method = "psci";
+ 		};
+@@ -120,6 +124,7 @@ cpu3: cpu@103 {
+ 		cpu4: cpu@200 {
+ 			device_type = "cpu";
+ 			compatible = "arm,cortex-a53";
++			capacity-dmips-mhz = <485>;
+ 			reg = <0x200>;
+ 			enable-method = "psci";
+ 		};
+@@ -127,6 +132,7 @@ cpu4: cpu@200 {
+ 		cpu5: cpu@201 {
+ 			device_type = "cpu";
+ 			compatible = "arm,cortex-a53";
++			capacity-dmips-mhz = <485>;
+ 			reg = <0x201>;
+ 			enable-method = "psci";
+ 		};
+@@ -134,6 +140,7 @@ cpu5: cpu@201 {
+ 		cpu6: cpu@0 {
+ 			device_type = "cpu";
+ 			compatible = "arm,cortex-a73";
++			capacity-dmips-mhz = <1024>;
+ 			reg = <0x0>;
+ 			enable-method = "psci";
+ 		};
+@@ -141,6 +148,7 @@ cpu6: cpu@0 {
+ 		cpu7: cpu@1 {
+ 			device_type = "cpu";
+ 			compatible = "arm,cortex-a73";
++			capacity-dmips-mhz = <1024>;
+ 			reg = <0x1>;
+ 			enable-method = "psci";
+ 		};
+diff --git a/drivers/input/touchscreen/stm-fts1ba90a.c b/drivers/input/touchscreen/stm-fts1ba90a.c
+index 66555c8d1..a5138fc8c 100644
+--- a/drivers/input/touchscreen/stm-fts1ba90a.c
++++ b/drivers/input/touchscreen/stm-fts1ba90a.c
+@@ -298,8 +298,11 @@ static int fts_probe(struct i2c_client *client)
+ 	input_set_abs_params(ts->input, ABS_MT_TOOL_TYPE, 0, MT_TOOL_MAX, 0, 0);
+ 	touchscreen_parse_properties(ts->input, true, &ts->prop);
+ 
+-	ret = input_mt_init_slots(ts->input, FTS_MAX_FINGERS,
+-				  INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	/*
++	 * No INPUT_MT_DROP_UNUSED: the controller only reports fingers that
++	 * changed, a finger at rest stays down until its release event.
++	 */
++	ret = input_mt_init_slots(ts->input, FTS_MAX_FINGERS, INPUT_MT_DIRECT);
+ 	if (ret)
+ 		return ret;
+ 
+-- 
+2.53.0
+

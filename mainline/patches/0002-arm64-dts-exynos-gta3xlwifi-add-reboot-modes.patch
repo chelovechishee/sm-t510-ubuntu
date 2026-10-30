@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 02/34] arm64: dts: exynos: gta3xlwifi: add reboot modes
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index 4e09c083f..543c9c21b 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -23,13 +23,13 @@ aliases {
+ 
+ 	chosen {
+ 		#address-cells = <2>;
+-		#size-cells = <2>;
++		#size-cells = <1>;
+ 		ranges;
+ 
+ 		/* Set up by S-Boot: DECON scans out this buffer when the kernel starts */
+ 		framebuffer@ec000000 {
+ 			compatible = "simple-framebuffer";
+-			reg = <0x0 0xec000000 0x0 (1200 * 1920 * 4)>;
++			reg = <0x0 0xec000000 (1200 * 1920 * 4)>;
+ 			width = <1200>;
+ 			height = <1920>;
+ 			stride = <(1200 * 4)>;
+@@ -180,4 +180,13 @@ reboot: syscon-reboot {
+ 		offset = <0x400>; /* SWRESET */
+ 		mask = <0x1>;
+ 	};
++
++	/* Samsung sec_reboot reason (INFORM3), read by S-Boot */
++	reboot-mode {
++		compatible = "syscon-reboot-mode";
++		offset = <0x80c>;
++		mode-normal = <0x12345670>;
++		mode-download = <0x12345671>;
++		mode-recovery = <0x12345674>;
++	};
+ };
+-- 
+2.53.0
+
