@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- SM-T510: blank the panel after 10/5 min, the power key is handled by t510-powerkey -->
+<!-- SM-T510: blank the panel after 10/5 min, the power key is handled by t510-powerkey;
+     never sleep when idle (inactivity 0 = never, 14 is 14 minutes; the
+     kernel has no suspend yet) -->
 <!-- SM-T510: the whole channel, the stock defaults included: this file
      hides /etc/xdg/xfce4/xfconf for this channel -->
 <channel name="xfce4-power-manager" version="1.0">
@@ -8,8 +10,8 @@
     <property name="dpms-enabled" type="bool" value="true"/>
     <property name="blank-on-ac" type="int" value="10"/>
     <property name="blank-on-battery" type="int" value="5"/>
-    <property name="inactivity-on-ac" type="uint" value="14"/>
-    <property name="inactivity-on-battery" type="uint" value="14"/>
+    <property name="inactivity-on-ac" type="uint" value="0"/>
+    <property name="inactivity-on-battery" type="uint" value="0"/>
     <property name="lock-screen-suspend-hibernate" type="bool" value="true"/>
     <property name="brightness-switch-restore-on-exit" type="int" value="0"/>
     <property name="brightness-switch" type="int" value="0"/>

@@ -10,6 +10,15 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.7.5 — no sleep attempt when idle (build #66)
+
+- After 14 minutes without a touch the power manager tried to suspend, which
+  the kernel cannot do yet: while the tablet was locked it waited for the
+  password, and after unlocking it showed "Sleep verb 'suspend' is not
+  configured or not supported by kernel". Our setting meant "never" to an
+  older Xfce; 4.20 reads it as 14 minutes. The screen still turns off after
+  5 minutes on battery, 10 on mains.
+
 ## 0.7.4 — t510-update waits for the network (build #66)
 
 - Without a network `apt-get update` only warns and succeeds: `t510-update`
