@@ -299,6 +299,13 @@ CONFIG_CMA=y
 CONFIG_DMA_CMA=y
 CONFIG_CMA_SIZE_MBYTES=128
 
+# Suspend: s2idle first (PSCI 0.1 from DT has no SYSTEM_SUSPEND);
+# /sys/power/pm_test steps through freezer, devices, platform, processors, core
+CONFIG_SUSPEND=y
+CONFIG_PM_DEBUG=y
+CONFIG_PM_SLEEP_DEBUG=y
+CONFIG_PM_ADVANCED_DEBUG=y
+
 # Networking for VPN clients (Happ/Xray TUN mode, WireGuard, NetworkManager);
 # iptables goes through nftables (iptables-nft), no legacy tables
 CONFIG_NET_CORE=y

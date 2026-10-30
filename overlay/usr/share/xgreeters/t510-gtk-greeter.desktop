@@ -1,5 +1,5 @@
 [Desktop Entry]
 Name=LightDM GTK Greeter (SM-T510)
-Comment=lightdm-gtk-greeter at 2x scale for the 1200x1920 screen
-Exec=env GDK_SCALE=2 lightdm-gtk-greeter
+Comment=lightdm-gtk-greeter at 2x scale for the 1200x1920 screen, not blank as the lock screen (tools/noblank.c)
+Exec=env GDK_SCALE=2 LD_PRELOAD=/usr/libexec/t510/noblank.so lightdm-gtk-greeter
 Type=Application

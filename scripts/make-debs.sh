@@ -41,7 +41,7 @@ if [ "$CHECK" = 1 ]; then
 		ls "$O"/$p.deb >/dev/null 2>&1 || die "no $p.deb in $O: run scripts/make-debs.sh"
 	done
 	n=$(find "$T/overlay" "$T/packaging" "$T/tools/fbtool.c" "$T/tools/longpress.c" \
-		"$T/tools/nograb.c" "$BOOT" -type f -newer "$(ls -tr "$O"/*.deb | head -n1)" -print -quit)
+		"$T/tools/nograb.c" "$T/tools/noblank.c" "$BOOT" -type f -newer "$(ls -tr "$O"/*.deb | head -n1)" -print -quit)
 	[ -z "$n" ] || die "the packages in $O are older than ${n#"$T"/}: run scripts/make-debs.sh"
 	# built with the repository's key, not a test one (T510_KEYRING)
 	[ -f "$P/t510-archive-keyring/t510-archive-keyring.gpg" ] &&
@@ -88,8 +88,9 @@ find "$S" -name __pycache__ -prune -exec rm -rf {} +
 "$CC" -O2 -o "$S/usr/libexec/t510/longpress" "$T/tools/longpress.c" -lX11 -lXi -lXtst ||
 	die "longpress does not link: sudo apt install libx11-dev:arm64 libxi-dev:arm64 libxtst-dev:arm64"
 "$CC" -O2 -shared -fPIC -o "$S/usr/libexec/t510/nograb.so" "$T/tools/nograb.c"
-aarch64-linux-gnu-strip "$S"/usr/libexec/t510/{fbtool,longpress,nograb.so}
-chmod 644 "$S/usr/libexec/t510/nograb.so"
+"$CC" -O2 -shared -fPIC -o "$S/usr/libexec/t510/noblank.so" "$T/tools/noblank.c"
+aarch64-linux-gnu-strip "$S"/usr/libexec/t510/{fbtool,longpress,nograb.so,noblank.so}
+chmod 644 "$S"/usr/libexec/t510/{nograb,noblank}.so
 chmod 440 "$S/etc/sudoers.d/t510-rotate"
 mkdir -p "$S/DEBIAN"
 # every file in /etc is the owner's to change: dpkg asks before replacing it
@@ -114,7 +115,7 @@ n=$(find "$K/.config" "$IMAGE" "$T/initramfs" -newer "$BOOT" -print -quit)
 grep -qx 'CONFIG_EXTRA_FIRMWARE=""' "$K/.config" ||
 	die "the kernel builds firmware in: $(grep '^CONFIG_EXTRA_FIRMWARE=' "$K/.config")"
 KVER=$(make -s -C "$K" kernelversion)
-BUILD=$(LC_ALL=C grep -a -o '#[0-9]* SMP PREEMPT' "$IMAGE" | head -n1 | tr -dc 0-9)
+BUILD=$(LC_ALL=C grep -a -o '#[0-9][0-9]* SMP PREEMPT' "$IMAGE" | head -n1 | tr -dc 0-9)
 [ -n "$BUILD" ] || die "no build number (#N) in $IMAGE"
 LC_ALL=C grep -aq "#$BUILD SMP PREEMPT" "$BOOT" || die "$BOOT does not hold build #$BUILD"
 S=$W/t510-kernel

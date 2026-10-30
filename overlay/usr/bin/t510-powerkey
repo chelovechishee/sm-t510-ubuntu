@@ -2,13 +2,13 @@
 """Power button for the SM-T510 X session: lock + screen off, or screen on.
 
 A press with the screen off turns it on at once. With the screen on, a short
-press (released before LONG_PRESS) locks and turns it off; released after a
-longer hold it takes a screenshot (t510-screenshot: Pictures/Screenshots and
-the clipboard); held for
-POWER_PRESS it opens the Xfce power dialog (log out, restart, shut down) while
-still held. When the session is locked the screenshot and the dialog would
-both land behind the greeter, so they are skipped: the greeter has its own
-power menu.
+press (released before LONG_PRESS) locks, turns it off and suspends (s2idle,
+when the kernel has it; the key wakes the tablet and the screen comes back
+on); released after a longer hold it takes a screenshot (t510-screenshot:
+Pictures/Screenshots and the clipboard); held for POWER_PRESS it opens the
+Xfce power dialog (log out, restart, shut down) while still held. When the
+session is locked the screenshot and the dialog would both land behind the
+greeter, so they are skipped: the greeter has its own power menu.
 
 Reads KEY_POWER from the gpio-keys evdev node ("gpio_keys" on 4.4), readable by
 the seat user via the uaccess udev rule, and drives X DPMS and, on mainline, the
@@ -82,6 +82,50 @@ def locked():
     return "is active" in out
 
 
+def can_suspend():
+    # s2idle needs a kernel with CONFIG_SUSPEND (t510-kernel 7.3.0+67 on)
+    try:
+        with open("/sys/power/state") as f:
+            return "freeze" in f.read().split()
+    except OSError:
+        return False
+
+
+def slept():
+    """Seconds spent suspended since boot: BOOTTIME runs on, MONOTONIC stops."""
+    return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+
+
+def loginctl_value(*args):
+    return subprocess.run(["loginctl", "show-" + args[0], *args[1:], "--value"],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def greeter_shown():
+    """Whether the seat shows LightDM's greeter: the lock is up.
+
+    This session goes inactive as soon as light-locker switches the VT; on
+    the first lock the greeter's X server, its session and then the greeter
+    itself start one after the other, seconds in all."""
+    seat = os.environ.get("XDG_SEAT", "seat0")
+    sid = loginctl_value("seat", seat, "-p", "ActiveSession")
+    if not sid or loginctl_value("session", sid, "-p", "Class") != "greeter":
+        return False
+    return subprocess.run(["pgrep", "-u", "lightdm", "-f", "^lightdm-gtk-greeter"],
+                          capture_output=True).returncode == 0
+
+
+def keep_dark(seconds):
+    """Keep the backlight off for a while: an X server that turns the display
+    on (the greeter's, starting or getting the VT back) turns it on too, as
+    exynos7885-decon enables it with the CRTC."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if monitor_on():
+            set_backlight(False)
+        time.sleep(0.05)
+
+
 def lock_and_off():
     # light-locker hands the screen to the LightDM greeter (password and
         # on-screen keyboard as at login); xflock4 if it is not running
@@ -90,6 +134,18 @@ def lock_and_off():
         time.sleep(0.5)
         subprocess.run(["xset", "dpms", "force", "off"])
         set_backlight(False)
+        # the first lock starts the greeter (seconds): keep the screen dark
+        # until it is up, and sleep only then, or it only comes up after the
+        # wakeup
+        if not greeter_shown():
+            deadline = time.monotonic() + 10
+            while not greeter_shown() and time.monotonic() < deadline:
+                keep_dark(0.2)
+            # a greeter that has just started: time to draw its window
+            keep_dark(1)
+        set_backlight(False)
+        if can_suspend():
+            subprocess.run(["systemctl", "suspend"])
 
 
 def screen_on():
@@ -121,14 +177,32 @@ def main():
             continue
         # pressed: time of a press whose action is still to be decided
         pressed = None
+        # asleep: slept() when a short press suspended, until the wakeup
+        asleep = None
+        # wake_press: the next press is the one that woke the tablet
+        wake_press = False
         try:
             while True:
                 timeout = None
                 if pressed is not None:
                     timeout = max(0, pressed + POWER_PRESS - time.monotonic())
-                if not select.select([fd], [], [], timeout)[0]:
+                if asleep is not None:
+                    timeout = 1 if timeout is None else min(timeout, 1)
+                ready = select.select([fd], [], [], timeout)[0]
+                woke = asleep is not None and slept() - asleep > 0.5
+                if woke:
+                    # back from suspend: gpio-keys reports the press that
+                    # woke it, the next press below
+                    asleep = None
+                    wake_press = True
+                if pressed is not None and time.monotonic() >= pressed + POWER_PRESS:
                     pressed = None
                     power_dialog()
+                if not ready:
+                    if woke:
+                        # woken by something else: no press to turn it on
+                        wake_press = False
+                        screen_on()
                     continue
                 data = os.read(fd, 24 * 16)
                 if not data:
@@ -138,14 +212,21 @@ def main():
                     if typ != EV_KEY or code != KEY_POWER:
                         continue
                     if value == 1:
-                        if monitor_on():
+                        if wake_press:
+                            # the press that woke the tablet (gpio-keys
+                            # reports it): only the screen comes on
+                            wake_press = False
+                            screen_on()
+                        elif monitor_on():
                             pressed = time.monotonic()
                         else:
+                            asleep = None
                             screen_on()
                     elif value == 0 and pressed is not None:
                         held = time.monotonic() - pressed
                         pressed = None
                         if held < LONG_PRESS:
+                            asleep = slept()
                             lock_and_off()
                         else:
                             screenshot()

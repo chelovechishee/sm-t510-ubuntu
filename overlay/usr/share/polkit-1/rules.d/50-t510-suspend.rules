@@ -1,0 +1,9 @@
+// SM-T510: t510-powerkey locks first and suspends after: by then
+// light-locker has switched to the greeter, so the user's session is no
+// longer active (and the greeter's is another user's)
+polkit.addRule(function (action, subject) {
+    if ((action.id == "org.freedesktop.login1.suspend" ||
+         action.id == "org.freedesktop.login1.suspend-multiple-sessions") &&
+        subject.local)
+        return polkit.Result.YES;
+});

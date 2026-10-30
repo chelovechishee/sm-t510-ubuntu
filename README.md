@@ -86,7 +86,7 @@ The power key:
 
 | | |
 |---|---|
-| short press | locks the tablet and turns the screen off; with the screen off, turns it on |
+| short press | locks the tablet, turns the screen off and puts it to sleep; the next press wakes it to the lock screen |
 | hold 1–3 s, then release | screenshot: saved to Pictures/Screenshots and copied, ready to paste |
 | hold 3 s | the power dialog (log out, restart, shut down) |
 
@@ -265,7 +265,7 @@ What the version numbers mean and how updates are made:
   tablet: rotation, keyboard, hardware name);
   `scripts/` — packages, the apt repository, building and seeding the system
   image, firmware, helpers.
-- `tools/` — our programs (`longpress.c`, `fbtool.c`, `nograb.c`) and
+- `tools/` — our programs (`longpress.c`, `fbtool.c`, `nograb.c`, `noblank.c`) and
   development tools (SPEEDY, ACPM, DSI, ASoC); `tools/gpu/` — GLES tests.
 - `gpu/` — the Mesa patch for derivatives on the G71 and a Mesa build to test it.
 

@@ -10,6 +10,26 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.8.0 — sleep (build #67)
+
+- The tablet sleeps: a short press of the power key locks it, turns the
+  screen off and suspends it (s2idle: the processes and the drivers sleep,
+  the cores wait in their deepest idle state); the power key wakes it and the
+  screen comes back on with the lock screen. Sound, Wi-Fi, touch and USB
+  come back as they were.
+- Kernel: `CONFIG_SUSPEND` and the suspend debugging switches
+  (`/sys/power/pm_test`). The firmware's PSCI 0.1 has no system suspend, so
+  `mem` is s2idle too; a deeper sleep (the cluster and the SoC powered down
+  through the PMU) is still to come.
+- polkit lets the tablet's own sessions suspend while locked (light-locker
+  has then switched to the greeter, and the session is no longer active).
+- The first lock after logging in: the lock screen no longer comes up black
+  (started as the lock screen, the greeter turned the X screensaver on until
+  a touch, `tools/noblank.c`), and the screen stays dark while it starts
+  (its X server turned the backlight on: a lit black screen with a cursor).
+
+Builds: #67.
+
 ## 0.7.5 — no sleep attempt when idle (build #66)
 
 - After 14 minutes without a touch the power manager tried to suspend, which

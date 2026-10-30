@@ -33,7 +33,7 @@ stays good for every z after it.
 
 | Package | Contents | Version |
 |---|---|---|
-| `t510-support` | `overlay/` (services, udev rules, Xorg, PipeWire, Xfce defaults, apt pins) and the programs of `tools/` (`longpress`, `fbtool`, `t510-nograb.so`) | the project version, `0.7.1` |
+| `t510-support` | `overlay/` (services, udev rules, Xorg, PipeWire, Xfce defaults, apt pins) and the programs of `tools/` (`longpress`, `fbtool`, `nograb.so`, `noblank.so`) | the project version, `0.7.1` |
 | `t510-kernel` | the boot image (`boot-mainline.img`: kernel, DTB, initramfs); its install script writes it to BOOT (`mmcblk0p15`) | kernel version + build, `7.3.0+66` |
 | `t510-archive-keyring` | the key the repository is signed with and its apt source | changes only with the key |
 
