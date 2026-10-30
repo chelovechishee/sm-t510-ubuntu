@@ -1,7 +1,7 @@
 #!/bin/bash
 # Put the files of a GitHub release together in out/release/: the system
-# image, the two boot images and SHA256SUMS, plus NOTES.md (this version's
-# CHANGELOG section) to paste as the release text. install.sh downloads
+# image, the two boot images and SHA256SUMS, plus NOTES.md (the CHANGELOG
+# sections since the last image release) to paste as the release text. install.sh downloads
 # exactly these names from the tag in its RELEASE= line.
 #
 # Checks first: the version in install.sh is the newest one in CHANGELOG.md,
@@ -76,8 +76,16 @@ rm -rf "$O"
 mkdir -p "$O"
 cp "$IMAGE" "$BOOT" "$INSTALLER" "$O/"
 (cd "$O" && sha256sum sm-t510-ubuntu.img.zst boot-mainline.img boot-install.img > SHA256SUMS)
-awk -v v="$VERSION" '
-	/^## / { if (on) exit; on = index($0, "## " v " ") == 1 }
+# every version since the last image (z versions go out by apt only): the
+# RELEASE= of the published install.sh
+PREV=$(git -C "$T" show origin/main:install.sh 2>/dev/null | sed -n 's/^RELEASE=v//p')
+[ "$PREV" != "$VERSION" ] || PREV=
+awk -v v="$VERSION" -v prev="$PREV" '
+	/^## / {
+		if (index($0, "## " v " ") == 1) on = 1
+		else if (prev != "" && index($0, "## " prev " ") == 1) exit
+		else if (on && prev == "") exit
+	}
 	on' "$T/CHANGELOG.md" > "$O/NOTES.md"
 ls -la "$O"
 echo "Release $TAG: create it on GitHub with the tag $TAG, NOTES.md as its text,"
