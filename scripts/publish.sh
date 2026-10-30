@@ -81,7 +81,14 @@ for deb in "$D"/*.deb; do
 			rm "$f"
 		done
 done
-[ "$added" -gt 0 ] || [ ! -f "$A/dists/$SUITE/InRelease" ] || { echo "nothing new to publish"; exit 0; }
+# a run stopped before its push (no "yes", no network) left work to finish
+unpushed() {
+	[ -n "$(git -C "$A" status --porcelain)" ] && return 0
+	[ "$PUSH" = 1 ] && [ "$(git -C "$A" rev-parse -q --verify HEAD)" != \
+		"$(git -C "$A" rev-parse -q --verify origin/main)" ]
+}
+[ "$added" -gt 0 ] || [ ! -f "$A/dists/$SUITE/InRelease" ] || unpushed ||
+	{ echo "nothing new to publish"; exit 0; }
 
 # indexes
 B=dists/$SUITE/main/binary-arm64
