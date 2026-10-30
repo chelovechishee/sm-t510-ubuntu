@@ -59,6 +59,40 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 cameras, suspend, USB host/OTG. Shader derivatives are broken on the G71, so
 GTK4 draws with cairo (`GSK_RENDERER=cairo`).
 
+## Using the tablet
+
+The top panel, left to right:
+
+| | |
+|---|---|
+| **Applications** | the menu of all programs |
+| open windows | tap one to bring it up |
+| keyboard icon | shows or hides the on-screen keyboard (Onboard) |
+| arrow to the left | turns the screen the way you hold the tablet |
+| arrow to the right | turns the screen 90° clockwise |
+| speaker | volume |
+| battery | charge; tap it for screen brightness and the power settings |
+| CPU / GPU | temperatures: orange from 75 ° (the chip starts to slow down), red from 90 ° |
+| network | Wi-Fi networks |
+| date and time | calendar |
+| your name | lock, log out, restart, shut down |
+
+Turning the screen restarts the desktop: save your work first, open windows
+close. The dock at the bottom (it steps aside when a window covers it):
+show the desktop, terminal, home folder, browser, search for programs,
+folders.
+
+The power key:
+
+| | |
+|---|---|
+| short press | locks the tablet and turns the screen off; with the screen off, turns it on |
+| hold 1–3 s, then release | screenshot: saved to Pictures/Screenshots and copied, ready to paste |
+| hold 3 s | the power dialog (log out, restart, shut down) |
+
+On the touch screen: hold a finger still for a moment for a right click;
+desktop icons open with one tap.
+
 ## How it fits together
 
 - **Boot.** S-Boot (Samsung's bootloader) starts not the kernel from the BOOT
