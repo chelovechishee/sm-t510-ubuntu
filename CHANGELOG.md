@@ -10,6 +10,13 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.8.2 — word suggestions on the on-screen keyboard (build #67)
+
+- Onboard suggests words above its keys as you type (English); a tap on one
+  types it. A misspelt word is marked there and corrected after a space.
+  The language model comes with `onboard-data`, spelling with
+  `hunspell-en-us`; both are installed with this version.
+
 ## 0.8.1 — a dot under the finger instead of the pointer (build #67)
 
 - The pointer is hidden: Chrome hid it on every touch and showed it again

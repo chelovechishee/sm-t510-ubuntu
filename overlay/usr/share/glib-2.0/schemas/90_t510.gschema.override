@@ -25,6 +25,14 @@ toolkit-accessibility=true
 input-event-source='GTK'
 touch-input='none'
 
+# word suggestions above the keys (models from onboard-data, spelling from
+# hunspell); a misspelt word is marked there and corrected after a space
+[org.onboard.typing-assistance]
+auto-correction=true
+
+[org.onboard.typing-assistance.word-suggestions]
+enabled=true
+
 # docked keyboard height in px (1200x1920 panel at scale 1)
 [org.onboard.window.portrait]
 dock-height=650

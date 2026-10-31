@@ -48,7 +48,7 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 |---|---|
 | Display | KMS (own `exynos7885-decon` driver), 1200×1920, rotation from the accelerometer, backlight |
 | GPU | Mali-G71 on upstream Panfrost + Ubuntu's Mesa, X on modesetting + glamor, DVFS 343–845 MHz |
-| Touch | own STM FTS1BA90A driver, on-screen keyboard, right click by long press |
+| Touch | own STM FTS1BA90A driver, on-screen keyboard with word suggestions (English), right click by long press |
 | Wi-Fi | Samsung SCSC (ported Samsung driver), 2.4 and 5 GHz, NetworkManager |
 | Sound | speakers: ABOX + 2×TFA9896, PipeWire, volume keys |
 | Power | CPU DVFS through ACPM, cpuidle (C2) on all 8 cores, temperatures and throttling |
@@ -92,7 +92,8 @@ The power key:
 
 On the touch screen: hold a finger still for a moment for a right click;
 desktop icons open with one tap. There is no mouse pointer: a small dot
-shows where the finger is.
+shows where the finger is. The on-screen keyboard suggests words above its
+keys and marks a misspelt word there; a tap on a suggestion types it.
 
 ## How it fits together
 
