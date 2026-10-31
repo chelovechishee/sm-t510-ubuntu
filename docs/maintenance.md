@@ -79,8 +79,10 @@ tablets keep the old one. Avoid this while there is another way.
    them into the apt repository. The tablets get them with their next
    `apt upgrade`; Xfce's update notifier shows them by itself. New installs
    take them the first time they are online (`t510-update.service`).
-8. For **x and y**, a GitHub release whose notes are the version's
-   CHANGELOG section, so everything important shows on the project page.
+8. For **every version**, x, y and z, a GitHub release (tag `vx.y.z`)
+   whose notes are the version's CHANGELOG section, so everything that came
+   out shows on the project page; README.md changes with it wherever the
+   version changes what it says.
    With a new image (see "Version numbers"): README.md, "Building", then
    `scripts/make-release.sh`, and its files go to the release; the image
    carries the same packages, installed. Without one, the release is the
