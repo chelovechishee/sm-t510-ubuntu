@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 10/41] backlight: add Samsung Galaxy Tab A 10.1 (2019) panel
+Subject: [PATCH 10/43] backlight: add Samsung Galaxy Tab A 10.1 (2019) panel
  backlight; fbcon deferred takeover
 
 Co-Authored-By: Claude <noreply@anthropic.com>

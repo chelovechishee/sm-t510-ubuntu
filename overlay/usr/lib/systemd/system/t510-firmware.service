@@ -1,9 +1,9 @@
 [Unit]
-Description=Samsung firmware for the audio DSP and DVFS, re-probe their drivers
+Description=Samsung firmware for the audio DSP, DVFS and Bluetooth, start their drivers
 DefaultDependencies=no
-WantsMountsFor=/vendor
+WantsMountsFor=/vendor /efs
 After=systemd-remount-fs.service systemd-udevd.service
-Before=sysinit.target display-manager.service t510-audio.service
+Before=sysinit.target display-manager.service t510-audio.service bluetooth.service
 
 [Service]
 Type=oneshot

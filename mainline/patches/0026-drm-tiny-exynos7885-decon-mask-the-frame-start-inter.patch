@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 26/41] drm/tiny: exynos7885-decon: mask the frame start
+Subject: [PATCH 26/43] drm/tiny: exynos7885-decon: mask the frame start
  interrupt while unused
 
 The frame start interrupt stayed enabled all the time, so an idle desktop

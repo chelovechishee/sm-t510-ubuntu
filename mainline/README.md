@@ -21,8 +21,8 @@ one DT, `exynos7885.dts`, between them.
 | — | S2MU005 charger: stock currents by adapter type | **works** |
 | — | USB-C host/OTG: S2MM005 CC controller (own `s2mm005` driver), dwc3 role switch, OTG boost of the S2MU005 | **works** |
 | — | Ubuntu 26.04.1 LTS on the 7.3 kernel | **works** |
+| — | Bluetooth: SCSC BT service + own BlueZ driver (`scsc_bluez`) | **works** |
 | — | COD3035 codec (headphones, microphones) | — |
-| — | Bluetooth (SCSC BT) | — |
 
 The volume keys work together with the sound card (without it Xfce showed
 "no sound").
@@ -385,6 +385,42 @@ driver runs the DSP around the clk API), bus gates of unused UART/SPI/I2C/USI.
     hang with netconsole.
   - Reading the CHIPID registers (0x10000000) through `/dev/mem` hangs the tablet.
 
+## Bluetooth: SCSC BT service and the scsc_bluez driver
+
+**Works**: `hci0` (bus IPC, manufacturer 0x0075, address from
+`/efs/bluetooth/bt_addr`), BlueZ 5.85 and blueman; pairing (SSP), LE,
+A2DP from a phone to the speakers, AVRCP. Not possible: the headset profile
+(HFP/HSP) — the firmware has no SCO transfer ring and sends call audio to the
+ABOX DSP, whose Bluetooth side is not ported.
+
+- `drivers/misc/samsung/scsc_bt/`: Samsung's BT service (`scsc_bt_module.c`)
+  and its shared-memory H4 transport (`scsc_shm.c`: BSMHCP transfer rings for
+  commands, events and ACL data, ACL credits as synthesized
+  Number-Of-Completed-Packets events) from the downstream kernel, without ANT,
+  the `/dev/scsc_h4_0` character device and ABOX audio. `scsc_bluez.c` is
+  ours: an `hci_dev` whose open starts the BT service on the WLBT core, a
+  kthread reads the H4 stream (several packets per read, packets split
+  between reads — mainline's `h4_recv_buf()` needs an `hci_uart`) and send
+  writes H4. The firmware prints `BT_STATUS: bt_start [... WLAN=1]` and sends a
+  Command Complete for opcode 0 at start (the HCI core logs "unexpected event
+  for opcode 0x0000"; harmless).
+- `hci0` is registered by `echo 1 > /sys/module/scsc_bt/parameters/enable`
+  (`t510-firmware` does it once `/vendor` and `/efs` are mounted): the HCI
+  core powers a new controller on at once, and a controller whose first power
+  on failed never reaches bluetoothd.
+- Configuration `/vendor/etc/wifi/mx140_bt.hcf` (136 bytes, flat layout like
+  Wi-Fi's).
+- Pitfalls:
+  - Kernel threads keep the initramfs root after busybox `switch_root` (it
+    moves the real root over `/` and chroots only itself). The HCI core powers
+    on from a work, so `mx140_request_file()` found neither the configuration
+    nor the address (-ENOENT) and the firmware failed at start; it now opens
+    files from PID 1's root (patch 0042). Wi-Fi never saw this: NetworkManager
+    starts it from a process.
+  - SCSC auto-recovery is off: after a firmware failure Bluetooth (and Wi-Fi)
+    come back only with a reboot.
+  - `mmiowb()` is gone from the kernel; `wmb()` before the doorbell.
+
 ## Sound: ABOX and speakers
 
 - **Driver** — ABOX from the 4.4 kernel (`sound/soc/samsung/abox/`), ported to
@@ -467,8 +503,11 @@ driver runs the DSP around the clk API), bus gates of unused UART/SPI/I2C/USI.
   `t510-display-setup` removes it.
 - **VPN** — TUN, WireGuard, policy routing and nftables (iptables-nft) are in
   the kernel; VPN apps that need TUN work.
-- The Bluetooth applet (blueman) is hidden from autostart until there is BT:
-  without an adapter it crashes ("system program problem" windows).
+- The Bluetooth applet (blueman) is the pairing agent and the tray icon;
+  0.7.0–0.9.0 hid it (without an adapter it crashed). At the login screen
+  the greeter's PipeWire (user `lightdm`) holds the Bluetooth audio
+  endpoints: a phone connected there plays to the tablet only after it is
+  connected again from the session.
 - `ayatana-indicator-application` is hidden from autostart
   (`/etc/xdg/xdg-xfce/autostart`, `Hidden=true`): it takes
   `org.kde.StatusNotifierWatcher` but shows icons only through the Indicators

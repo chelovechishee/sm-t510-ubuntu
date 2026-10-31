@@ -54,10 +54,12 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 | Power | CPU DVFS through ACPM, cpuidle (C2) on all 8 cores, temperatures and throttling |
 | Battery | charge level (S2MU005), charging at stock currents by the kernel driver, set again for every cable (asleep too) |
 | USB | USB-C host and device by the S2MM005 controller: flash drives, keyboards, mice, network adapters, sound cards, webcams, phones; the USB network and console to a PC |
+| Bluetooth | Samsung SCSC (ported Samsung service, own BlueZ driver), BlueZ + blueman: pairing, BLE, music from a phone to the speakers (A2DP; tried with an iPhone) |
 | Other | microSD, clock (RTC in the PMIC over the SPEEDY bus), network printing |
 
-**Not working yet:** Bluetooth (0.10.0), headphones and microphone (COD3035
-codec, 0.11.0), cameras (0.12.0). Shader derivatives are broken on the G71, so
+**Not working yet:** headphones and microphone (COD3035 codec, 0.11.0),
+Bluetooth calls (the headset profile: the firmware sends call audio to the
+audio DSP), cameras (0.12.0). Shader derivatives are broken on the G71, so
 GTK4 draws with cairo (`GSK_RENDERER=cairo`).
 
 ## Using the tablet

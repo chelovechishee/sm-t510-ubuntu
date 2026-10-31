@@ -6,6 +6,8 @@
 #                             partition (/vendor/firmware, mounted read-only)
 #   exynos7885_acpm_fvp.fw    CPU/GPU DVFS: Samsung's GPL kernel tree on GitHub;
 #                             the installer puts it in place, --fetch gets it
+#   mx140*.bin, mx140_bt.hcf  Wi-Fi/Bluetooth: read by the kernel from
+#                             /vendor/etc/wifi, the Bluetooth address from /efs
 # Usage: t510-firmware [--fetch]
 set -eu
 
@@ -33,6 +35,17 @@ for dev in firmware:power-management 14a50000.abox; do
 	[ -e "/sys/bus/platform/devices/$dev/driver" ] ||
 		echo "$dev" > /sys/bus/platform/drivers_probe 2>/dev/null || true
 done
+
+# Bluetooth: hci0 comes once its firmware can be read (bluetoothd would never
+# see a controller whose first power on failed)
+BT=/sys/module/scsc_bt/parameters/enable
+if [ -w $BT ]; then
+	if [ -s /vendor/etc/wifi/mx140_bt.hcf ]; then
+		echo 1 > $BT
+	else
+		echo "t510-firmware: no /vendor/etc/wifi/mx140_bt.hcf, no Bluetooth" >&2
+	fi
+fi
 
 # the display manager needs the GPU render node for glamor
 if [ -e /sys/bus/platform/devices/firmware:power-management/driver ]; then

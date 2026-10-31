@@ -1,0 +1,4914 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 43/43] misc: add the SCSC Bluetooth service with a BlueZ front
+ end
+
+Bluetooth of the Samsung SCSC (Maxwell) WLBT subsystem: the BT service
+and its shared-memory H4 transport (BSMHCP transfer rings) from the
+downstream kernel of the SM-T510, without ANT, the H4 character device
+and audio through the ABOX DSP; the controller address comes from
+/efs/bluetooth/bt_addr ("xx:xx:xx:xx:xx:xx").
+
+scsc_bluez.c is new: an hci_dev whose open starts the BT service, a
+kthread that reads the H4 stream and reassembles it (one read can hold
+several packets, a packet can be split between reads) and send that
+writes H4 packets. Commands and ACL data only: the firmware has no SCO
+transfer ring, SCO audio goes to the ABOX DSP.
+
+The firmware lives on Android's VENDOR partition, and the HCI core
+powers a new controller on at once; a failed first power on would keep
+it from bluetoothd for good. So hci0 is registered when userspace says
+the firmware can be read:
+  echo 1 > /sys/module/scsc_bt/parameters/enable
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/misc/Kconfig                          |    1 +
+ drivers/misc/Makefile                         |    1 +
+ drivers/misc/samsung/scsc_bt/Kconfig          |   10 +
+ drivers/misc/samsung/scsc_bt/Makefile         |   10 +
+ .../misc/samsung/scsc_bt/scsc_avdtp_detect.c  |  809 ++++++++
+ drivers/misc/samsung/scsc_bt/scsc_bluez.c     |  287 +++
+ drivers/misc/samsung/scsc_bt/scsc_bluez.h     |   18 +
+ drivers/misc/samsung/scsc_bt/scsc_bt_hci.h    |  112 ++
+ drivers/misc/samsung/scsc_bt/scsc_bt_module.c | 1425 ++++++++++++++
+ drivers/misc/samsung/scsc_bt/scsc_bt_priv.h   |  427 +++++
+ drivers/misc/samsung/scsc_bt/scsc_shm.c       | 1646 +++++++++++++++++
+ drivers/misc/samsung/scsc_bt/scsc_shm.h       |   37 +
+ 12 files changed, 4783 insertions(+)
+ create mode 100644 drivers/misc/samsung/scsc_bt/Kconfig
+ create mode 100644 drivers/misc/samsung/scsc_bt/Makefile
+ create mode 100644 drivers/misc/samsung/scsc_bt/scsc_avdtp_detect.c
+ create mode 100644 drivers/misc/samsung/scsc_bt/scsc_bluez.c
+ create mode 100644 drivers/misc/samsung/scsc_bt/scsc_bluez.h
+ create mode 100755 drivers/misc/samsung/scsc_bt/scsc_bt_hci.h
+ create mode 100755 drivers/misc/samsung/scsc_bt/scsc_bt_module.c
+ create mode 100755 drivers/misc/samsung/scsc_bt/scsc_bt_priv.h
+ create mode 100755 drivers/misc/samsung/scsc_bt/scsc_shm.c
+ create mode 100644 drivers/misc/samsung/scsc_bt/scsc_shm.h
+
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index 2d22067d1..f57f20772 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -570,6 +570,7 @@ config MCHP_LAN966X_PCI
+ 
+ source "drivers/misc/c2port/Kconfig"
+ source "drivers/misc/samsung/scsc/Kconfig"
++source "drivers/misc/samsung/scsc_bt/Kconfig"
+ source "drivers/misc/eeprom/Kconfig"
+ source "drivers/misc/cb710/Kconfig"
+ source "drivers/misc/lis3lv02d/Kconfig"
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index b19d4a9cb..09cbb4b03 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -72,3 +72,4 @@ obj-y				+= amd-sbi/
+ obj-$(CONFIG_MISC_RP1)		+= rp1/
+ obj-$(CONFIG_INTEL_SSEI)	+= issei/
+ obj-y				+= samsung/scsc/
++obj-y				+= samsung/scsc_bt/
+diff --git a/drivers/misc/samsung/scsc_bt/Kconfig b/drivers/misc/samsung/scsc_bt/Kconfig
+new file mode 100644
+index 000000000..c298aa271
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/Kconfig
+@@ -0,0 +1,10 @@
++# SPDX-License-Identifier: GPL-2.0
++config SCSC_BT
++	tristate "Samsung SCSC Maxwell Bluetooth"
++	depends on SCSC_CORE && BT
++	help
++	  Bluetooth of the Samsung SCSC (Maxwell) WLBT subsystem of Exynos
++	  7885/7904, as an HCI device for BlueZ. The BT service and its
++	  shared-memory H4 transport come from the Samsung downstream kernel.
++	  hci0 appears after "echo 1 > /sys/module/scsc_bt/parameters/enable",
++	  once the firmware can be read.
+diff --git a/drivers/misc/samsung/scsc_bt/Makefile b/drivers/misc/samsung/scsc_bt/Makefile
+new file mode 100644
+index 000000000..d430be4a1
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/Makefile
+@@ -0,0 +1,10 @@
++# SPDX-License-Identifier: GPL-2.0
++# Samsung SCSC (Maxwell) Bluetooth: the BT service and its shared-memory H4
++# transport from the Samsung downstream kernel, with a BlueZ hci_dev front end
++# (scsc_bluez.c). Built with the core's compat layer.
++ccflags-y += -I$(src)/../scsc/compat -I$(srctree)/include/scsc -include $(src)/../scsc/compat/scsc_compat_inc.h
++ccflags-y += -DCONFIG_SOC_EXYNOS7885
++ccflags-y += -Wno-error -Wno-missing-prototypes -Wno-missing-declarations
++
++obj-$(CONFIG_SCSC_BT) += scsc_bt.o
++scsc_bt-y += scsc_bt_module.o scsc_shm.o scsc_avdtp_detect.o scsc_bluez.o
+diff --git a/drivers/misc/samsung/scsc_bt/scsc_avdtp_detect.c b/drivers/misc/samsung/scsc_bt/scsc_avdtp_detect.c
+new file mode 100644
+index 000000000..a6e49fefb
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/scsc_avdtp_detect.c
+@@ -0,0 +1,809 @@
++/****************************************************************************
++ *
++ *       Copyright (c) 2015 Samsung Electronics Co., Ltd
++ *
++ ****************************************************************************/
++
++/* Before submitting new changes to this file please make sure to run the module tests to verify
++ * that the change didn't break anything. Also, make sure to write new tests that captures the
++ * change. The module tests can be found in "vendor/samsung_slsi/scsc_tools/kernel_unit_test/"
++ * from where there are run with "make". If needed its git project nane is:
++ * "Connectivity/Android/platform/vendor/samsung_slsi/scsc_tools/kernel_unit_test" */
++
++/* MX BT shared memory interface */
++
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/fs.h>
++#include <linux/module.h>
++#include <linux/firmware.h>
++#include <linux/poll.h>
++#include <linux/slab.h>
++#include <linux/cdev.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/uaccess.h>
++#include <linux/wait.h>
++#include <linux/kthread.h>
++#include <asm/io.h>
++#include <linux/wakelock.h>
++
++#include <scsc/scsc_mx.h>
++#include <scsc/scsc_mifram.h>
++#include <scsc/api/bsmhcp.h>
++#include <scsc/scsc_logring.h>
++
++#include "scsc_bt_priv.h"
++#include "scsc_shm.h"
++/**
++ * Coex AVDTP detection.
++ *
++ * Strategy:
++ *
++ * - On the L2CAP signaling CID, look for connect requests with the AVDTP PSM
++ *
++ * - Assume the first AVDTP connection is the signaling channel.
++ *   (AVDTP 1.3, section 5.4.6 "Transport and Signaling Channel Establishment")
++ *
++ * - If a signaling channel exists, assume the next connection is the streaming channel
++ *
++ * - If a streaming channel exists, look for AVDTP start, suspend, abort and close signals
++ * -- When one of these is found, signal the FW with updated acl_id and cid
++ *
++ * - If the ACL is torn down, make sure to clean up.
++ *
++ * */
++
++#define IS_VALID_CID_CONN_RESP(is_tx, avdtp, data) ((is_tx && avdtp->dst_cid == HCI_L2CAP_SOURCE_CID(data)) || \
++													(!is_tx && avdtp->src_cid == HCI_L2CAP_SOURCE_CID(data)))
++
++
++#define IS_VALID_CID_DISCONNECT_REQ(is_tx, avdtp, data) ((is_tx && avdtp.src_cid == HCI_L2CAP_SOURCE_CID(data) && \
++														  avdtp.dst_cid == HCI_L2CAP_RSP_DEST_CID(data)) || \
++														 (!is_tx && avdtp.src_cid == HCI_L2CAP_RSP_DEST_CID(data) && \
++														  avdtp.dst_cid == HCI_L2CAP_SOURCE_CID(data)))
++
++#define STORE_DETECTED_CID_CONN_REQ(is_tx, avdtp, data)                 \
++	do {                                                                \
++		if (is_tx) {                                                    \
++			avdtp->src_cid = HCI_L2CAP_SOURCE_CID(data);                \
++		} else {                                                        \
++			avdtp->dst_cid = HCI_L2CAP_SOURCE_CID(data);                \
++		}                                                               \
++	} while (0)
++
++#define STORE_DETECTED_CID_CONN_RESP(is_tx, avdtp, data)                \
++	do {                                                                \
++		if (is_tx) {                                                    \
++			avdtp->src_cid = HCI_L2CAP_RSP_DEST_CID(data);              \
++		} else {                                                        \
++			avdtp->dst_cid = HCI_L2CAP_RSP_DEST_CID(data);              \
++		}                                                               \
++	} while (0)
++
++#ifdef ENABLE_MODULE_TESTS_DEBUG
++#undef SCSC_TAG_DEBUG
++#define SCSC_TAG_DEBUG(tag, fmt, ...) \
++	fprintf(stdout, "%s:%d:%s(): " fmt, __FILE__, __LINE__, __func__, __VA_ARGS__)
++#endif
++
++/* Forward declarations */
++void scsc_avdtp_detect_reset(struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci,
++							 bool reset_signal,
++							 bool reset_signal_ongoing,
++							 bool reset_stream,
++							 bool reset_stream_ongoing,
++							 bool reset_local_seids,
++							 bool reset_remote_seids);
++
++/* Simple list traversal to find an existing AVDTP detection from a hci connection handle. If
++ * not found, the function returns NULL
++ */
++static struct scsc_bt_avdtp_detect_hci_connection *scsc_avdtp_detect_search_hci_connection(
++	u16 hci_connection_handle)
++{
++	struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci;
++
++	avdtp_hci = bt_service.avdtp_detect.connections;
++	while (avdtp_hci) {
++		if (avdtp_hci->hci_connection_handle == hci_connection_handle) {
++			/* Found it */
++			break;
++		}
++		avdtp_hci = avdtp_hci->next;
++	}
++	return avdtp_hci;
++}
++
++/* Find existing detection for a given connection handle. If provided as argument, a new detection
++ * will be created if it doesn't exist. The returned element is locked and must be unlocked before
++ * moving to another context.
++ */
++static struct scsc_bt_avdtp_detect_hci_connection *scsc_avdtp_detect_find_or_create_hci_connection(
++	u16 hci_connection_handle,
++	bool create)
++{
++	struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci;
++
++	spin_lock(&bt_service.avdtp_detect.lock);
++
++	avdtp_hci = scsc_avdtp_detect_search_hci_connection(hci_connection_handle);
++	if (avdtp_hci)
++		spin_lock(&avdtp_hci->lock);
++
++	/* Unlock the list again and check if a new element must be created. If that is the case,
++	 * malloc the new memory and lock the list afterwards such that others are not spinning for
++	 * some undefined amount of time. The trade-off in this construction is that the memory
++	 * potentially is allocated twice in rare situations, and the list must therefore be locked
++	 * and searched again before inserting.
++	 */
++	spin_unlock(&bt_service.avdtp_detect.lock);
++
++	/* Check if the existing detection was found. If not create it */
++	if (!avdtp_hci && create) {
++		avdtp_hci = kmalloc(sizeof(struct scsc_bt_avdtp_detect_hci_connection), GFP_KERNEL);
++		if (avdtp_hci) {
++			struct scsc_bt_avdtp_detect_hci_connection *head;
++			struct scsc_bt_avdtp_detect_hci_connection *recheck_avdtp_hci;
++
++			memset(avdtp_hci, 0, sizeof(struct scsc_bt_avdtp_detect_hci_connection));
++			avdtp_hci->signal.type = BT_AVDTP_CONN_TYPE_SIGNAL;
++			avdtp_hci->stream.type = BT_AVDTP_CONN_TYPE_STREAM;
++			avdtp_hci->ongoing.incoming_signal.type = BT_AVDTP_CONN_TYPE_SIGNAL;
++			avdtp_hci->ongoing.outgoing_signal.type = BT_AVDTP_CONN_TYPE_SIGNAL;
++			avdtp_hci->ongoing.incoming_stream.type = BT_AVDTP_CONN_TYPE_STREAM;
++			avdtp_hci->ongoing.outgoing_stream.type = BT_AVDTP_CONN_TYPE_STREAM;
++			avdtp_hci->signal.state = BT_AVDTP_STATE_IDLE_SIGNALING;
++			avdtp_hci->signal.src_cid = 0;
++			avdtp_hci->signal.dst_cid = 0;
++			avdtp_hci->hci_connection_handle = hci_connection_handle;
++			scsc_avdtp_detect_reset(avdtp_hci, false, true, true, true, true, true);
++
++			/* The element is ready for insertion into the list. Recheck the list to make sure that
++			 * the hci handle hasn't been detected meanwhile.
++			 */
++			spin_lock(&bt_service.avdtp_detect.lock);
++
++			recheck_avdtp_hci = scsc_avdtp_detect_search_hci_connection(hci_connection_handle);
++			if (recheck_avdtp_hci == NULL) {
++				/* Insert into list */
++				spin_lock_init(&avdtp_hci->lock);
++				spin_lock(&avdtp_hci->lock);
++				head = bt_service.avdtp_detect.connections;
++				bt_service.avdtp_detect.connections = avdtp_hci;
++				avdtp_hci->next = head;
++				spin_unlock(&bt_service.avdtp_detect.lock);
++			} else {
++				/* The element was already present. Free the allocated memory and return the found
++				 * element.
++				 */
++				spin_lock(&recheck_avdtp_hci->lock);
++				spin_unlock(&bt_service.avdtp_detect.lock);
++				kfree(avdtp_hci);
++				avdtp_hci = NULL;
++				avdtp_hci = recheck_avdtp_hci;
++			}
++		}
++	}
++	return avdtp_hci;
++}
++
++/* Find an existing l2cap connection struct. Works for both signal and stream since their internal
++ * structures are equal */
++static struct scsc_bt_avdtp_detect_connection *scsc_avdtp_detect_find_l2cap_connection(struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci,
++																					   enum scsc_bt_avdtp_detect_conn_req_direction_enum direction)
++{
++	struct scsc_bt_avdtp_detect_connection *avdtp_l2cap = NULL;
++
++	/* Return either signal or stream l2cap connection */
++	if (avdtp_hci) {
++		/* Check if there is already a signal connection and return the ongoing stream */
++		if (avdtp_hci->signal.state == BT_AVDTP_STATE_COMPLETE_SIGNALING) {
++			if (direction == BT_AVDTP_CONN_REQ_DIR_OUTGOING)
++				avdtp_l2cap = &avdtp_hci->ongoing.outgoing_stream;
++			else
++				avdtp_l2cap = &avdtp_hci->ongoing.incoming_stream;
++		} else {
++			/* If not, use the ongoing signal */
++			if (direction == BT_AVDTP_CONN_REQ_DIR_OUTGOING)
++				avdtp_l2cap = &avdtp_hci->ongoing.outgoing_signal;
++			else
++				avdtp_l2cap = &avdtp_hci->ongoing.incoming_signal;
++		}
++	}
++	return avdtp_l2cap;
++}
++
++/* Handle CONNECTION_REQUEST and detect signal or stream connections. The function handles both RX and TX, where
++ * connect requests in TX direction is mapped to "outgoing". RX direction is mapped to "incoming" */
++static void scsc_bt_avdtp_detect_connection_conn_req_handling(uint16_t hci_connection_handle,
++															  const unsigned char *data,
++															  uint16_t length,
++															  bool is_tx)
++{
++	struct scsc_bt_avdtp_detect_connection *avdtp_l2cap = NULL;
++	struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci = NULL;
++
++	/* Ignore everything else than the PSM */
++	if (HCI_L2CAP_CON_REQ_PSM(data) == L2CAP_AVDTP_PSM) {
++		// Check if there is already an detection for the given hci handle
++		avdtp_hci = scsc_avdtp_detect_find_or_create_hci_connection(
++			hci_connection_handle,
++			true);
++
++		avdtp_l2cap = scsc_avdtp_detect_find_l2cap_connection(avdtp_hci,
++															  is_tx ? BT_AVDTP_CONN_REQ_DIR_OUTGOING : BT_AVDTP_CONN_REQ_DIR_INCOMING);
++
++		if (avdtp_hci && avdtp_l2cap) {
++			if (avdtp_l2cap->state == BT_AVDTP_STATE_IDLE_SIGNALING) {
++
++				/* AVDTP signal channel was detected - store dst_cid or src_cid depending on the transmit
++				 * direction, and store the connection_handle. */
++				STORE_DETECTED_CID_CONN_REQ(is_tx, avdtp_l2cap, data);
++				avdtp_l2cap->state = BT_AVDTP_STATE_PENDING_SIGNALING;
++				SCSC_TAG_DEBUG(BT_H4, "Signaling dst CID: 0x%04X, src CID: 0x%04X, aclid: 0x%04X (tx=%u)\n",
++							   avdtp_l2cap->dst_cid,
++							   avdtp_l2cap->src_cid,
++							   avdtp_hci->hci_connection_handle,
++							   is_tx);
++			} else if (avdtp_l2cap->state == BT_AVDTP_STATE_IDLE_STREAMING &&
++					   avdtp_hci->signal.state == BT_AVDTP_STATE_COMPLETE_SIGNALING) {
++
++				/* AVDTP stream channel was detected - store dst_cid or src_cid depending on the transmit
++				 * direction. */
++				STORE_DETECTED_CID_CONN_REQ(is_tx, avdtp_l2cap, data);
++				avdtp_l2cap->state = BT_AVDTP_STATE_PENDING_STREAMING;
++				SCSC_TAG_DEBUG(BT_H4, "Streaming dst CID: 0x%04X, src CID: 0x%04X, aclid: 0x%04X (%u)\n",
++							   avdtp_l2cap->dst_cid,
++							   avdtp_l2cap->src_cid,
++							   avdtp_hci->hci_connection_handle,
++							   is_tx);
++			}
++		}
++		if (avdtp_hci)
++			spin_unlock(&avdtp_hci->lock);
++	}
++}
++
++/* Handle CONNECTION_REPSONS and detect signal or stream connections. The function handles both RX and TX, where
++ * connect requests in TX direction is mapped to "incoming". RX direction is mapped to "outgoing" */
++static void scsc_bt_avdtp_detect_connection_conn_resp_handling(uint16_t hci_connection_handle,
++															   const unsigned char *data,
++															   uint16_t length,
++															   bool is_tx)
++{
++
++	/* Check if there is already a signal connection */
++	struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci =
++		scsc_avdtp_detect_find_or_create_hci_connection(hci_connection_handle, false);
++	struct scsc_bt_avdtp_detect_connection *avdtp_l2cap =
++		scsc_avdtp_detect_find_l2cap_connection(avdtp_hci,
++												is_tx ? BT_AVDTP_CONN_REQ_DIR_INCOMING : BT_AVDTP_CONN_REQ_DIR_OUTGOING);
++	/* Only consider RSP on expected connection handle */
++	if (avdtp_hci && avdtp_l2cap) {
++		if (HCI_L2CAP_CON_RSP_RESULT(data) == HCI_L2CAP_CON_RSP_RESULT_SUCCESS) {
++			if (IS_VALID_CID_CONN_RESP(is_tx, avdtp_l2cap, data) &&
++				avdtp_l2cap->state == BT_AVDTP_STATE_PENDING_SIGNALING) {
++
++				/* If we were waiting to complete an AVDTP signal detection - store the dst_cid or src_cid depending
++				 * on the transmit direction */
++				STORE_DETECTED_CID_CONN_RESP(is_tx, avdtp_l2cap, data);
++				avdtp_l2cap->state = BT_AVDTP_STATE_COMPLETE_SIGNALING;
++
++				/* Switch to use "signal" and delete "ongoing" since the AVDTP signaling has now been
++				 * detected */
++				avdtp_hci->signal = *avdtp_l2cap;
++				scsc_avdtp_detect_reset(avdtp_hci, false, true, false, false, false, false);
++				SCSC_TAG_DEBUG(BT_H4, "Signaling dst CID: 0x%04X, src CID: 0x%04X, aclid: 0x%04X (tx=%u)\n",
++							   avdtp_hci->signal.dst_cid,
++							   avdtp_hci->signal.src_cid,
++							   avdtp_hci->hci_connection_handle,
++							   is_tx);
++
++			} else if (IS_VALID_CID_CONN_RESP(is_tx, avdtp_l2cap, data) &&
++					   avdtp_l2cap->state == BT_AVDTP_STATE_PENDING_STREAMING) {
++
++				/* If we were waiting to complete an AVDTP stream detection - store the dst_cid or src_cid depending
++				 * on the transmit direction */
++				STORE_DETECTED_CID_CONN_RESP(is_tx, avdtp_l2cap, data);
++				avdtp_l2cap->state = BT_AVDTP_STATE_COMPLETE_STREAMING;
++
++				/* Switch to use "stream". If both an incoming and outgoing connection response was "expected"
++				 * the first one wins. */
++				avdtp_hci->stream = *avdtp_l2cap;
++				scsc_avdtp_detect_reset(avdtp_hci, false, false, false, true, false, false);
++
++				SCSC_TAG_DEBUG(BT_H4, "Streaming dst CID: 0x%04X, src CID: 0x%04X, aclid: 0x%04X (tx=%u)\n",
++							   avdtp_hci->stream.dst_cid,
++							   avdtp_hci->stream.src_cid,
++							   avdtp_hci->hci_connection_handle,
++							   is_tx);
++			}
++		} else if (HCI_L2CAP_CON_RSP_RESULT(data) >= HCI_L2CAP_CON_RSP_RESULT_REFUSED) {
++			/* In case of a CONN_REFUSED the existing CIDs must be cleaned up such that the detection is ready
++			 * for a new connection request */
++			if (IS_VALID_CID_CONN_RESP(is_tx, avdtp_l2cap, data) &&
++				avdtp_l2cap->state == BT_AVDTP_STATE_PENDING_SIGNALING) {
++				avdtp_l2cap->dst_cid = avdtp_l2cap->src_cid = 0;
++				avdtp_l2cap->state = BT_AVDTP_STATE_IDLE_SIGNALING;
++
++			} else if (IS_VALID_CID_CONN_RESP(is_tx, avdtp_l2cap, data) &&
++					   avdtp_l2cap->state == BT_AVDTP_STATE_PENDING_STREAMING) {
++
++				/* Connection refused on streaming connect request. Reset dst_cid and src_cid, and
++				 * reset the state to IDLE such that new connection requests can be detected */
++				avdtp_l2cap->dst_cid = avdtp_l2cap->src_cid = 0;
++				avdtp_l2cap->state = BT_AVDTP_STATE_IDLE_STREAMING;
++
++			}
++		}
++	}
++	if (avdtp_hci)
++		spin_unlock(&avdtp_hci->lock);
++}
++
++/* Handle DISCONNECT_REQUEST and remove all current detections on the specific CIDs */
++static bool scsc_bt_avdtp_detect_connection_disconnect_req_handling(uint16_t hci_connection_handle,
++																	const unsigned char *data,
++																	uint16_t length,
++																	bool is_tx)
++{
++	bool result = false;
++	struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci =
++		scsc_avdtp_detect_find_or_create_hci_connection(hci_connection_handle, false);
++
++	if (avdtp_hci) {
++		if (avdtp_hci->signal.state == BT_AVDTP_STATE_COMPLETE_SIGNALING &&
++			IS_VALID_CID_DISCONNECT_REQ(is_tx, avdtp_hci->signal, data)) {
++
++			/* Disconnect the current registered signaling and streaming AVDTP connection */
++			scsc_avdtp_detect_reset(avdtp_hci, true, true, true, true, true, true);
++
++			/* The detection was removed and it can therefore not be unlocked */
++			avdtp_hci = NULL;
++
++			SCSC_TAG_DEBUG(BT_H4, "Signaling src CID disconnected (aclid: 0x%04X) (TX=%u)\n",
++						   hci_connection_handle,
++						   is_tx);
++		} else if (avdtp_hci->stream.state == BT_AVDTP_STATE_COMPLETE_STREAMING &&
++				   IS_VALID_CID_DISCONNECT_REQ(is_tx, avdtp_hci->stream, data)) {
++
++			/* Disconnect the current registered streaming AVDTP connection */
++			scsc_avdtp_detect_reset(avdtp_hci, false, false, true, true, false, false);
++
++			SCSC_TAG_DEBUG(BT_H4, "Streaming src CID disconnected (aclid: 0x%04X) (TX=%u)\n",
++						   hci_connection_handle,
++						   is_tx);
++			result = true;
++		}
++		if (avdtp_hci)
++			spin_unlock(&avdtp_hci->lock);
++	}
++	return result;
++}
++
++/* Detects if there is any of the L2CAP codes of interrest, and returns true of the FW should be signalled a change */
++static bool scsc_bt_avdtp_detect_connection_rxtx(uint16_t hci_connection_handle, const unsigned char *data, uint16_t length, bool is_tx)
++{
++	uint8_t code = 0;
++	if (length < AVDTP_DETECT_MIN_DATA_LENGTH) {
++		SCSC_TAG_DEBUG(BT_H4, "Ignoring L2CAP signal, length %u)\n", length);
++		return false;
++	}
++
++	code = HCI_L2CAP_CODE(data);
++	switch (code) {
++
++	case L2CAP_CODE_CONNECT_REQ:
++	{
++		/* Handle connection request */
++		scsc_bt_avdtp_detect_connection_conn_req_handling(hci_connection_handle, data, length, is_tx);
++		break;
++	}
++	case L2CAP_CODE_CONNECT_RSP:
++	{
++		if (length < AVDTP_DETECT_MIN_DATA_LENGTH_CON_RSP) {
++			SCSC_TAG_WARNING(BT_H4, "Ignoring L2CAP CON RSP in short packet, length %u)\n", length);
++			return false;
++		}
++		/* Handle connection response */
++		scsc_bt_avdtp_detect_connection_conn_resp_handling(hci_connection_handle, data, length, is_tx);
++		break;
++	}
++	case L2CAP_CODE_DISCONNECT_REQ:
++	{
++		/* Handle disconnect request */
++		return scsc_bt_avdtp_detect_connection_disconnect_req_handling(hci_connection_handle, data, length, is_tx);
++		break;
++	}
++	default:
++		break;
++	}
++	return false;
++}
++
++/* Check if there are any SEIDs from the discover that are SINK, and store them as SINK candidates */
++static void scsc_avdtp_detect_check_discover_for_snk_seids(uint16_t hci_connection_handle,
++						struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci,
++						const unsigned char *data,
++						uint16_t length,
++						bool is_tx)
++{
++	uint16_t i = 0;
++	uint16_t n_seid_info = (length - HCI_L2CAP_CONF_SEID_OFFSET) / HCI_L2CAP_CONF_SEID_INFO_SIZE;
++	struct scsc_bt_avdtp_detect_snk_seid *seid = NULL;
++
++	/* Remove potential existing SEID infos on the either local or remote */
++	scsc_avdtp_detect_reset(avdtp_hci, false, false, false, false, is_tx, !is_tx);
++	for (i = 0; i < n_seid_info; i++) {
++		/* Only consider SEID if it's type is SINK. This means that for TX, look for TSEP equal to SNK.
++		 * For RX look for TSEP equal to SRC, since this would result in our side being SNK */
++		if ((is_tx && HCI_L2CAP_CONF_TSEP(data, i) == HCI_L2CAP_CONF_TSEP_SNK) ||
++			(!is_tx && HCI_L2CAP_CONF_TSEP(data, i) == HCI_L2CAP_CONF_TSEP_SRC)) {
++
++			if (avdtp_hci)
++				spin_unlock(&avdtp_hci->lock);
++
++			seid = kmalloc(sizeof(struct scsc_bt_avdtp_detect_snk_seid), GFP_KERNEL);
++
++			avdtp_hci = scsc_avdtp_detect_find_or_create_hci_connection(hci_connection_handle,
++											false);
++
++			if (avdtp_hci && seid) {
++				memset(seid, 0, sizeof(struct scsc_bt_avdtp_detect_snk_seid));
++				seid->seid = HCI_L2CAP_CONF_SEID(data, i);
++				SCSC_TAG_DEBUG(BT_H4, "Storing seid=%u as candidate for SINK, aclid: 0x%04X\n",
++							   seid->seid,
++							   avdtp_hci->hci_connection_handle);
++				/* Store the information on either local or remote */
++				if (is_tx) {
++					if (avdtp_hci->tsep_detect.local_snk_seids)
++						seid->next = avdtp_hci->tsep_detect.local_snk_seids;
++					avdtp_hci->tsep_detect.local_snk_seids = seid;
++				} else {
++					if (avdtp_hci->tsep_detect.remote_snk_seids)
++						seid->next = avdtp_hci->tsep_detect.remote_snk_seids;
++					avdtp_hci->tsep_detect.remote_snk_seids = seid;
++				}
++			} else
++				kfree(seid);
++		}
++	}
++}
++
++/* Check if the set configuration matches any of the SINK candidates */
++static void scsc_avdtp_detect_match_set_conf_seid_with_discover(struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci,
++								const unsigned char *data,
++								bool is_tx)
++{
++	struct scsc_bt_avdtp_detect_snk_seid *seid_info;
++	uint8_t candidate = 0;
++
++	/* Default to SRC */
++	avdtp_hci->tsep_detect.tsep = BT_AVDTP_TSEP_SRC;
++
++	if (is_tx) {
++		seid_info = avdtp_hci->tsep_detect.local_snk_seids;
++		candidate = avdtp_hci->tsep_detect.local_snk_seid_candidate;
++	} else {
++		seid_info = avdtp_hci->tsep_detect.remote_snk_seids;
++		candidate = avdtp_hci->tsep_detect.remote_snk_seid_candidate;
++	}
++
++	while (seid_info) {
++		if (seid_info->seid == candidate) {
++			/* SINK was detected */
++			avdtp_hci->tsep_detect.tsep = BT_AVDTP_TSEP_SNK;
++			break;
++		}
++		seid_info = seid_info->next;
++	}
++	/* Clear the canditate SEID since it has now been checked */
++	avdtp_hci->tsep_detect.local_snk_seid_candidate = 0;
++	avdtp_hci->tsep_detect.remote_snk_seid_candidate = 0;
++	SCSC_TAG_DEBUG(BT_H4, "TSEP for active stream, snk=%d, aclid=0x%04X\n",
++				   avdtp_hci->tsep_detect.tsep,
++				   avdtp_hci->hci_connection_handle);
++}
++
++/* Detects if the AVDTP signal leads to a state change that the FW should know */
++static uint8_t scsc_avdtp_detect_signaling_rxtx(uint16_t hci_connection_handle,
++						struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci,
++						const unsigned char *data,
++						uint16_t length,
++						bool is_tx)
++{
++	u8 signal_id = AVDTP_SIGNAL_ID(data);
++	u8 message_type = AVDTP_MESSAGE_TYPE(data);
++
++	SCSC_TAG_DEBUG(BT_H4, "id: 0x%02X, type: 0x%02X)\n", signal_id, message_type);
++
++	if (message_type == AVDTP_MESSAGE_TYPE_RSP_ACCEPT) {
++		if (signal_id == AVDTP_SIGNAL_ID_START)
++			return AVDTP_DETECT_SIGNALING_ACTIVE;
++		else if (signal_id == AVDTP_SIGNAL_ID_OPEN)
++			return AVDTP_DETECT_SIGNALING_OPEN;
++		else if (is_tx && (signal_id == AVDTP_SIGNAL_ID_CLOSE || signal_id == AVDTP_SIGNAL_ID_SUSPEND ||
++				signal_id == AVDTP_SIGNAL_ID_ABORT))
++			return AVDTP_DETECT_SIGNALING_INACTIVE;
++		else if (signal_id == AVDTP_SIGNAL_ID_DISCOVER) {
++			/* Check the discover signal for potential SNK candidate SEIDs */
++			scsc_avdtp_detect_check_discover_for_snk_seids(hci_connection_handle,
++									avdtp_hci, data, length, is_tx);
++		} else if (signal_id == AVDTP_SIGNAL_ID_SET_CONF) {
++			/* Check if the SEID from set config matches a SNK SEID */
++			scsc_avdtp_detect_match_set_conf_seid_with_discover(avdtp_hci, data, is_tx);
++		}
++	} else if (message_type == AVDTP_MESSAGE_TYPE_CMD) {
++		if (signal_id == AVDTP_SIGNAL_ID_SET_CONF) {
++			if (is_tx)
++				avdtp_hci->tsep_detect.remote_snk_seid_candidate = HCI_L2CAP_SET_CONF_ACP_SEID(data);
++			else
++				avdtp_hci->tsep_detect.local_snk_seid_candidate = HCI_L2CAP_SET_CONF_ACP_SEID(data);
++			SCSC_TAG_DEBUG(BT_H4, "Set configuration was detected; local_seid_candidate=%u, remote_seid_candidate=%u (aclid: 0x%04X)\n",
++						   avdtp_hci->tsep_detect.local_snk_seid_candidate,
++						   avdtp_hci->tsep_detect.remote_snk_seid_candidate,
++						   avdtp_hci->hci_connection_handle);
++		} else if (is_tx && (signal_id == AVDTP_SIGNAL_ID_CLOSE || signal_id == AVDTP_SIGNAL_ID_SUSPEND ||
++				     signal_id == AVDTP_SIGNAL_ID_ABORT))
++			return AVDTP_DETECT_SIGNALING_INACTIVE;
++	} else if (message_type == AVDTP_MESSAGE_TYPE_GENERAL_REJECT || message_type == AVDTP_MESSAGE_TYPE_RSP_REJECT) {
++		if (signal_id == AVDTP_SIGNAL_ID_SET_CONF) {
++			if (is_tx) {
++				if (avdtp_hci->tsep_detect.local_snk_seid_candidate)
++					avdtp_hci->tsep_detect.local_snk_seid_candidate = 0;
++			} else {
++				if (avdtp_hci->tsep_detect.remote_snk_seid_candidate)
++					avdtp_hci->tsep_detect.remote_snk_seid_candidate = 0;
++			}
++		}
++	}
++	return AVDTP_DETECT_SIGNALING_IGNORE;
++}
++
++/* Public function that hooks into scsc_shm.c. It pass the provided data on the proper functions such that
++ * the AVDTP can be detected. If any state change is detected, the FW is signalled */
++void scsc_avdtp_detect_rxtx(u16 hci_connection_handle, const unsigned char *data, uint16_t length, bool is_tx)
++{
++	/* Look for AVDTP connections */
++	bool avdtp_gen_bg_int = false;
++	uint16_t cid_to_fw = 0;
++	bool is_sink = false;
++	struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci = NULL;
++	bool avdtp_open = false;
++
++	/* Look for AVDTP connections */
++	if (HCI_L2CAP_RX_CID((const unsigned char *)(data)) == L2CAP_SIGNALING_CID) {
++		if (scsc_bt_avdtp_detect_connection_rxtx(hci_connection_handle, data, length, is_tx)) {
++			avdtp_gen_bg_int = true;
++
++			avdtp_hci = scsc_avdtp_detect_find_or_create_hci_connection(
++				hci_connection_handle,
++				false);
++
++			if (avdtp_hci) {
++				cid_to_fw = avdtp_hci->stream.dst_cid;
++				is_sink = avdtp_hci->tsep_detect.tsep == BT_AVDTP_TSEP_SNK;
++			}
++		}
++	} else {
++		/* Check if we have detected any signal on the connection handle */
++		avdtp_hci = scsc_avdtp_detect_find_or_create_hci_connection(
++			hci_connection_handle,
++			false);
++
++		if (avdtp_hci) {
++			if (avdtp_hci->signal.state == BT_AVDTP_STATE_COMPLETE_SIGNALING &&
++			   length >= AVDTP_DETECT_MIN_AVDTP_LENGTH &&
++			   ((is_tx && avdtp_hci->signal.dst_cid != 0 &&
++				 avdtp_hci->signal.dst_cid == HCI_L2CAP_RX_CID((const unsigned char *)(data))) ||
++				(!is_tx && avdtp_hci->signal.src_cid != 0 &&
++				 avdtp_hci->signal.src_cid == HCI_L2CAP_RX_CID((const unsigned char *)(data))))) {
++				/* Signaling has been detected on the given CID and hci_connection_handle */
++				uint8_t result = scsc_avdtp_detect_signaling_rxtx(hci_connection_handle,
++									avdtp_hci, data, length, is_tx);
++
++				if (result != AVDTP_DETECT_SIGNALING_IGNORE) {
++					avdtp_gen_bg_int = true;
++					if (result != AVDTP_DETECT_SIGNALING_INACTIVE)
++						cid_to_fw = avdtp_hci->stream.dst_cid;
++					if (result == AVDTP_DETECT_SIGNALING_OPEN)
++						avdtp_open = true;
++					is_sink = avdtp_hci->tsep_detect.tsep == BT_AVDTP_TSEP_SNK;
++				}
++
++			}
++		}
++	}
++
++	if (avdtp_hci)
++		spin_unlock(&avdtp_hci->lock);
++
++	if (avdtp_gen_bg_int) {
++		if (bt_service.bsmhcp_protocol->header.firmware_features & BSMHCP_FEATURE_AVDTP_TRANSFER_RING) {
++			uint32_t flags = 0;
++
++			if (avdtp_hci && avdtp_hci->tsep_detect.tsep == BT_AVDTP_TSEP_SNK)
++				flags |= AVDTP_SNK_FLAG_TD_MASK;
++			if (avdtp_open)
++				flags |= AVDTP_OPEN_FLAG_TD_MASK;
++			scsc_bt_shm_h4_avdtp_detect_write(flags, cid_to_fw, hci_connection_handle);
++		} else {
++			/* Legacy communication between driver and FW. This was replaced by a transfer ring but
++			 * the implementation is kept for backward compability
++			 */
++			u8 msg_counter = AVDTP_GET_MESSAGE_COUNT(
++				bt_service.bsmhcp_protocol->header.avdtp_detect_stream_id);
++			msg_counter++;
++			msg_counter &= 0x3;
++
++			bt_service.bsmhcp_protocol->header.avdtp_detect_stream_id = cid_to_fw |
++				(hci_connection_handle << 16) |
++				(msg_counter << 28);
++			bt_service.bsmhcp_protocol->header.avdtp_detect_stream_id |= AVDTP_SIGNAL_FLAG_MASK;
++			if (is_sink)
++				bt_service.bsmhcp_protocol->header.avdtp_detect_stream_id |= AVDTP_SNK_FLAG_MASK;
++			SCSC_TAG_DEBUG(
++				BT_H4,
++				"Found AVDTP signal. msgid: 0x%02X, aclid: 0x%04X, cid: 0x%04X, streamid: 0x%08X\n",
++				msg_counter,
++				hci_connection_handle,
++				cid_to_fw,
++				bt_service.bsmhcp_protocol->header.avdtp_detect_stream_id);
++			wmb();
++			scsc_service_mifintrbit_bit_set(bt_service.service,
++										bt_service.bsmhcp_protocol->header.ap_to_bg_int_src,
++										SCSC_MIFINTR_TARGET_R4);
++		}
++	}
++}
++
++/* Used to reset the different AVDTP detections */
++void scsc_avdtp_detect_reset(struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci,
++							 bool reset_signal,
++							 bool reset_signal_ongoing,
++							 bool reset_stream,
++							 bool reset_stream_ongoing,
++							 bool reset_local_seids,
++							 bool reset_remote_seids)
++{
++	if (reset_signal_ongoing) {
++		avdtp_hci->ongoing.outgoing_signal.state = BT_AVDTP_STATE_IDLE_SIGNALING;
++		avdtp_hci->ongoing.outgoing_signal.src_cid = 0;
++		avdtp_hci->ongoing.outgoing_signal.dst_cid = 0;
++		avdtp_hci->ongoing.incoming_signal.state = BT_AVDTP_STATE_IDLE_SIGNALING;
++		avdtp_hci->ongoing.incoming_signal.src_cid = 0;
++		avdtp_hci->ongoing.incoming_signal.dst_cid = 0;
++	}
++	if (reset_stream) {
++		avdtp_hci->stream.state = BT_AVDTP_STATE_IDLE_STREAMING;
++		avdtp_hci->stream.src_cid = 0;
++		avdtp_hci->stream.dst_cid = 0;
++	}
++	if (reset_stream_ongoing) {
++		avdtp_hci->ongoing.outgoing_stream.state = BT_AVDTP_STATE_IDLE_STREAMING;
++		avdtp_hci->ongoing.outgoing_stream.src_cid = 0;
++		avdtp_hci->ongoing.outgoing_stream.dst_cid = 0;
++		avdtp_hci->ongoing.incoming_stream.state = BT_AVDTP_STATE_IDLE_STREAMING;
++		avdtp_hci->ongoing.incoming_stream.src_cid = 0;
++		avdtp_hci->ongoing.incoming_stream.dst_cid = 0;
++	}
++	if (reset_local_seids) {
++		struct scsc_bt_avdtp_detect_snk_seid *seid = avdtp_hci->tsep_detect.local_snk_seids;
++
++		while (seid) {
++			struct scsc_bt_avdtp_detect_snk_seid *next = seid->next;
++
++			kfree(seid);
++			seid = next;
++		}
++		avdtp_hci->tsep_detect.local_snk_seids = NULL;
++		avdtp_hci->tsep_detect.local_snk_seid_candidate = 0;
++	}
++	if (reset_remote_seids) {
++		struct scsc_bt_avdtp_detect_snk_seid *seid = avdtp_hci->tsep_detect.remote_snk_seids;
++
++		while (seid) {
++			struct scsc_bt_avdtp_detect_snk_seid *next = seid->next;
++
++			kfree(seid);
++			seid = next;
++		}
++		avdtp_hci->tsep_detect.remote_snk_seids = NULL;
++		avdtp_hci->tsep_detect.remote_snk_seid_candidate = 0;
++	}
++	if (reset_local_seids && reset_remote_seids)
++		avdtp_hci->tsep_detect.tsep = BT_AVDTP_TSEP_SRC;
++
++	if (reset_signal) {
++		struct scsc_bt_avdtp_detect_hci_connection *prev;
++		/* Unlock the mutex to keep the order of lock/unlock between the connection list
++		 * and the individual elements
++		 */
++		spin_unlock(&avdtp_hci->lock);
++		spin_lock(&bt_service.avdtp_detect.lock);
++		/* The element could have been deleted at this point by another thread before the mutext
++		 * on the list was taken. Therefore re-check.
++		 */
++		if (avdtp_hci) {
++			prev = bt_service.avdtp_detect.connections;
++
++			if (prev && prev != avdtp_hci) {
++				/* The element was not the head of the list. Search for the previous element */
++				while (prev) {
++					if (prev->next == avdtp_hci) {
++						/* Remove the element from the list */
++						prev->next = avdtp_hci->next;
++						break;
++					}
++					prev = prev->next;
++				}
++			} else {
++				bt_service.avdtp_detect.connections = avdtp_hci->next;
++			}
++			/* Lock to make sure that no-one reads from it. Since it has been removed from the list
++			 * unlocking it again will not make another thread read it since it cannot be found
++			 */
++			spin_lock(&avdtp_hci->lock);
++			spin_unlock(&bt_service.avdtp_detect.lock);
++			spin_unlock(&avdtp_hci->lock);
++			kfree(avdtp_hci);
++			avdtp_hci = NULL;
++		} else
++			spin_unlock(&bt_service.avdtp_detect.lock);
++	}
++}
++
++/* Used to reset all current or ongoing detections for a given hci_connection_handle. This can e.g.
++ * used if the link is lost */
++bool scsc_avdtp_detect_reset_connection_handle(uint16_t hci_connection_handle)
++{
++	bool reset_anything = false;
++	struct scsc_bt_avdtp_detect_hci_connection *avdtp_hci =
++		scsc_avdtp_detect_find_or_create_hci_connection(hci_connection_handle, false);
++
++	/* Check already established connections */
++	if (avdtp_hci) {
++		scsc_avdtp_detect_reset(avdtp_hci, true, true, true, true, true, true);
++		/* No need to unlock the detection since it has been removed */
++		reset_anything = true;
++	}
++	return reset_anything;
++}
++
++void scsc_avdtp_detect_exit(void)
++{
++	struct scsc_bt_avdtp_detect_hci_connection *head;
++
++	/* Lock the detection list and find the head */
++	spin_lock(&bt_service.avdtp_detect.lock);
++	head = bt_service.avdtp_detect.connections;
++
++	while (head) {
++		spin_lock(&head->lock);
++		/* Clear the remote and local seids lists on head */
++		scsc_avdtp_detect_reset(head, false, false, false, false, true, true);
++
++		/* Update the head to bypass the current element */
++		bt_service.avdtp_detect.connections = head->next;
++
++		spin_unlock(&bt_service.avdtp_detect.lock);
++
++		/* Free the used memory */
++		spin_unlock(&head->lock);
++		kfree(head);
++		head = NULL;
++
++		/* Update the head variable */
++		spin_lock(&bt_service.avdtp_detect.lock);
++		head = bt_service.avdtp_detect.connections;
++	}
++
++	spin_unlock(&bt_service.avdtp_detect.lock);
++
++	/* The avdtp_detect has now been restored and doesn't contain other information
++	 * than its two locks
++	 */
++}
+diff --git a/drivers/misc/samsung/scsc_bt/scsc_bluez.c b/drivers/misc/samsung/scsc_bt/scsc_bluez.c
+new file mode 100644
+index 000000000..1c837d3e2
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/scsc_bluez.c
+@@ -0,0 +1,287 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * BlueZ front end of the SCSC (Maxwell) Bluetooth driver.
++ *
++ * The BT service (scsc_bt_module.c, scsc_shm.c) speaks H4 through the file
++ * operations that backed Android's /dev/scsc_h4_0. Here they back an hci_dev:
++ * open starts the BT service on the WLBT core, a kthread reads the H4 stream
++ * (one read may hold several packets, and a packet may be split between
++ * reads) and hands whole frames to the HCI core, send writes H4 packets.
++ *
++ * The firmware lives on Android's VENDOR partition, so hci0 is registered
++ * only when userspace says it can be read:
++ *   echo 1 > /sys/module/scsc_bt/parameters/enable
++ * The HCI core powers a new controller on at once, and a failed first power
++ * on would keep it from bluetoothd for good.
++ */
++
++#include <linux/kthread.h>
++#include <linux/module.h>
++#include <linux/workqueue.h>
++#include <net/bluetooth/bluetooth.h>
++#include <net/bluetooth/hci_core.h>
++
++#include "scsc_bluez.h"
++
++static void scsc_bluez_work(struct work_struct *work);
++
++static struct scsc_bluez {
++	/* set by the BT service, read by the HCI callbacks */
++	const struct file_operations *fops;
++	atomic_t *error_count;
++	wait_queue_head_t *read_wait;
++	struct device *dev;		/* the Maxwell core, NULL while it is away */
++
++	bool enable;
++	struct work_struct work;	/* registers or removes hdev */
++	struct hci_dev *hdev;
++
++	struct file file;		/* f_flags 0: blocking reads */
++	struct task_struct *rx_thread;
++	bool stopping;
++
++	/* H4 reassembly */
++	struct sk_buff *rx_skb;
++	unsigned int rx_need;		/* bytes left of the header or payload */
++	bool rx_payload;
++	u8 rx_buf[HCI_MAX_FRAME_SIZE + 1];
++} bz = {
++	.work = __WORK_INITIALIZER(bz.work, scsc_bluez_work),
++};
++
++static void scsc_bluez_recv(struct hci_dev *hdev, const u8 *data, size_t count)
++{
++	struct sk_buff *skb;
++	size_t n;
++
++	while (count) {
++		if (!bz.rx_skb) {
++			u8 type = *data++;
++
++			count--;
++			switch (type) {
++			case HCI_EVENT_PKT:
++				bz.rx_need = HCI_EVENT_HDR_SIZE;
++				break;
++			case HCI_ACLDATA_PKT:
++				bz.rx_need = HCI_ACL_HDR_SIZE;
++				break;
++			default:
++				bt_dev_err(hdev, "unknown H4 packet type 0x%02x", type);
++				hdev->stat.err_rx++;
++				return;
++			}
++
++			bz.rx_skb = bt_skb_alloc(HCI_MAX_FRAME_SIZE, GFP_KERNEL);
++			if (!bz.rx_skb) {
++				hdev->stat.err_rx++;
++				return;
++			}
++			hci_skb_pkt_type(bz.rx_skb) = type;
++			bz.rx_payload = false;
++			continue;
++		}
++
++		skb = bz.rx_skb;
++		n = min_t(size_t, count, bz.rx_need);
++		skb_put_data(skb, data, n);
++		data += n;
++		count -= n;
++		bz.rx_need -= n;
++		if (bz.rx_need)
++			continue;
++
++		if (!bz.rx_payload) {
++			bz.rx_payload = true;
++			if (hci_skb_pkt_type(skb) == HCI_EVENT_PKT)
++				bz.rx_need = hci_event_hdr(skb)->plen;
++			else
++				bz.rx_need = __le16_to_cpu(hci_acl_hdr(skb)->dlen);
++
++			if (bz.rx_need > skb_tailroom(skb)) {
++				bt_dev_err(hdev, "H4 packet too long (%u)", bz.rx_need);
++				kfree_skb(skb);
++				bz.rx_skb = NULL;
++				hdev->stat.err_rx++;
++				return;
++			}
++			if (bz.rx_need)
++				continue;
++		}
++
++		if (hci_skb_pkt_type(skb) == HCI_EVENT_PKT)
++			hdev->stat.evt_rx++;
++		else
++			hdev->stat.acl_rx++;
++		hdev->stat.byte_rx += skb->len;
++		bz.rx_skb = NULL;
++		hci_recv_frame(hdev, skb);
++	}
++}
++
++static int scsc_bluez_rx_thread(void *data)
++{
++	struct hci_dev *hdev = data;
++	ssize_t n;
++
++	while (!kthread_should_stop()) {
++		n = bz.fops->read(&bz.file, bz.rx_buf, sizeof(bz.rx_buf), NULL);
++		if (READ_ONCE(bz.stopping))
++			break;
++		if (n < 0) {
++			bt_dev_err(hdev, "H4 read failed (%zd)", n);
++			break;
++		}
++		scsc_bluez_recv(hdev, bz.rx_buf, n);
++	}
++
++	/* close() stops the thread */
++	set_current_state(TASK_INTERRUPTIBLE);
++	while (!kthread_should_stop()) {
++		schedule();
++		set_current_state(TASK_INTERRUPTIBLE);
++	}
++	__set_current_state(TASK_RUNNING);
++
++	return 0;
++}
++
++static int scsc_bluez_open(struct hci_dev *hdev)
++{
++	int err;
++
++	/* starts the BT service: firmware, shared memory, interrupts */
++	err = bz.fops->open(NULL, &bz.file);
++	if (err)
++		return err;
++
++	WRITE_ONCE(bz.stopping, false);
++	bz.rx_thread = kthread_run(scsc_bluez_rx_thread, hdev, "scsc_bluez");
++	if (IS_ERR(bz.rx_thread)) {
++		err = PTR_ERR(bz.rx_thread);
++		bz.rx_thread = NULL;
++		bz.fops->release(NULL, &bz.file);
++	}
++
++	return err;
++}
++
++static int scsc_bluez_close(struct hci_dev *hdev)
++{
++	if (bz.rx_thread) {
++		/* the blocking read returns once an error is counted; release
++		 * clears the count
++		 */
++		WRITE_ONCE(bz.stopping, true);
++		atomic_inc(bz.error_count);
++		wake_up(bz.read_wait);
++		kthread_stop(bz.rx_thread);
++		bz.rx_thread = NULL;
++	}
++
++	kfree_skb(bz.rx_skb);
++	bz.rx_skb = NULL;
++
++	return bz.fops->release(NULL, &bz.file);
++}
++
++static int scsc_bluez_send(struct hci_dev *hdev, struct sk_buff *skb)
++{
++	u8 type = hci_skb_pkt_type(skb);
++	ssize_t n;
++
++	/* the firmware has transfer rings for commands and ACL data only;
++	 * SCO audio goes through the audio DSP
++	 */
++	if (type != HCI_COMMAND_PKT && type != HCI_ACLDATA_PKT)
++		return -EILSEQ;
++
++	*(u8 *)skb_push(skb, 1) = type;
++	n = bz.fops->write(NULL, skb->data, skb->len, NULL);
++	if (n < 0) {
++		skb_pull(skb, 1);
++		return n;
++	}
++
++	if (type == HCI_COMMAND_PKT)
++		hdev->stat.cmd_tx++;
++	else
++		hdev->stat.acl_tx++;
++	hdev->stat.byte_tx += skb->len - 1;
++	kfree_skb(skb);
++
++	return 0;
++}
++
++static void scsc_bluez_work(struct work_struct *work)
++{
++	struct device *dev = READ_ONCE(bz.dev);
++	struct hci_dev *hdev;
++	int err;
++
++	if (READ_ONCE(bz.enable) && dev && !bz.hdev) {
++		hdev = hci_alloc_dev();
++		if (!hdev)
++			return;
++
++		hdev->bus = HCI_IPC;
++		SET_HCIDEV_DEV(hdev, dev);
++		hdev->open = scsc_bluez_open;
++		hdev->close = scsc_bluez_close;
++		hdev->send = scsc_bluez_send;
++
++		err = hci_register_dev(hdev);
++		if (err < 0) {
++			dev_err(dev, "hci_register_dev failed (%d)\n", err);
++			hci_free_dev(hdev);
++			return;
++		}
++		bz.hdev = hdev;
++	} else if (!READ_ONCE(bz.enable) && bz.hdev) {
++		hci_unregister_dev(bz.hdev);
++		hci_free_dev(bz.hdev);
++		bz.hdev = NULL;
++	}
++}
++
++/*
++ * Called by the BT service with its start mutex held; the HCI device is
++ * registered from a work, as its power on starts the service.
++ */
++void slsi_bt_notify_probe(struct device *dev,
++			  const struct file_operations *fs,
++			  atomic_t *error_count,
++			  wait_queue_head_t *read_wait)
++{
++	bz.fops = fs;
++	bz.error_count = error_count;
++	bz.read_wait = read_wait;
++	WRITE_ONCE(bz.dev, dev);
++	schedule_work(&bz.work);
++}
++
++/*
++ * The Maxwell core is gone, for a firmware recovery as a rule: hci0 stays,
++ * the service refuses to start until the core probes again.
++ */
++void slsi_bt_notify_remove(void)
++{
++	WRITE_ONCE(bz.dev, NULL);
++}
++
++static int scsc_bluez_enable_set(const char *val, const struct kernel_param *kp)
++{
++	int err = param_set_bool(val, kp);
++
++	if (!err)
++		schedule_work(&bz.work);
++	return err;
++}
++
++static const struct kernel_param_ops scsc_bluez_enable_ops = {
++	.set = scsc_bluez_enable_set,
++	.get = param_get_bool,
++};
++
++module_param_cb(enable, &scsc_bluez_enable_ops, &bz.enable, 0644);
++MODULE_PARM_DESC(enable, "Register hci0 once the firmware can be read (0 removes it)");
+diff --git a/drivers/misc/samsung/scsc_bt/scsc_bluez.h b/drivers/misc/samsung/scsc_bt/scsc_bluez.h
+new file mode 100644
+index 000000000..b8102ade1
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/scsc_bluez.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * BlueZ (hci_dev) front end of the SCSC Bluetooth driver: the BT service
++ * hands over its H4 stream operations once the Maxwell core is there.
++ */
++#ifndef __SCSC_BLUEZ_H
++#define __SCSC_BLUEZ_H
++
++#include <linux/fs.h>
++#include <linux/wait.h>
++
++void slsi_bt_notify_probe(struct device *dev,
++			  const struct file_operations *fs,
++			  atomic_t *error_count,
++			  wait_queue_head_t *read_wait);
++void slsi_bt_notify_remove(void);
++
++#endif /* __SCSC_BLUEZ_H */
+diff --git a/drivers/misc/samsung/scsc_bt/scsc_bt_hci.h b/drivers/misc/samsung/scsc_bt/scsc_bt_hci.h
+new file mode 100755
+index 000000000..02215bf0a
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/scsc_bt_hci.h
+@@ -0,0 +1,112 @@
++/****************************************************************************
++ *
++ *       Internal BT driver HCI decoder
++ *
++ *       Copyright (c) 2015 Samsung Electronics Co., Ltd
++ *
++ ****************************************************************************/
++
++#ifndef __SCSC_BT_HCI_H
++#define __SCSC_BT_HCI_H
++
++#define HCI_EVENT_HEADER_LENGTH                      (2)
++
++#define HCI_EV_INQUIRY_COMPLETE                      ((u8)0x01)
++#define HCI_EV_INQUIRY_RESULT                        ((u8)0x02)
++#define HCI_EV_CONN_COMPLETE                         ((u8)0x03)
++#define HCI_EV_CONN_REQUEST                          ((u8)0x04)
++#define HCI_EV_DISCONNECT_COMPLETE                   ((u8)0x05)
++#define HCI_EV_AUTH_COMPLETE                         ((u8)0x06)
++#define HCI_EV_REMOTE_NAME_REQ_COMPLETE              ((u8)0x07)
++#define HCI_EV_ENCRYPTION_CHANGE                     ((u8)0x08)
++#define HCI_EV_CHANGE_CONN_LINK_KEY_COMPLETE         ((u8)0x09)
++#define HCI_EV_MASTER_LINK_KEY_COMPLETE              ((u8)0x0A)
++#define HCI_EV_READ_REM_SUPP_FEATURES_COMPLETE       ((u8)0x0B)
++#define HCI_EV_READ_REMOTE_VER_INFO_COMPLETE         ((u8)0x0C)
++#define HCI_EV_QOS_SETUP_COMPLETE                    ((u8)0x0D)
++#define HCI_EV_COMMAND_COMPLETE                      ((u8)0x0E)
++#define HCI_EV_COMMAND_STATUS                        ((u8)0x0F)
++#define HCI_EV_HARDWARE_ERROR                        ((u8)0x10)
++#define HCI_EV_FLUSH_OCCURRED                        ((u8)0x11)
++#define HCI_EV_ROLE_CHANGE                           ((u8)0x12)
++#define HCI_EV_NUMBER_COMPLETED_PKTS                 ((u8)0x13)
++#define HCI_EV_MODE_CHANGE                           ((u8)0x14)
++#define HCI_EV_RETURN_LINK_KEYS                      ((u8)0x15)
++#define HCI_EV_PIN_CODE_REQ                          ((u8)0x16)
++#define HCI_EV_LINK_KEY_REQ                          ((u8)0x17)
++#define HCI_EV_LINK_KEY_NOTIFICATION                 ((u8)0x18)
++#define HCI_EV_LOOPBACK_COMMAND                      ((u8)0x19)
++#define HCI_EV_DATA_BUFFER_OVERFLOW                  ((u8)0x1A)
++#define HCI_EV_MAX_SLOTS_CHANGE                      ((u8)0x1B)
++#define HCI_EV_READ_CLOCK_OFFSET_COMPLETE            ((u8)0x1C)
++#define HCI_EV_CONN_PACKET_TYPE_CHANGED              ((u8)0x1D)
++#define HCI_EV_QOS_VIOLATION                         ((u8)0x1E)
++#define HCI_EV_PAGE_SCAN_MODE_CHANGE                 ((u8)0x1F)
++#define HCI_EV_PAGE_SCAN_REP_MODE_CHANGE             ((u8)0x20)
++/* 1.2 Events */
++#define HCI_EV_FLOW_SPEC_COMPLETE                    ((u8)0x21)
++#define HCI_EV_INQUIRY_RESULT_WITH_RSSI              ((u8)0x22)
++#define HCI_EV_READ_REM_EXT_FEATURES_COMPLETE        ((u8)0x23)
++#define HCI_EV_FIXED_ADDRESS                         ((u8)0x24)
++#define HCI_EV_ALIAS_ADDRESS                         ((u8)0x25)
++#define HCI_EV_GENERATE_ALIAS_REQ                    ((u8)0x26)
++#define HCI_EV_ACTIVE_ADDRESS                        ((u8)0x27)
++#define HCI_EV_ALLOW_PRIVATE_PAIRING                 ((u8)0x28)
++#define HCI_EV_ALIAS_ADDRESS_REQ                     ((u8)0x29)
++#define HCI_EV_ALIAS_NOT_RECOGNISED                  ((u8)0x2A)
++#define HCI_EV_FIXED_ADDRESS_ATTEMPT                 ((u8)0x2B)
++#define HCI_EV_SYNC_CONN_COMPLETE                    ((u8)0x2C)
++#define HCI_EV_SYNC_CONN_CHANGED                     ((u8)0x2D)
++
++/* 2.1 Events */
++#define HCI_EV_SNIFF_SUB_RATE                        ((u8)0x2E)
++#define HCI_EV_EXTENDED_INQUIRY_RESULT               ((u8)0x2F)
++#define HCI_EV_ENCRYPTION_KEY_REFRESH_COMPLETE       ((u8)0x30)
++#define HCI_EV_IO_CAPABILITY_REQUEST                 ((u8)0x31)
++#define HCI_EV_IO_CAPABILITY_RESPONSE                ((u8)0x32)
++#define HCI_EV_USER_CONFIRMATION_REQUEST             ((u8)0x33)
++#define HCI_EV_USER_PASSKEY_REQUEST                  ((u8)0x34)
++#define HCI_EV_REMOTE_OOB_DATA_REQUEST               ((u8)0x35)
++#define HCI_EV_SIMPLE_PAIRING_COMPLETE               ((u8)0x36)
++#define HCI_EV_LST_CHANGE                            ((u8)0x38)
++#define HCI_EV_ENHANCED_FLUSH_COMPLETE               ((u8)0x39)
++#define HCI_EV_USER_PASSKEY_NOTIFICATION             ((u8)0x3B)
++#define HCI_EV_KEYPRESS_NOTIFICATION                 ((u8)0x3C)
++#define HCI_EV_REM_HOST_SUPPORTED_FEATURES           ((u8)0x3D)
++#define HCI_EV_ULP                                   ((u8)0x3E)
++
++/* TCC + CSB Events */
++#define HCI_EV_TRIGGERED_CLOCK_CAPTURE               ((u8)0x4E)
++#define HCI_EV_SYNCHRONIZATION_TRAIN_COMPLETE        ((u8)0x4F)
++#define HCI_EV_SYNCHRONIZATION_TRAIN_RECEIVED        ((u8)0x50)
++#define HCI_EV_CSB_RECEIVE                           ((u8)0x51)
++#define HCI_EV_CSB_TIMEOUT                           ((u8)0x52)
++#define HCI_EV_TRUNCATED_PAGE_COMPLETE               ((u8)0x53)
++#define HCI_EV_SLAVE_PAGE_RESPONSE_TIMEOUT           ((u8)0x54)
++#define HCI_EV_CSB_CHANNEL_MAP_CHANGE                ((u8)0x55)
++#define HCI_EV_INQUIRY_RESPONSE_NOTIFICATION         ((u8)0x56)
++
++/* 4.1 Events */
++#define HCI_EV_AUTHENTICATED_PAYLOAD_TIMEOUT_EXPIRED ((u8)0x57)
++
++/* ULP Sub-opcodes */
++#define HCI_EV_ULP_CONNECTION_COMPLETE                 ((u8)0x01)
++#define HCI_EV_ULP_ADVERTISING_REPORT                  ((u8)0x02)
++#define HCI_EV_ULP_CONNECTION_UPDATE_COMPLETE          ((u8)0x03)
++#define HCI_EV_ULP_READ_REMOTE_USED_FEATURES_COMPLETE  ((u8)0x04)
++#define HCI_EV_ULP_LONG_TERM_KEY_REQUEST               ((u8)0x05)
++#define HCI_EV_ULP_REMOTE_CONNECTION_PARAMETER_REQUEST ((u8)0x06)
++#define HCI_EV_ULP_DATA_LENGTH_CHANGE                  ((u8)0x07)
++#define HCI_EV_ULP_READ_LOCAL_P256_PUB_KEY_COMPLETE    ((u8)0x08)
++#define HCI_EV_ULP_GENERATE_DHKEY_COMPLETE             ((u8)0x09)
++#define HCI_EV_ULP_ENHANCED_CONNECTION_COMPLETE        ((u8)0x0A)
++#define HCI_EV_ULP_DIRECT_ADVERTISING_REPORT           ((u8)0x0B)
++#define HCI_EV_ULP_PHY_UPDATE_COMPLETE                 ((u8)0x0C)
++/* The subevent code of ULP_USED_CHANNEL_SELECTION_EVENT shall be updated
++   when it is defined in the spec.
++   Assign it as 0x0D temporarily.                                     */
++#define HCI_EV_ULP_USED_CHANNEL_SELECTION              ((u8)0x0D)
++
++#define HCI_EV_DECODE(entry) case entry: ret = #entry; break
++
++#endif /* __SCSC_BT_HCI_H */
+diff --git a/drivers/misc/samsung/scsc_bt/scsc_bt_module.c b/drivers/misc/samsung/scsc_bt/scsc_bt_module.c
+new file mode 100755
+index 000000000..479b7637f
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/scsc_bt_module.c
+@@ -0,0 +1,1425 @@
++/****************************************************************************
++ *
++ * Copyright (c) 2014 - 2016 Samsung Electronics Co., Ltd. All rights reserved
++ *
++ * BT driver entry point
++ *
++ ****************************************************************************/
++
++#include <linux/version.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/fs.h>
++#include <linux/module.h>
++#include <linux/firmware.h>
++#include <linux/poll.h>
++#include <linux/slab.h>
++#include <linux/cdev.h>
++#include <linux/device.h>
++#include <linux/kthread.h>
++#include <linux/proc_fs.h>
++#include <asm/io.h>
++#include <asm/termios.h>
++#include <linux/wakelock.h>
++#include <linux/delay.h>
++#include <linux/seq_file.h>
++#include <linux/ctype.h>
++
++
++#include <scsc/scsc_logring.h>
++#include <scsc/kic/slsi_kic_lib.h>
++#include <scsc/kic/slsi_kic_bt.h>
++
++#include "scsc_bt_priv.h"
++#include "../scsc/scsc_mx_impl.h"
++
++#define SCSC_MODDESC "SCSC MX BT Driver"
++#define SCSC_MODAUTH "Samsung Electronics Co., Ltd"
++#define SCSC_MODVERSION "-devel"
++
++#define SLSI_BT_SERVICE_CLOSE_RETRY 60
++#define SLSI_BT_SERVICE_STOP_RECOVERY_TIMEOUT 20000
++#define SLSI_BT_SERVICE_STOP_RECOVERY_DISABLED_TIMEOUT 2000
++
++/* btlog string
++ *
++ * The string must be null-terminated, and may also include a single
++ * newline before its terminating null. The string shall be given
++ * as a hexadecimal number, but the first character may also be a
++ * plus sign. The maximum number of Hexadecimal characters is 32
++ * (128bits)
++ */
++#define SCSC_BTLOG_MAX_STRING_LEN       (37)
++#define SCSC_BTLOG_BUF_LEN              (19)
++#define SCSC_BTLOG_BUF_MAX_CHAR_TO_COPY (16)
++#define SCSC_BTLOG_BUF_PREFIX_LEN        (2)
++
++#define SCSC_ANT_MAX_TIMEOUT (20*HZ)
++
++static u16 bt_module_irq_mask;
++
++
++static DEFINE_MUTEX(bt_start_mutex);
++static DEFINE_MUTEX(bt_audio_mutex);
++
++static int bt_recovery_in_progress;
++
++static int recovery_timeout = SLSI_BT_SERVICE_STOP_RECOVERY_TIMEOUT;
++
++struct scsc_common_service common_service;
++struct scsc_bt_service bt_service;
++
++static int service_start_count;
++
++static u64 bluetooth_address;
++static u32 bt_info_trigger;
++static u32 bt_info_interrupt;
++static u32 firmware_control;
++static bool firmware_control_reset = true;
++static u32 firmware_btlog_enables0_low;
++static u32 firmware_btlog_enables0_high;
++static u32 firmware_btlog_enables1_low;
++static u32 firmware_btlog_enables1_high;
++static bool disable_service;
++
++/* Audio */
++static struct scsc_bt_audio_driver *audio_driver;
++static bool audio_driver_probed;
++static struct scsc_bt_audio bt_audio;
++
++module_param(bluetooth_address, ullong, S_IRUGO | S_IWUSR);
++MODULE_PARM_DESC(bluetooth_address,
++		 "Bluetooth address");
++
++
++module_param(service_start_count, int, S_IRUGO);
++MODULE_PARM_DESC(service_start_count,
++		"Track how many times the BT service has been started");
++
++module_param(firmware_control, int, S_IRUGO | S_IWUSR);
++MODULE_PARM_DESC(firmware_control, "Control how the firmware behaves");
++
++module_param(firmware_control_reset, bool, S_IRUGO | S_IWUSR);
++MODULE_PARM_DESC(firmware_control_reset,
++		 "Controls the resetting of the firmware_control variable");
++
++module_param(disable_service, bool, S_IRUGO | S_IWUSR);
++MODULE_PARM_DESC(disable_service,
++		 "Disables service startup");
++
++/*
++ * Service event callbacks called from mx-core when things go wrong
++ */
++static void bt_stop_on_failure(struct scsc_service_client *client)
++{
++	UNUSED(client);
++
++	SCSC_TAG_ERR(BT_COMMON, "\n");
++
++	reinit_completion(&bt_service.recovery_probe_complete);
++	bt_recovery_in_progress = 1;
++
++	atomic_inc(&bt_service.error_count);
++}
++
++static void bt_failure_reset(struct scsc_service_client *client, u16 scsc_panic_code)
++{
++	UNUSED(client);
++	UNUSED(scsc_panic_code);
++
++	SCSC_TAG_ERR(BT_COMMON, "\n");
++
++	wake_up(&bt_service.read_wait);
++}
++
++static int bt_ap_resumed(struct scsc_service_client *client)
++{
++	UNUSED(client);
++	if (bt_service.interrupt_count != bt_service.last_suspend_interrupt_count)
++		SCSC_TAG_INFO(BT_COMMON, "Possible Bluetooth firmware wake up detected\n");
++	return 0;
++}
++
++static int bt_ap_suspended(struct scsc_service_client *client)
++{
++	UNUSED(client);
++	bt_service.last_suspend_interrupt_count = bt_service.interrupt_count;
++	return 0;
++}
++
++
++
++static void scsc_bt_shm_irq_handler(int irqbit, void *data)
++{
++	/* Clear interrupt */
++	scsc_service_mifintrbit_bit_clear(bt_service.service, irqbit);
++
++	bt_info_interrupt++;
++
++	wake_up(&bt_service.info_wait);
++}
++
++static struct scsc_service_client mx_bt_client = {
++	.stop_on_failure =      bt_stop_on_failure,
++	.failure_reset =        bt_failure_reset,
++	.suspend =                 bt_ap_suspended,
++	.resume =                  bt_ap_resumed,
++};
++
++
++static void slsi_sm_bt_service_cleanup_interrupts(void)
++{
++	u16 irq_num = 0;
++
++	SCSC_TAG_DEBUG(BT_COMMON,
++		       "unregister firmware information interrupts\n");
++
++	if (bt_module_irq_mask & 1 << irq_num++)
++		scsc_service_mifintrbit_unregister_tohost(bt_service.service,
++            bt_service.bsmhcp_protocol->header.info_bg_to_ap_int_src);
++	if (bt_module_irq_mask & 1 << irq_num++)
++		scsc_service_mifintrbit_free_fromhost(bt_service.service,
++		    bt_service.bsmhcp_protocol->header.info_ap_to_bg_int_src,
++		    SCSC_MIFINTR_TARGET_R4);
++}
++
++static int slsi_sm_bt_service_init_interrupts(void) {
++	int irq_ret;
++	u16 irq_num = 0;
++
++	irq_ret = scsc_service_mifintrbit_register_tohost(bt_service.service,
++	    scsc_bt_shm_irq_handler, NULL);
++	if (irq_ret < 0)
++		return irq_ret;
++
++	bt_service.bsmhcp_protocol->header.info_bg_to_ap_int_src = irq_ret;
++	bt_module_irq_mask |= 1 << irq_num++;
++
++	irq_ret = scsc_service_mifintrbit_alloc_fromhost(bt_service.service,
++	    SCSC_MIFINTR_TARGET_R4);
++	if (irq_ret < 0)
++		return irq_ret;
++
++	bt_service.bsmhcp_protocol->header.info_ap_to_bg_int_src = irq_ret;
++	bt_module_irq_mask |= 1 << irq_num++;
++
++	return 0;
++}
++
++static int slsi_sm_bt_service_cleanup_stop_service(void)
++{
++	int ret;
++
++	/* Stop service first, then it's safe to release shared memory
++	   resources */
++	ret = scsc_mx_service_stop(bt_service.service);
++	if (ret) {
++		SCSC_TAG_ERR(BT_COMMON,
++			     "scsc_mx_service_stop failed err: %d\n", ret);
++		if (0 == atomic_read(&bt_service.error_count)) {
++			scsc_mx_service_service_failed(bt_service.service, "BT service stop failed");
++			SCSC_TAG_DEBUG(BT_COMMON,
++				       "force service fail complete\n");
++		}
++		return -EIO;
++	}
++
++	return 0;
++}
++
++static int slsi_sm_bt_service_cleanup(bool allow_service_stop)
++{
++	SCSC_TAG_DEBUG(BT_COMMON, "enter (service=%p)\n", bt_service.service);
++
++	if (NULL != bt_service.service) {
++		SCSC_TAG_DEBUG(BT_COMMON, "stopping debugging thread\n");
++
++		/* If slsi_sm_bt_service_cleanup_stop_service fails, then let
++		   recovery do the rest of the deinit later. */
++		if (!bt_recovery_in_progress && allow_service_stop)
++			if (slsi_sm_bt_service_cleanup_stop_service() < 0) {
++				SCSC_TAG_DEBUG(BT_COMMON, "slsi_sm_bt_service_cleanup_stop_service failed. Recovery has been triggered\n");
++				goto done_error;
++			}
++
++		/* Service is stopped - ensure polling function is existed */
++		SCSC_TAG_DEBUG(BT_COMMON, "wake reader/poller thread\n");
++		wake_up_interruptible(&bt_service.read_wait);
++
++		/* Unregister firmware information interrupts */
++		if (bt_service.bsmhcp_protocol) {
++			slsi_sm_bt_service_cleanup_interrupts();
++			bt_module_irq_mask = 0;
++		}
++
++		/* Shut down the shared memory interface */
++		SCSC_TAG_DEBUG(BT_COMMON,
++			"cleanup protocol structure and main interrupts\n");
++		scsc_bt_shm_exit();
++
++		/* Cleanup AVDTP detections */
++		SCSC_TAG_DEBUG(BT_COMMON,
++			"cleanup ongoing avdtp detections\n");
++		scsc_avdtp_detect_exit();
++
++		mutex_lock(&bt_audio_mutex);
++		if (audio_driver) {
++			if (audio_driver_probed)
++				audio_driver->remove(&bt_audio);
++
++			bt_audio.dev           = NULL;
++			bt_audio.abox_virtual  = NULL;
++			bt_audio.abox_physical = NULL;
++			audio_driver_probed    = false;
++		}
++		mutex_unlock(&bt_audio_mutex);
++
++		/* Release the shared memory */
++		SCSC_TAG_DEBUG(BT_COMMON,
++			"free memory allocated in the 4MB DRAM pool\n");
++		if (bt_service.abox_ref != 0) {
++			bt_service.abox_ref = 0;
++		}
++		if (bt_service.config_ref != 0) {
++			scsc_mx_service_mifram_free(bt_service.service,
++					bt_service.config_ref);
++			bt_service.config_ref = 0;
++		}
++		if (bt_service.bsmhcp_ref != 0) {
++			scsc_mx_service_mifram_free(bt_service.service,
++					bt_service.bsmhcp_ref);
++			bt_service.bsmhcp_ref = 0;
++		}
++		if (bt_service.bhcs_ref != 0) {
++			scsc_mx_service_mifram_free(bt_service.service,
++					bt_service.bhcs_ref);
++			bt_service.bhcs_ref = 0;
++		}
++
++		SCSC_TAG_DEBUG(BT_COMMON, "closing service...\n");
++		if (0 != scsc_mx_service_close(bt_service.service)) {
++			int retry_counter, r;
++
++			SCSC_TAG_DEBUG(BT_COMMON,
++				"scsc_mx_service_close failed\n");
++
++			/**
++			 * Error handling in progress - try and close again
++			 * later. The service close call shall remain blocked
++			 * until close service is successful. Will try up to
++			 * 30 seconds.
++			 */
++			for (retry_counter = 0;
++			     SLSI_BT_SERVICE_CLOSE_RETRY > retry_counter;
++			     retry_counter++) {
++				msleep(500);
++				r = scsc_mx_service_close(bt_service.service);
++				if (r == 0) {
++					SCSC_TAG_DEBUG(BT_COMMON,
++						"scsc_mx_service_close closed after %d attempts\n",
++						retry_counter + 1);
++					break;
++				}
++			}
++
++			if (retry_counter + 1 == SLSI_BT_SERVICE_CLOSE_RETRY)
++					SCSC_TAG_ERR(BT_COMMON, "scsc_mx_service_close failed %d times\n",
++						 SLSI_BT_SERVICE_CLOSE_RETRY);
++		}
++		bt_service.service = NULL;
++
++		SCSC_TAG_DEBUG(BT_COMMON,
++			"notify the KIC subsystem of the shutdown\n");
++		slsi_kic_system_event(
++			slsi_kic_system_event_category_deinitialisation,
++			slsi_kic_system_events_bt_off,
++			0);
++	}
++
++	atomic_set(&bt_service.error_count, 0);
++
++	/* unmap ABOX shared memory if it's mapped */
++	SCSC_TAG_INFO(BT_COMMON, "unmap bt_audio.abox_virtual\n");
++	if (bt_audio.abox_virtual)
++		vunmap(bt_audio.abox_virtual);
++
++	/* Release write wake lock if held */
++	if (wake_lock_active(&bt_service.write_wake_lock)) {
++		bt_service.write_wake_unlock_count++;
++		wake_unlock(&bt_service.write_wake_lock);
++	}
++
++	SCSC_TAG_DEBUG(BT_COMMON, "complete\n");
++	return 0;
++
++done_error:
++	return -EIO;
++}
++
++
++
++static int setup_bhcs(struct scsc_service *service,
++		      struct BHCS *bhcs,
++		      uint32_t protocol_ref,
++		      uint32_t protocol_length,
++		      scsc_mifram_ref *config_ref,
++		      scsc_mifram_ref *bhcs_ref)
++{
++	int err = 0;
++	unsigned char *conf_ptr;
++	const struct firmware *firm = NULL;
++	/* Fill the configuration information */
++	bhcs->version = BHCS_VERSION;
++	bhcs->bsmhcp_protocol_offset = protocol_ref;
++	bhcs->bsmhcp_protocol_length = protocol_length;
++	bhcs->configuration_offset = 0;
++	bhcs->configuration_length = 0;
++	bhcs->bluetooth_address_lap = 0;
++	bhcs->bluetooth_address_uap = 0;
++	bhcs->bluetooth_address_nap = 0;
++
++	/* Request the configuration file */
++	SCSC_TAG_DEBUG(BT_COMMON,
++		"loading configuration: " SCSC_BT_CONF "\n");
++	err = mx140_file_request_conf(common_service.maxwell_core,
++				      &firm, "bluetooth", SCSC_BT_CONF);
++	if (err) {
++		/* Not found - just silently ignore this */
++		SCSC_TAG_DEBUG(BT_COMMON, "configuration not found\n");
++		*config_ref = 0;
++	} else if (firm && firm->size) {
++		SCSC_TAG_DEBUG(BT_COMMON,
++			       "configuration size = %zu\n", firm->size);
++
++		/* Allocate a region for the data */
++		err = scsc_mx_service_mifram_alloc(service,
++						   firm->size,
++						   config_ref,
++						   BSMHCP_ALIGNMENT);
++		if (err) {
++			SCSC_TAG_WARNING(BT_COMMON, "mifram alloc failed\n");
++			mx140_file_release_conf(common_service.maxwell_core, firm);
++			return -EINVAL;
++		}
++
++		/* Map the region to a memory pointer */
++		conf_ptr = scsc_mx_service_mif_addr_to_ptr(service,
++						*config_ref);
++		if (conf_ptr == NULL) {
++			SCSC_TAG_ERR(BT_COMMON,
++				     "couldn't map kmem to bhcs_ref 0x%08x\n",
++				     (u32)*bhcs_ref);
++			mx140_file_release_conf(common_service.maxwell_core, firm);
++			return -EINVAL;
++		}
++
++		/* Copy the configuration data to the shared memory area */
++		memcpy(conf_ptr, firm->data, firm->size);
++		bhcs->configuration_offset = *config_ref;
++		bhcs->configuration_length = firm->size;
++
++		/* Relase the configuration information */
++		mx140_file_release_conf(common_service.maxwell_core, firm);
++		firm = NULL;
++	} else {
++		/* Empty configuration - just silently ignore this */
++		SCSC_TAG_DEBUG(BT_COMMON, "empty configuration\n");
++		*config_ref = 0;
++
++		/* Relase the configuration information */
++		mx140_file_release_conf(common_service.maxwell_core, firm);
++		firm = NULL;
++	}
++
++
++	if (bluetooth_address) {
++		SCSC_TAG_INFO(BT_COMMON,
++			      "using stack supplied Bluetooth address\n");
++		bhcs->bluetooth_address_nap =
++			(bluetooth_address & 0xFFFF00000000) >> 32;
++		bhcs->bluetooth_address_uap =
++			(bluetooth_address & 0x0000FF000000) >> 24;
++		bhcs->bluetooth_address_lap =
++			(bluetooth_address & 0x000000FFFFFF);
++	}
++
++	/* Request the Bluetooth address file */
++	SCSC_TAG_DEBUG(BT_COMMON,
++		"loading Bluetooth address configuration file: "
++		SCSC_BT_ADDR "\n");
++	err = mx140_request_file(common_service.maxwell_core, SCSC_BT_ADDR, &firm);
++	if (err) {
++		/* Not found - just silently ignore this */
++		SCSC_TAG_DEBUG(BT_COMMON, "Bluetooth address not found\n");
++	} else if (firm && firm->size) {
++		u32 u[SCSC_BT_ADDR_LEN];
++
++		/* the factory address in EFS: "xx:xx:xx:xx:xx:xx", NAP first */
++		if (sscanf(firm->data, "%02X:%02X:%02X:%02X:%02X:%02X",
++			   &u[0], &u[1], &u[2], &u[3], &u[4], &u[5])
++		    == SCSC_BT_ADDR_LEN && !bluetooth_address) {
++			bhcs->bluetooth_address_nap = u[0] << 8 | u[1];
++			bhcs->bluetooth_address_uap = u[2];
++			bhcs->bluetooth_address_lap = u[3] << 16 | u[4] << 8 | u[5];
++		} else if (!bluetooth_address)
++			SCSC_TAG_WARNING(BT_COMMON,
++				"data size incorrect = %zu\n", firm->size);
++
++		/* Relase the configuration information */
++		mx140_release_file(common_service.maxwell_core, firm);
++		firm = NULL;
++	} else {
++		SCSC_TAG_DEBUG(BT_COMMON, "empty Bluetooth address\n");
++		mx140_release_file(common_service.maxwell_core, firm);
++		firm = NULL;
++	}
++
++	SCSC_TAG_INFO(BT_COMMON, "Bluetooth address: %04X:%02X:%06X\n",
++		      bhcs->bluetooth_address_nap,
++		      bhcs->bluetooth_address_uap,
++		      bhcs->bluetooth_address_lap);
++
++	/* a missing address file is not an error */
++	return 0;
++}
++
++static void __iomem *bt_module_map_region(unsigned long phys_addr, size_t size)
++{
++	int         i;
++	struct page **pages;
++	void        *vmem;
++
++	SCSC_TAG_INFO(BT_COMMON, "phys_addr %p size %zd\n", (void *)phys_addr, size);
++
++	size = PAGE_ALIGN(size);
++
++	pages = kmalloc((size >> PAGE_SHIFT) * sizeof(*pages), GFP_KERNEL);
++	if (!pages)
++		return NULL;
++
++	/* Map NORMAL_NC pages with kernel virtual space */
++	for (i = 0; i < (size >> PAGE_SHIFT); i++) {
++		pages[i] = phys_to_page(phys_addr);
++		phys_addr += PAGE_SIZE;
++	}
++
++	vmem = vmap(pages, size >> PAGE_SHIFT, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
++
++	kfree(pages);
++	return (void __iomem *)vmem;
++}
++
++/* Start the BT service */
++int slsi_sm_bt_service_start(void)
++{
++	int                   err = 0;
++	struct BHCS           *bhcs;
++	struct scsc_btabox_data *btaboxdata = NULL;
++	++service_start_count;
++
++	/* Lock the start/stop procedures to handle multiple application
++	 * starting the sercice
++	 */
++	mutex_lock(&bt_start_mutex);
++
++	if (disable_service) {
++		SCSC_TAG_WARNING(BT_COMMON, "service disabled\n");
++		mutex_unlock(&bt_start_mutex);
++		return -EBUSY;
++	}
++
++	/* Has probe been called */
++	if (bt_recovery_in_progress) {
++		SCSC_TAG_WARNING(BT_COMMON, "recovery in progress\n");
++		mutex_unlock(&bt_start_mutex);
++		return -EFAULT;
++	}
++
++	/* Has probe been called */
++	if (common_service.maxwell_core == NULL) {
++		SCSC_TAG_WARNING(BT_COMMON, "service probe not arrived\n");
++		mutex_unlock(&bt_start_mutex);
++		return -EFAULT;
++	}
++
++	/* Is this the first service to enter */
++	if (atomic_inc_return(&bt_service.service_users) > 1) {
++		SCSC_TAG_WARNING(BT_COMMON, "service already opened\n");
++		mutex_unlock(&bt_start_mutex);
++		return 0;
++	}
++
++	/* Open service - will download FW - will set MBOX0 with Starting
++	 * address
++	 */
++	SCSC_TAG_DEBUG(BT_COMMON,
++		       "open Bluetooth service id %d opened %d times\n",
++		       SCSC_SERVICE_ID_BT, service_start_count);
++	wake_lock(&bt_service.service_wake_lock);
++	bt_service.service = scsc_mx_service_open(common_service.maxwell_core,
++						  SCSC_SERVICE_ID_BT,
++						  &mx_bt_client,
++						  &err);
++	if (!bt_service.service) {
++		SCSC_TAG_WARNING(BT_COMMON, "service open failed %d\n", err);
++		err = -EINVAL;
++		goto exit;
++	}
++
++	/* Shorter completion timeout if autorecovery is disabled, as it will
++	 * never be signalled.
++	 */
++	if (mxman_recovery_disabled())
++		recovery_timeout = SLSI_BT_SERVICE_STOP_RECOVERY_DISABLED_TIMEOUT;
++	else
++		recovery_timeout = SLSI_BT_SERVICE_STOP_RECOVERY_TIMEOUT;
++
++	/* Get shared memory region for the configuration structure from
++	 * the MIF
++	 */
++	SCSC_TAG_DEBUG(BT_COMMON, "allocate mifram regions\n");
++	err = scsc_mx_service_mifram_alloc(bt_service.service,
++					   sizeof(struct BHCS),
++					   &bt_service.bhcs_ref,
++					   BSMHCP_ALIGNMENT);
++	if (err) {
++		SCSC_TAG_WARNING(BT_COMMON, "mifram alloc failed\n");
++		err = -EINVAL;
++		goto exit;
++	}
++
++	/* Get shared memory region for the protocol structure from the MIF */
++	err = scsc_mx_service_mifram_alloc(bt_service.service,
++					   sizeof(struct BSMHCP_PROTOCOL),
++					   &bt_service.bsmhcp_ref,
++					   BSMHCP_ALIGNMENT);
++	if (err) {
++		SCSC_TAG_WARNING(BT_COMMON, "mifram alloc failed\n");
++		err = -EINVAL;
++		goto exit;
++	}
++
++	/* The A-Box driver must have registered before reaching this point
++	 * otherwise there is no audio routing
++	 */
++	if (audio_driver != NULL) {
++
++		bt_service.abox_ref = (scsc_mifram_ref)SCSC_BAAW1_OFFSET;
++
++		/* get the physical address & size of the region allocated in DTB */
++		scsc_mx_service_get_abox_shared_mem(bt_service.service, (void **)&btaboxdata);
++
++		if (btaboxdata) {
++			bt_audio.abox_virtual = bt_module_map_region(btaboxdata->btaboxmem_start,
++								     btaboxdata->btaboxmem_size);
++			if (!bt_audio.abox_virtual) {
++				SCSC_TAG_ERR(BT_COMMON, "couldn't map bt_audio.abox_virtual\n");
++				err = -ENOMEM;
++				goto exit;
++			}
++
++		} else {
++			SCSC_TAG_ERR(BT_COMMON, "scsc_mx_service_get_abox_shared_mem failed\n");
++			err = -ENOMEM;
++			goto exit;
++		}
++
++		memset(bt_audio.abox_virtual, 0, sizeof(struct scsc_bt_audio_abox));
++
++		bt_audio.abox_virtual->magic_value                      = SCSC_BT_AUDIO_ABOX_MAGIC_VALUE;
++		bt_audio.abox_virtual->version_major                    = SCSC_BT_AUDIO_ABOX_VERSION_MAJOR;
++		bt_audio.abox_virtual->version_minor                    = SCSC_BT_AUDIO_ABOX_VERSION_MINOR;
++		bt_audio.abox_virtual->abox_to_bt_streaming_if_0_size   = SCSC_BT_AUDIO_ABOX_IF_0_SIZE;
++		bt_audio.abox_virtual->bt_to_abox_streaming_if_0_size   = SCSC_BT_AUDIO_ABOX_IF_0_SIZE;
++		bt_audio.abox_virtual->abox_to_bt_streaming_if_1_size   = SCSC_BT_AUDIO_ABOX_IF_1_SIZE;
++		bt_audio.abox_virtual->abox_to_bt_streaming_if_1_offset = SCSC_BT_AUDIO_ABOX_IF_0_SIZE;
++		bt_audio.abox_virtual->bt_to_abox_streaming_if_1_size   = SCSC_BT_AUDIO_ABOX_IF_1_SIZE;
++		bt_audio.abox_virtual->bt_to_abox_streaming_if_1_offset = SCSC_BT_AUDIO_ABOX_IF_0_SIZE;
++
++		/* Resolve the physical address of the structure */
++		bt_audio.abox_physical = (struct scsc_bt_audio_abox *)btaboxdata->btaboxmem_start;
++
++		bt_audio.dev = bt_service.dev;
++
++		SCSC_TAG_INFO(BT_COMMON, "abox_virtual: 0x%p abox_physical: 0x%p\n",
++			bt_audio.abox_virtual, bt_audio.abox_physical);
++	}
++
++	/* Map the configuration pointer */
++	bhcs = (struct BHCS *) scsc_mx_service_mif_addr_to_ptr(
++					bt_service.service,
++					bt_service.bhcs_ref);
++	if (bhcs == NULL) {
++		SCSC_TAG_ERR(BT_COMMON,
++			     "couldn't map kmem to bhcs_ref 0x%08x\n",
++			     (u32)bt_service.bhcs_ref);
++		err = -ENOMEM;
++		goto exit;
++	}
++
++	SCSC_TAG_INFO(BT_COMMON,
++	    "regions (bhcs_ref=0x%08x, bsmhcp_ref=0x%08x, config_ref=0x%08x, abox_ref=0x%08x)\n",
++				 bt_service.bhcs_ref,
++				 bt_service.bsmhcp_ref,
++				 bt_service.config_ref,
++				 bt_service.abox_ref);
++	SCSC_TAG_INFO(BT_COMMON, "version=%u\n", BHCS_VERSION);
++
++	err = setup_bhcs(bt_service.service,
++			 bhcs,
++			 bt_service.bsmhcp_ref,
++			 sizeof(struct BSMHCP_PROTOCOL),
++			 &bt_service.config_ref,
++			 &bt_service.bhcs_ref);
++
++	if (err == -EINVAL)
++		goto exit;
++
++	/* Initialise the shared-memory interface */
++	err = scsc_bt_shm_init();
++	if (err) {
++		SCSC_TAG_ERR(BT_COMMON, "scsc_bt_shm_init err %d\n", err);
++		err = -EINVAL;
++		goto exit;
++	}
++
++	err = slsi_sm_bt_service_init_interrupts();
++	if (err < 0)
++		goto exit;
++
++	bt_service.bsmhcp_protocol->header.btlog_enables0_low = firmware_btlog_enables0_low;
++	bt_service.bsmhcp_protocol->header.btlog_enables0_high = firmware_btlog_enables0_high;
++	bt_service.bsmhcp_protocol->header.btlog_enables1_low = firmware_btlog_enables1_low;
++	bt_service.bsmhcp_protocol->header.btlog_enables1_high = firmware_btlog_enables1_high;
++	bt_service.bsmhcp_protocol->header.firmware_control = firmware_control;
++	bt_service.bsmhcp_protocol->header.abox_offset = bt_service.abox_ref;
++	bt_service.bsmhcp_protocol->header.abox_length = sizeof(struct scsc_bt_audio_abox);
++
++	SCSC_TAG_DEBUG(BT_COMMON,
++		       "firmware_control=0x%08x, firmware_control_reset=%u\n",
++		       firmware_control, firmware_control_reset);
++
++	if (firmware_control_reset)
++		firmware_control = 0;
++
++	/* Start service last - after setting up shared memory resources */
++	SCSC_TAG_DEBUG(BT_COMMON, "starting Bluetooth service\n");
++	err = scsc_mx_service_start(bt_service.service, bt_service.bhcs_ref);
++	if (err) {
++		SCSC_TAG_ERR(BT_COMMON, "scsc_mx_service_start err %d\n", err);
++		err = -EINVAL;
++	} else {
++		SCSC_TAG_DEBUG(BT_COMMON, "Bluetooth service running\n");
++		slsi_kic_system_event(
++			slsi_kic_system_event_category_initialisation,
++			slsi_kic_system_events_bt_on, 0);
++
++		mutex_lock(&bt_audio_mutex);
++		if (audio_driver && !audio_driver_probed) {
++			audio_driver->probe(audio_driver, &bt_audio);
++
++			audio_driver_probed = true;
++		}
++		mutex_unlock(&bt_audio_mutex);
++	}
++
++exit:
++	if (err) {
++		if (slsi_sm_bt_service_cleanup(false) == 0)
++			atomic_dec(&bt_service.service_users);
++	}
++
++	wake_unlock(&bt_service.service_wake_lock);
++	mutex_unlock(&bt_start_mutex);
++	return err;
++}
++
++
++/* Stop the BT service */
++static int slsi_sm_bt_service_stop(void)
++{
++	SCSC_TAG_INFO(BT_COMMON, "bt service users %u\n", atomic_read(&bt_service.service_users));
++
++	if (1 < atomic_read(&bt_service.service_users)) {
++		atomic_dec(&bt_service.service_users);
++	} else if (1 == atomic_read(&bt_service.service_users)) {
++		if (slsi_sm_bt_service_cleanup(true) == 0)
++			atomic_dec(&bt_service.service_users);
++		else
++			return -EIO;
++	}
++	return 0;
++}
++
++
++static int scsc_bt_h4_open(struct inode *inode, struct file *file)
++{
++	int ret = 0;
++
++	SCSC_TAG_INFO(BT_COMMON, "(h4_users=%u)\n", bt_service.h4_users ? 1 : 0);
++
++	if (!bt_service.h4_users) {
++		ret = slsi_sm_bt_service_start();
++		if (0 == ret)
++			bt_service.h4_users = true;
++	} else {
++		ret = -EBUSY;
++	}
++
++	return ret;
++}
++
++static int scsc_bt_h4_release(struct inode *inode, struct file *file)
++{
++	SCSC_TAG_INFO(BT_COMMON, "\n");
++
++	mutex_lock(&bt_start_mutex);
++	wake_lock(&bt_service.service_wake_lock);
++	if (!bt_recovery_in_progress) {
++		if (slsi_sm_bt_service_stop() == -EIO)
++			goto recovery;
++
++		/* Clear all control structures */
++		bt_service.read_offset = 0;
++		bt_service.read_operation = 0;
++		bt_service.read_index = 0;
++		bt_service.h4_write_offset = 0;
++
++		bt_service.h4_users = false;
++
++		/* The recovery flag can be set in case of crossing release and
++		 * recovery signaling. It's safe to check the flag here since
++		 * the bt_start_mutex guarantees that the remove/probe callbacks
++		 * will be called after the mutex is released. Jump to the
++		 * normal recovery path.
++		 */
++		if (bt_recovery_in_progress)
++			goto recovery;
++
++		wake_unlock(&bt_service.service_wake_lock);
++		mutex_unlock(&bt_start_mutex);
++	} else {
++		int ret;
++recovery:
++		complete_all(&bt_service.recovery_release_complete);
++		wake_unlock(&bt_service.service_wake_lock);
++		mutex_unlock(&bt_start_mutex);
++
++		ret = wait_for_completion_timeout(&bt_service.recovery_probe_complete,
++		       msecs_to_jiffies(recovery_timeout));
++		if (ret == 0)
++			SCSC_TAG_INFO(BT_COMMON, "recovery_probe_complete timeout\n");
++	}
++
++	return 0;
++}
++
++
++
++static long scsc_default_ioctl(struct file *file,
++			       unsigned int cmd,
++			       unsigned long arg)
++{
++	UNUSED(file);
++	UNUSED(cmd);
++	UNUSED(arg);
++
++	switch (cmd) {
++	case TCGETS:
++		SCSC_TAG_DEBUG(BT_COMMON, "TCGETS (arg=%lu)\n", arg);
++		break;
++	case TCSETS:
++		SCSC_TAG_DEBUG(BT_COMMON, "TCSETS (arg=%lu)\n", arg);
++		break;
++	default:
++		SCSC_TAG_DEBUG(BT_COMMON,
++			"trapped ioctl in virtual tty device, cmd %d arg %lu\n",
++			cmd, arg);
++		break;
++	}
++
++	return 0;
++}
++
++static int scsc_bt_trigger_recovery(void *priv,
++				    enum slsi_kic_test_recovery_type type)
++{
++	int err = 0;
++
++	SCSC_TAG_INFO(BT_COMMON, "forcing panic\n");
++
++	mutex_lock(&bt_start_mutex);
++
++	if (0 < atomic_read(&bt_service.service_users) &&
++	    bt_service.bsmhcp_protocol) {
++		SCSC_TAG_INFO(BT_COMMON, "trashing magic value\n");
++
++		if (slsi_kic_test_recovery_type_service_stop_panic == type)
++			bt_service.bsmhcp_protocol->header.firmware_control =
++				BSMHCP_CONTROL_STOP_PANIC;
++		else if (slsi_kic_test_recovery_type_service_start_panic ==
++			 type)
++			firmware_control = BSMHCP_CONTROL_START_PANIC;
++		else
++			bt_service.bsmhcp_protocol->header.magic_value = 0;
++
++		scsc_service_mifintrbit_bit_set(bt_service.service,
++			bt_service.bsmhcp_protocol->header.ap_to_bg_int_src,
++			SCSC_MIFINTR_TARGET_R4);
++	} else {
++		if (slsi_kic_test_recovery_type_service_stop_panic == type)
++			firmware_control = BSMHCP_CONTROL_STOP_PANIC;
++		else if (slsi_kic_test_recovery_type_service_start_panic ==
++			 type)
++			firmware_control = BSMHCP_CONTROL_START_PANIC;
++		else
++			err = -EFAULT;
++	}
++
++	mutex_unlock(&bt_start_mutex);
++
++	return err;
++}
++
++
++static const struct file_operations scsc_bt_shm_fops = {
++	.owner            = THIS_MODULE,
++	.open             = scsc_bt_h4_open,
++	.release          = scsc_bt_h4_release,
++	.read             = scsc_bt_shm_h4_read,
++	.write            = scsc_bt_shm_h4_write,
++	.poll             = scsc_bt_shm_h4_poll,
++	.unlocked_ioctl   = scsc_default_ioctl,
++};
++
++
++static struct slsi_kic_bt_ops scsc_bt_kic_ops = {
++	.trigger_recovery = scsc_bt_trigger_recovery
++};
++
++
++/* A new MX instance is available */
++void slsi_bt_service_probe(struct scsc_mx_module_client *module_client,
++			   struct scsc_mx *mx,
++			   enum scsc_module_client_reason reason)
++{
++	/* Note: mx identifies the instance */
++	SCSC_TAG_INFO(BT_COMMON,
++		      "BT service probe (%s %p)\n", module_client->name, mx);
++
++	mutex_lock(&bt_start_mutex);
++	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && !bt_recovery_in_progress) {
++		SCSC_TAG_INFO(BT_COMMON,
++			      "BT service probe recovery, but no recovery in progress\n");
++		goto done;
++	}
++
++	bt_service.dev = scsc_mx_get_device(mx);
++	common_service.maxwell_core = mx;
++
++	get_device(bt_service.dev);
++
++	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && bt_recovery_in_progress) {
++		complete_all(&bt_service.recovery_probe_complete);
++		bt_recovery_in_progress = 0;
++	}
++
++	slsi_bt_notify_probe(bt_service.dev,
++			     &scsc_bt_shm_fops,
++			     &bt_service.error_count,
++			     &bt_service.read_wait);
++
++done:
++	mutex_unlock(&bt_start_mutex);
++}
++
++/* The MX instance is now unavailable */
++static void slsi_bt_service_remove(struct scsc_mx_module_client *module_client,
++				   struct scsc_mx *mx,
++				   enum scsc_module_client_reason reason)
++{
++	SCSC_TAG_INFO(BT_COMMON,
++		      "BT service remove (%s %p)\n", module_client->name, mx);
++
++	mutex_lock(&bt_start_mutex);
++	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && !bt_recovery_in_progress) {
++		SCSC_TAG_INFO(BT_COMMON,
++			      "BT service remove recovery, but no recovery in progress\n");
++		goto done;
++	}
++
++	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && bt_recovery_in_progress) {
++		mutex_unlock(&bt_start_mutex);
++
++		/* Wait forever for recovery_release_complete, as it will
++		 * arrive even if autorecovery is disabled.
++		 */
++		wait_for_completion(&bt_service.recovery_release_complete);
++		reinit_completion(&bt_service.recovery_release_complete);
++
++		mutex_lock(&bt_start_mutex);
++		if (slsi_sm_bt_service_stop() == -EIO)
++			SCSC_TAG_INFO(BT_COMMON, "Service stop or close failed during recovery.\n");
++
++		bt_service.h4_users = false;
++
++		/* Clear all control structures */
++		bt_service.read_offset = 0;
++		bt_service.read_operation = 0;
++		bt_service.read_index = 0;
++		bt_service.h4_write_offset = 0;
++	}
++
++	slsi_bt_notify_remove();
++	put_device(bt_service.dev);
++	common_service.maxwell_core = NULL;
++
++done:
++	mutex_unlock(&bt_start_mutex);
++}
++
++/* BT service driver registration interface */
++static struct scsc_mx_module_client bt_driver = {
++	.name = "BT driver",
++	.probe = slsi_bt_service_probe,
++	.remove = slsi_bt_service_remove,
++};
++
++
++
++
++static void slsi_bt_service_proc_show_firmware(struct seq_file *m)
++{
++	struct BSMHCP_FW_INFO *info =
++		&bt_service.bsmhcp_protocol->information;
++	int res;
++	u32 index;
++	u32 user_defined_count = info->user_defined_count;
++
++	bt_info_trigger++;
++
++	scsc_service_mifintrbit_bit_set(bt_service.service,
++		bt_service.bsmhcp_protocol->header.info_ap_to_bg_int_src,
++		SCSC_MIFINTR_TARGET_R4);
++
++	res = wait_event_interruptible_timeout(bt_service.info_wait,
++			bt_info_trigger == bt_info_interrupt,
++			2*HZ);
++
++	seq_printf(m, "  r4_from_ap_interrupt_count    = %u\n",
++			info->r4_from_ap_interrupt_count);
++	seq_printf(m, "  m4_from_ap_interrupt_count    = %u\n",
++			info->m4_from_ap_interrupt_count);
++	seq_printf(m, "  r4_to_ap_interrupt_count      = %u\n",
++			info->r4_to_ap_interrupt_count);
++	seq_printf(m, "  m4_to_ap_interrupt_count      = %u\n\n",
++			info->m4_to_ap_interrupt_count);
++	seq_printf(m, "  bt_deep_sleep_time_total      = %u\n",
++			info->bt_deep_sleep_time_total);
++	seq_printf(m, "  bt_deep_sleep_wakeup_duration = %u\n\n",
++			info->bt_deep_sleep_wakeup_duration);
++	seq_printf(m, "  sched_n_messages              = %u\n\n",
++			info->sched_n_messages);
++	seq_printf(m, "  user_defined_count            = %u\n\n",
++			info->user_defined_count);
++
++	if (user_defined_count > BSMHCP_FW_INFO_USER_DEFINED_COUNT)
++		user_defined_count = BSMHCP_FW_INFO_USER_DEFINED_COUNT;
++
++	for (index = 0; index < user_defined_count; index++)
++		seq_printf(m, "  user%02u                        = 0x%08x (%u)\n",
++			index, info->user_defined[index], info->user_defined[index]);
++
++	if (user_defined_count)
++		seq_puts(m, "\n");
++
++	seq_printf(m, "  bt_info_trigger               = %u\n",
++			bt_info_trigger);
++	seq_printf(m, "  bt_info_interrupt             = %u\n\n",
++			bt_info_interrupt);
++	seq_printf(m, "  result                        = %d\n", res);
++}
++
++static int slsi_bt_service_proc_show(struct seq_file *m, void *v)
++{
++	char    allocated_text[BSMHCP_DATA_BUFFER_TX_ACL_SIZE + 1];
++	char    processed_text[BSMHCP_TRANSFER_RING_EVT_SIZE + 1];
++	size_t  index;
++	struct scsc_bt_avdtp_detect_hci_connection *cur = bt_service.avdtp_detect.connections;
++
++	seq_puts(m, "Driver statistics:\n");
++	seq_printf(m, "  write_wake_lock_count         = %zu\n",
++		bt_service.write_wake_lock_count);
++	seq_printf(m, "  write_wake_unlock_count       = %zu\n\n",
++		bt_service.write_wake_unlock_count);
++
++	seq_printf(m, "  mailbox_hci_evt_read          = %u\n",
++		bt_service.mailbox_hci_evt_read);
++	seq_printf(m, "  mailbox_hci_evt_write         = %u\n",
++		bt_service.mailbox_hci_evt_write);
++	seq_printf(m, "  mailbox_acl_rx_read           = %u\n",
++		bt_service.mailbox_acl_rx_read);
++	seq_printf(m, "  mailbox_acl_rx_write          = %u\n",
++		bt_service.mailbox_acl_rx_write);
++	seq_printf(m, "  mailbox_acl_free_read         = %u\n",
++		bt_service.mailbox_acl_free_read);
++	seq_printf(m, "  mailbox_acl_free_read_scan    = %u\n",
++		bt_service.mailbox_acl_free_read_scan);
++	seq_printf(m, "  mailbox_acl_free_write        = %u\n",
++		bt_service.mailbox_acl_free_write);
++
++	seq_printf(m, "  hci_event_paused              = %u\n",
++		bt_service.hci_event_paused);
++	seq_printf(m, "  acldata_paused                = %u\n\n",
++		bt_service.acldata_paused);
++
++	seq_printf(m, "  interrupt_count               = %zu\n",
++		bt_service.interrupt_count);
++	seq_printf(m, "  interrupt_read_count          = %zu\n",
++		bt_service.interrupt_read_count);
++	seq_printf(m, "  interrupt_write_count         = %zu\n",
++		bt_service.interrupt_write_count);
++
++	for (index = 0; index < BSMHCP_DATA_BUFFER_TX_ACL_SIZE; index++)
++		allocated_text[index] = bt_service.allocated[index] ? '1' : '0';
++	allocated_text[BSMHCP_DATA_BUFFER_TX_ACL_SIZE] = 0;
++
++	for (index = 0; index < BSMHCP_TRANSFER_RING_EVT_SIZE; index++)
++		processed_text[index] = bt_service.processed[index] ? '1' : '0';
++	processed_text[BSMHCP_DATA_BUFFER_TX_ACL_SIZE] = 0;
++
++	seq_printf(m, "  allocated_count               = %u\n",
++		bt_service.allocated_count);
++	seq_printf(m, "  freed_count                   = %u\n",
++		bt_service.freed_count);
++	seq_printf(m, "  allocated                     = %s\n",
++		allocated_text);
++	seq_printf(m, "  processed                     = %s\n\n",
++		processed_text);
++
++	while (cur) {
++		seq_printf(m, "	 avdtp_hci_connection_handle   = %u\n\n",
++				   cur->hci_connection_handle);
++		seq_printf(m, "	 avdtp_signaling_src_cid	   = %u\n",
++				   cur->signal.src_cid);
++		seq_printf(m, "	 avdtp_signaling_dst_cid	   = %u\n",
++				   cur->signal.dst_cid);
++		seq_printf(m, "	 avdtp_streaming_src_cid	   = %u\n",
++				   cur->stream.src_cid);
++		seq_printf(m, "	 avdtp_streaming_dst_cid	   = %u\n",
++				   cur->stream.dst_cid);
++		cur = cur->next;
++	}
++	seq_puts(m, "Firmware statistics:\n");
++
++	mutex_lock(&bt_start_mutex);
++
++	if (NULL != bt_service.service) {
++		if (bt_service.bsmhcp_protocol->header.firmware_features &
++		    BSMHCP_FEATURE_FW_INFORMATION) {
++			slsi_bt_service_proc_show_firmware(m);
++		} else
++			seq_puts(m,
++			    "  Firmware does not provide this information\n");
++	} else
++		seq_puts(m,
++			"  Error: bluetooth service is currently disabled\n");
++
++	mutex_unlock(&bt_start_mutex);
++
++	return 0;
++}
++
++static int slsi_bt_service_proc_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, slsi_bt_service_proc_show, NULL);
++}
++
++static const struct proc_ops scsc_bt_procfs_fops = {
++	.proc_open    = slsi_bt_service_proc_open,
++	.proc_read    = seq_read,
++	.proc_lseek   = seq_lseek,
++	.proc_release = single_release,
++};
++
++static void scsc_update_btlog_params(void)
++{
++	mutex_lock(&bt_start_mutex);
++	if (bt_service.service) {
++		bt_service.bsmhcp_protocol->header.btlog_enables0_low = firmware_btlog_enables0_low;
++		bt_service.bsmhcp_protocol->header.btlog_enables0_high = firmware_btlog_enables0_high;
++		bt_service.bsmhcp_protocol->header.btlog_enables1_low = firmware_btlog_enables1_low;
++		bt_service.bsmhcp_protocol->header.btlog_enables1_high = firmware_btlog_enables1_high;
++
++		/* Trigger the interrupt in the mailbox */
++		scsc_service_mifintrbit_bit_set(bt_service.service,
++				bt_service.bsmhcp_protocol->header.ap_to_bg_int_src,
++				SCSC_MIFINTR_TARGET_R4);
++	}
++	mutex_unlock(&bt_start_mutex);
++
++}
++
++static int scsc_mxlog_filter_set_param_cb(const char *buffer,
++					  const struct kernel_param *kp)
++{
++	int ret;
++	u32 value;
++
++	ret = kstrtou32(buffer, 0, &value);
++	if (!ret) {
++		firmware_btlog_enables0_low = value;
++		scsc_update_btlog_params();
++	}
++
++	return ret;
++}
++
++/* Validate, by conventional semantics, that the base of the
++ * string is 16. I.e if the string begins with 0x the number
++ * can be parsed as a hexadecimal (case insensitive)
++ *
++ * Returns true if the string can be parsed as hexadecimal
++ */
++static bool scsc_string_is_hexadecimal(const char *s)
++{
++	if (s[0] == '0' && tolower(s[1]) == 'x' && isxdigit(s[2]))
++		return true;
++
++	return false;
++}
++
++/* Updates btlog level by converting the string to four u32 integers.
++ *
++ * Note the string given to kstrtou64 must be null-terminated, and may also
++ * include a single newline before its terminating null. The first character
++ * may also be a plus sign, but not a minus sign.
++ *
++ * If the string cannot be parsed as a hexadecimal number it is considered
++ * as a parsing error
++ *
++ * Returns 0 on success, -ERANGE on overflow and -EINVAL on parsing error.
++ */
++static int scsc_btlog_enables_set_param_cb(const char *buffer,
++				           const struct kernel_param *kp)
++{
++	int ret;
++	size_t buffer_len;
++	u16 newline_len = 0;
++	u64 btlog_enables_low = 0;
++	u64 btlog_enables_high = 0;
++
++	if (buffer == NULL)
++		return -EINVAL;
++
++	buffer_len = strnlen(buffer, SCSC_BTLOG_MAX_STRING_LEN);
++
++	if (buffer_len >= SCSC_BTLOG_MAX_STRING_LEN)
++		return -ERANGE;
++
++	if (buffer_len <= SCSC_BTLOG_BUF_PREFIX_LEN)
++		return -EINVAL;
++
++	/* If the first character is a plus sign sign, ignore it */
++	if (buffer[0] == '+')
++	{
++		buffer++;
++		buffer_len--;
++
++		if (buffer_len <= SCSC_BTLOG_BUF_PREFIX_LEN)
++			return -EINVAL;
++	}
++
++	/* Only accept the string if it can be parsed as a hexadecimal number */
++	if (!scsc_string_is_hexadecimal(buffer))
++		return -EINVAL;
++
++	/* Is a newline included before the terminating null */
++	if (buffer[buffer_len - 1] == '\n')
++		newline_len = 1;
++
++	if (buffer_len < SCSC_BTLOG_BUF_LEN + newline_len)
++		ret = kstrtou64(buffer, 0, &btlog_enables_low);
++	else {
++		/* Need to split the string into two parts.
++		 *
++		 * First, the least significant integer(u64) is found by
++		 * copying the prefix ('0' 'x') plus the last 17
++		 * (18 if a newline is included) character including
++		 * the null terminator, to a temporary buffer.
++		 *
++		 * Second, the most significant integer(u64) is found
++		 * by copying the remaining part of the string plus a null
++		 * terminator, to a temporary buffer.
++		 */
++		char btlog_enables_buf[SCSC_BTLOG_BUF_LEN + 1];
++
++		u32 start_index = buffer_len - SCSC_BTLOG_BUF_MAX_CHAR_TO_COPY - newline_len;
++
++		memcpy(btlog_enables_buf, buffer, SCSC_BTLOG_BUF_PREFIX_LEN);
++		strcpy(&btlog_enables_buf[SCSC_BTLOG_BUF_PREFIX_LEN], &buffer[start_index]);
++		ret = kstrtou64(btlog_enables_buf, 0, &btlog_enables_low);
++
++		if (!ret) {
++			u32 char_to_copy = start_index;
++
++			memcpy(btlog_enables_buf, buffer, char_to_copy);
++			btlog_enables_buf[char_to_copy] = '\0';
++			ret = kstrtou64(btlog_enables_buf, 0, &btlog_enables_high);
++		}
++	}
++
++	if (!ret) {
++		firmware_btlog_enables0_low  = (u32)(btlog_enables_low & 0x00000000FFFFFFFF);
++		firmware_btlog_enables0_high = (u32)((btlog_enables_low & 0xFFFFFFFF00000000) >> 32);
++		firmware_btlog_enables1_low  = (u32)(btlog_enables_high & 0x00000000FFFFFFFF);
++		firmware_btlog_enables1_high = (u32)((btlog_enables_high & 0xFFFFFFFF00000000) >> 32);
++		scsc_update_btlog_params();
++	}
++
++	return ret;
++}
++
++static int scsc_mxlog_filter_get_param_cb(char *buffer,
++					  const struct kernel_param *kp)
++{
++	return sprintf(buffer, "mxlog_filter=0x%08x\n", firmware_btlog_enables0_low);
++}
++
++static int scsc_btlog_enables_get_param_cb(char *buffer,
++					    const struct kernel_param *kp)
++{
++	return sprintf(buffer, "btlog_enables = 0x%08x%08x%08x%08x\n",
++			firmware_btlog_enables1_high ,firmware_btlog_enables1_low,
++			firmware_btlog_enables0_high, firmware_btlog_enables0_low);
++}
++
++static struct kernel_param_ops scsc_mxlog_filter_ops = {
++	.set = scsc_mxlog_filter_set_param_cb,
++	.get = scsc_mxlog_filter_get_param_cb,
++};
++
++static struct kernel_param_ops scsc_btlog_enables_ops = {
++	.set = scsc_btlog_enables_set_param_cb,
++	.get = scsc_btlog_enables_get_param_cb,
++};
++
++module_param_cb(mxlog_filter, &scsc_mxlog_filter_ops, NULL, S_IRUGO | S_IWUSR);
++MODULE_PARM_DESC(mxlog_filter,
++		 	 	 "Set the enables for btlog sources in Bluetooth firmware (31..0)");
++
++module_param_cb(btlog_enables, &scsc_btlog_enables_ops, NULL, S_IRUGO | S_IWUSR);
++MODULE_PARM_DESC(btlog_enables,
++				"Set the enables for btlog sources in Bluetooth firmware (127..0)");
++
++static int scsc_force_crash_set_param_cb(const char *buffer,
++					 const struct kernel_param *kp)
++{
++	int ret;
++	u32 value;
++
++	ret = kstrtou32(buffer, 0, &value);
++	if (!ret && value == 0xDEADDEAD) {
++		mutex_lock(&bt_start_mutex);
++		if (bt_service.service) {
++			atomic_inc(&bt_service.error_count);
++			wake_up(&bt_service.read_wait);
++		}
++		mutex_unlock(&bt_start_mutex);
++	}
++
++	return ret;
++}
++
++static struct kernel_param_ops scsc_force_crash_ops = {
++	.set = scsc_force_crash_set_param_cb,
++	.get = NULL,
++};
++
++module_param_cb(force_crash, &scsc_force_crash_ops, NULL, S_IRUGO | S_IWUSR);
++MODULE_PARM_DESC(force_crash,
++		 "Forces a crash of the Bluetooth driver");
++
++/*
++ * BT audio through the ABOX DSP is not ported: the ABOX driver keeps its own
++ * scsc_bt_audio_register() stub, so audio_driver stays NULL here and SCO
++ * audio goes over HCI.
++ */
++
++/******* Module entry/exit point ********/
++static int __init scsc_bt_module_init(void)
++{
++	struct proc_dir_entry *procfs_dir;
++
++	SCSC_TAG_INFO(BT_COMMON, "%s %s (C) %s\n",
++		      SCSC_MODDESC, SCSC_MODVERSION, SCSC_MODAUTH);
++	bt_module_irq_mask = 0;
++
++	memset(&bt_service, 0, sizeof(bt_service));
++
++	init_waitqueue_head(&bt_service.read_wait);
++	init_waitqueue_head(&bt_service.info_wait);
++
++	wake_lock_init(&bt_service.read_wake_lock,
++		       WAKE_LOCK_SUSPEND,
++		       "bt_read_wake_lock");
++	wake_lock_init(&bt_service.write_wake_lock,
++		       WAKE_LOCK_SUSPEND,
++		       "bt_write_wake_lock");
++	wake_lock_init(&bt_service.service_wake_lock,
++		       WAKE_LOCK_SUSPEND,
++		       "bt_service_wake_lock");
++
++
++	procfs_dir = proc_mkdir("driver/scsc_bt", NULL);
++	if (NULL != procfs_dir) {
++		proc_create_data("stats", S_IRUSR | S_IRGRP,
++				 procfs_dir, &scsc_bt_procfs_fops, NULL);
++	}
++
++	init_completion(&bt_service.recovery_probe_complete);
++	init_completion(&bt_service.recovery_release_complete);
++
++
++	/* Register KIC interface */
++	slsi_kic_bt_ops_register(NULL, &scsc_bt_kic_ops);
++
++	spin_lock_init(&bt_service.avdtp_detect.lock);
++	spin_lock_init(&bt_service.avdtp_detect.fw_write_lock);
++
++	/* Register with MX manager */
++	scsc_mx_module_register_client_module(&bt_driver);
++
++	return 0;
++}
++
++
++static void __exit scsc_bt_module_exit(void)
++{
++	SCSC_TAG_INFO(BT_COMMON, "\n");
++
++	wake_lock_destroy(&bt_service.write_wake_lock);
++	wake_lock_destroy(&bt_service.read_wake_lock);
++	wake_lock_destroy(&bt_service.service_wake_lock);
++	complete_all(&bt_service.recovery_probe_complete);
++	complete_all(&bt_service.recovery_release_complete);
++
++
++	slsi_kic_bt_ops_unregister(&scsc_bt_kic_ops);
++
++	/* Register with MX manager */
++	scsc_mx_module_unregister_client_module(&bt_driver);
++
++
++	SCSC_TAG_INFO(BT_COMMON, "exit, module unloaded\n");
++}
++
++module_init(scsc_bt_module_init);
++module_exit(scsc_bt_module_exit);
++
++MODULE_DESCRIPTION(SCSC_MODDESC);
++MODULE_AUTHOR(SCSC_MODAUTH);
++MODULE_LICENSE("GPL");
++MODULE_VERSION(SCSC_MODVERSION);
+diff --git a/drivers/misc/samsung/scsc_bt/scsc_bt_priv.h b/drivers/misc/samsung/scsc_bt/scsc_bt_priv.h
+new file mode 100755
+index 000000000..c9b5b75b6
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/scsc_bt_priv.h
+@@ -0,0 +1,427 @@
++/****************************************************************************
++ *
++ *       Internal BT driver definitions
++ *
++ *       Copyright (c) 2015 Samsung Electronics Co., Ltd
++ *
++ ****************************************************************************/
++
++#ifndef __SCSC_BT_PRIV_H
++#define __SCSC_BT_PRIV_H
++
++#include <scsc/scsc_mx.h>
++#include <scsc/api/bsmhcp.h>
++#include <scsc/api/bhcs.h>
++#include <scsc/api/bt_audio.h>
++
++#include "scsc_shm.h"
++#include "scsc_bluez.h"
++
++#ifndef UNUSED
++#define UNUSED(x)       ((void)(x))
++#endif
++
++/**
++ * Size of temporary buffer (on stack) for peeking at HCI/H4
++ * packet header held in FIFO.
++ *
++ * Must be big enough to decode the
++ * length of any HCI packet type.
++ *
++ * For ACL that is 1 h4 header + 2 ACL handle + 2 ACL data size
++ */
++#define H4DMUX_HEADER_HCI (1 + 3) /* CMD, SCO */
++#define H4DMUX_HEADER_ACL (1 + 4) /* ACL */
++
++#define HCI_COMMAND_PKT         (1)
++#define HCI_ACLDATA_PKT         (2)
++#define HCI_EVENT_PKT           (4)
++
++#define ACLDATA_HEADER_SIZE     (4)
++#define L2CAP_HEADER_SIZE       (4)
++
++#define HCI_ACL_DATA_FLAGS(data)        ((*(data + 1)) & 0xf0)
++#define HCI_ACL_DATA_CON_HDL(data)      ((u16)(*(data + 0) | ((*(data + 1)) & 0x0f) << 8))
++#define HCI_ACL_DATA_LENGTH(data)       ((u16)(*(data + 2) | (*(data + 3)) << 8))
++#define HCI_L2CAP_LENGTH(data)          ((u16)(*(data + 4) | (*(data + 5)) << 8))
++#define HCI_L2CAP_CID(data)             ((u16)(*(data + 6) | (*(data + 7)) << 8))
++
++#define HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS_EVENT     (0x13)
++#define HCI_EVENT_HARDWARE_ERROR_EVENT                  (0x10)
++
++#define SCSC_BT_CONF      "bt.hcf"
++#define SCSC_BT_ADDR      "/efs/bluetooth/bt_addr"
++#define SCSC_BT_ADDR_LEN  (6)
++
++#define SCSC_H4_DEVICE_NAME             "scsc_h4_0"
++#define SCSC_ANT_DEVICE_NAME            "scsc_ant_0"
++
++#define ANT_COMMAND_MSG 0x0C
++#define ANT_DATA_MSG 0x0E
++#define ANT_HEADER_LENGTH 1
++
++#define SCSC_BT_CONNECTION_INFO_MAX     (0x1000)
++#define SCSC_BT_ACL_RAW_MASK            (0xF000)
++#define SCSC_BT_ACL_RAW                 (0x2000)
++#define SCSC_BT_ACL_HANDLE_MASK         (0x0FFF)
++
++#define SCSC_TTY_MINORS (8)
++
++enum scsc_bt_shm_thread_flags;
++
++enum scsc_bt_read_op {
++	BT_READ_OP_NONE,
++	BT_READ_OP_HCI_EVT,
++	BT_READ_OP_HCI_EVT_ERROR,
++	BT_READ_OP_ACL_DATA,
++	BT_READ_OP_ACL_CREDIT,
++	BT_READ_OP_IQ_REPORT,
++	BT_READ_OP_STOP
++};
++
++enum scsc_ant_read_op {
++	ANT_READ_OP_NONE,
++	ANT_READ_OP_CMD,
++	ANT_READ_OP_DATA
++};
++
++struct scsc_bt_connection_info {
++	u8  state;
++	u16 length;
++	u16 l2cap_cid;
++};
++
++#define CONNECTION_NONE         (0)
++#define CONNECTION_ACTIVE       (1)
++#define CONNECTION_DISCONNECTED (2)
++
++enum bt_link_type_enum {
++	BT_LINK_TYPE_SCO		= 0,
++	BT_LINK_TYPE_ACL		= 1,
++	BT_LINK_TYPE_SETUP_ID		= 2,
++	BT_LINK_TYPE_SETUP_FHS		= 3,
++	BT_LINK_TYPE_ESCO		= 4,
++	BT_LINK_TYPE_ACL_23		= 5,
++	BT_LINK_TYPE_ESCO_23		= 6,
++	BT_LINK_TYPE_ANTPLUS		= 7,
++	MAX_BT_LINK_TYPE		= 7
++};
++
++enum scsc_bt_avdtp_detect_state_enum {
++	BT_AVDTP_STATE_IDLE_SIGNALING,
++	BT_AVDTP_STATE_PENDING_SIGNALING,
++	BT_AVDTP_STATE_COMPLETE_SIGNALING,
++	BT_AVDTP_STATE_IDLE_STREAMING,
++	BT_AVDTP_STATE_PENDING_STREAMING,
++	BT_AVDTP_STATE_COMPLETE_STREAMING,
++};
++
++enum scsc_bt_avdtp_detect_conn_req_direction_enum {
++	BT_AVDTP_CONN_REQ_DIR_INCOMING,
++	BT_AVDTP_CONN_REQ_DIR_OUTGOING,
++};
++
++enum scsc_bt_avdtp_detect_type {
++	BT_AVDTP_CONN_TYPE_SIGNAL = 0,
++	BT_AVDTP_CONN_TYPE_STREAM = 1,
++};
++
++struct scsc_bt_avdtp_detect_connection {
++	enum scsc_bt_avdtp_detect_type                  type;
++	enum scsc_bt_avdtp_detect_state_enum            state;
++	u16                                             src_cid;
++	u16                                             dst_cid;
++};
++
++struct scsc_bt_avdtp_detect_ongoing {
++	struct scsc_bt_avdtp_detect_connection		incoming_signal;
++	struct scsc_bt_avdtp_detect_connection		outgoing_signal;
++	struct scsc_bt_avdtp_detect_connection		incoming_stream;
++	struct scsc_bt_avdtp_detect_connection		outgoing_stream;
++};
++
++enum scsc_bt_avdtp_detect_tsep {
++	BT_AVDTP_TSEP_SRC = 0,
++	BT_AVDTP_TSEP_SNK = 1,
++};
++
++struct scsc_bt_avdtp_detect_src_snk {
++	enum scsc_bt_avdtp_detect_tsep          tsep;
++	struct scsc_bt_avdtp_detect_snk_seid    *local_snk_seids;
++	struct scsc_bt_avdtp_detect_snk_seid    *remote_snk_seids;
++	uint16_t                                local_snk_seid_candidate;
++	uint16_t                                remote_snk_seid_candidate;
++};
++
++struct scsc_bt_avdtp_detect_snk_seid {
++	uint8_t								seid;
++	struct scsc_bt_avdtp_detect_snk_seid	*next;
++};
++
++struct scsc_bt_avdtp_detect_hci_connection {
++	struct scsc_bt_avdtp_detect_ongoing             ongoing;
++	u16                                             hci_connection_handle;
++	struct scsc_bt_avdtp_detect_connection          signal;
++	struct scsc_bt_avdtp_detect_connection          stream;
++	struct scsc_bt_avdtp_detect_src_snk             tsep_detect;
++	struct scsc_bt_avdtp_detect_hci_connection      *next;
++	spinlock_t                                      lock;
++};
++
++struct scsc_bt_avdtp_detect {
++	struct scsc_bt_avdtp_detect_hci_connection    *connections;
++	spinlock_t                                    lock;
++	spinlock_t                                    fw_write_lock;
++};
++
++struct scsc_common_service {
++	struct scsc_mx                *maxwell_core;
++	struct class                   *class;
++};
++
++extern struct scsc_common_service common_service;
++
++struct scsc_bt_service {
++	dev_t                          device;
++	struct scsc_service            *service;
++	struct device                  *dev;
++
++	struct cdev                    h4_cdev;
++	struct device                  *h4_device;
++	struct file                    *h4_file;
++	bool                           h4_users;
++	atomic_t                       h4_readers;
++	atomic_t                       h4_writers;
++	size_t                         h4_write_offset;
++
++	atomic_t                       error_count;
++	atomic_t                       service_users;
++
++	scsc_mifram_ref                bhcs_ref;                /* Bluetooth host configuration service reference */
++	scsc_mifram_ref                bsmhcp_ref;              /* Bluetooth shared memory host controller protocol reference */
++	scsc_mifram_ref                config_ref;              /* Bluetooth configuration reference */
++	scsc_mifram_ref                abox_ref;                /* A-Box reference */
++	struct BSMHCP_PROTOCOL         *bsmhcp_protocol;        /* Bluetooth shared memory host controller protocol pointer */
++	size_t                         read_offset;
++	enum scsc_bt_read_op           read_operation;
++	u32                            read_index;
++	wait_queue_head_t              read_wait;
++
++	wait_queue_head_t              info_wait;
++
++	int                            last_alloc;  /* Cached previous alloc index to aid search */
++	u8                             allocated[BSMHCP_DATA_BUFFER_TX_ACL_SIZE];
++	u32                            allocated_count;
++	u32                            freed_count;
++	bool                           processed[BSMHCP_TRANSFER_RING_EVT_SIZE];
++
++	struct scsc_bt_connection_info connection_handle_list[SCSC_BT_CONNECTION_INFO_MAX];
++	bool                           hci_event_paused;
++	bool                           acldata_paused;
++
++	struct wake_lock               read_wake_lock;
++	struct wake_lock               write_wake_lock;
++	struct wake_lock               service_wake_lock;
++	size_t                         write_wake_lock_count;
++	size_t                         write_wake_unlock_count;
++
++	size_t                         interrupt_count;
++	size_t                         interrupt_read_count;
++	size_t                         interrupt_write_count;
++	size_t                         last_suspend_interrupt_count;
++
++	u32                            mailbox_hci_evt_read;
++	u32                            mailbox_hci_evt_write;
++	u32                            mailbox_acl_rx_read;
++	u32                            mailbox_acl_rx_write;
++	u32                            mailbox_acl_free_read;
++	u32                            mailbox_acl_free_read_scan;
++	u32                            mailbox_acl_free_write;
++	u32                            mailbox_iq_report_read;
++	u32                            mailbox_iq_report_write;
++
++	struct scsc_bt_avdtp_detect    avdtp_detect;
++	struct completion              recovery_release_complete;
++	struct completion              recovery_probe_complete;
++
++	bool                           iq_reports_enabled;
++};
++
++extern struct scsc_bt_service bt_service;
++
++/* IQ reporting */
++#define HCI_IQ_REPORTING_MAX_NUM_SAMPLES               (82)
++/**
++ * The driver supports both reception of LE Connection IQ Report
++ * and LE Connectionless IQ report event:
++ *
++ * The largest hci event is LE Connection IQ Report, which
++ * constitutes of:
++ *
++ * - Hci packet type    : 1 octet
++ * - Event code         : 1 octet
++ * - Param total Length : 1 octet
++ * - Subevent code      : 1 octet
++ * - Connection hdl     : 2 octets
++ * - RX_PHY             : 1 octet
++ * - Data_channel_idx   : 1 octet
++ * - RSSI               : 2 octets
++ * - RSSI antenna id    : 1 octet
++ * - cte type           : 1 octet
++ * - Slot durations     : 1 octet
++ * - packet_status      : 1 octet
++ * - Sample count       : 1 octet
++ *********************************
++ * Total                : 15 octets
++ *
++ * The maximum hci event size in bytes is:
++ *     (15 + (number of samples * 2 (both I and Q)))
++ *
++ */
++#define HCI_IQ_REPORT_MAX_LEN                          (15 + (2 * HCI_IQ_REPORTING_MAX_NUM_SAMPLES))
++#define HCI_LE_CONNECTIONLESS_IQ_REPORT_EVENT_SUB_CODE (0x15)
++#define HCI_LE_CONNECTION_IQ_REPORT_EVENT_SUB_CODE     (0x16)
++
++
++struct scsc_ant_service {
++	dev_t                          device;
++	struct scsc_service            *service;
++	struct device                  *dev;
++
++	struct cdev                    ant_cdev;
++	struct device                  *ant_device;
++	struct file                    *ant_file;
++	bool                           ant_users;
++	atomic_t                       ant_readers;
++	atomic_t                       ant_writers;
++	size_t                         ant_write_offset;
++
++	atomic_t                       error_count;
++	atomic_t                       service_users;
++
++	/* Bluetooth host configuration service reference */
++	scsc_mifram_ref                bhcs_ref;
++	/* Ant shared memory host controller protocol reference */
++	scsc_mifram_ref                asmhcp_ref;
++	/* Bluetooth configuration reference */
++	scsc_mifram_ref                config_ref;
++
++	/* Ant shared memory host controller protocol pointer */
++	struct ASMHCP_PROTOCOL         *asmhcp_protocol;
++	size_t                         read_offset;
++	enum scsc_ant_read_op          read_operation;
++	u32                            read_index;
++	wait_queue_head_t              read_wait;
++
++	struct wake_lock               read_wake_lock;
++	struct wake_lock               write_wake_lock;
++	struct wake_lock               service_wake_lock;
++	size_t                         write_wake_lock_count;
++	size_t                         write_wake_unlock_count;
++
++	size_t                         interrupt_count;
++	size_t                         interrupt_read_count;
++	size_t                         interrupt_write_count;
++
++	u32                            mailbox_data_ctr_driv_read;
++	u32                            mailbox_data_ctr_driv_write;
++	u32                            mailbox_cmd_ctr_driv_read;
++	u32                            mailbox_cmd_ctr_driv_write;
++
++	struct completion              recovery_release_complete;
++	struct completion              recovery_probe_complete;
++};
++
++extern struct scsc_ant_service ant_service;
++/* Coex avdtp detection */
++
++/* The buffers passed for inspection begin at the L2CAP basic header, as does the length
++ * passed in the function calls */
++#define AVDTP_DETECT_MIN_DATA_LENGTH            (12) /* We always want to look for the SRC CID */
++#define AVDTP_DETECT_MIN_DATA_LENGTH_CON_RSP    (16) /* For CON RSP, we want the result, too */
++#define AVDTP_DETECT_MIN_AVDTP_LENGTH           (6)  /* Basic L2CAP header + 2 AVDTP octets as min */
++
++#define HCI_ACL_PACKET_BOUNDARY_START_FLUSH     (2)
++
++/* Can't use HCI_L2CAP_CID(data), since that assumes 4 bytes of HCI header, which has been stripped
++ * for the calls to the avdtp detection functions */
++#define HCI_L2CAP_RX_CID(data)                  ((u16)(*(data + 2) | (*(data + 3)) << 8))
++
++#define HCI_L2CAP_CODE(data)                    ((u8)(*(data + 4)))
++#define HCI_L2CAP_CON_REQ_PSM(data)             ((u16)(*(data + 8) | (*(data + 9)) << 8))
++/* Valid for at least connection request/response and disconnection request */
++#define HCI_L2CAP_SOURCE_CID(data)              ((u16)(*(data + 10) | (*(data + 11)) << 8))
++/* Valid for at least connection and disconnection responses */
++#define HCI_L2CAP_RSP_DEST_CID(data)            ((u16)(*(data + 8) | (*(data + 9)) << 8))
++#define HCI_L2CAP_CON_RSP_RESULT(data)          ((u16)(*(data + 12) | (*(data + 13)) << 8))
++#define HCI_L2CAP_CON_RSP_RESULT_SUCCESS        (0x0000)
++#define HCI_L2CAP_CON_RSP_RESULT_REFUSED        (0x0002)
++
++
++#define HCI_L2CAP_CONF_SEID_OFFSET              6
++#define HCI_L2CAP_CONF_TSEP_OFFSET              7
++#define HCI_L2CAP_CONF_SEID_INFO_SIZE           2
++#define HCI_L2CAP_CONF_SEID(data, index)        (((u8)(*(data + index * HCI_L2CAP_CONF_SEID_INFO_SIZE + HCI_L2CAP_CONF_SEID_OFFSET)) >> 2) & 0x3F)
++#define HCI_L2CAP_CONF_TSEP_SRC                 0
++#define HCI_L2CAP_CONF_TSEP_SNK                 1
++#define HCI_L2CAP_CONF_TSEP(data, index)        (((u8)(*(data + index * HCI_L2CAP_CONF_SEID_INFO_SIZE + HCI_L2CAP_CONF_TSEP_OFFSET)) >> 3) & 0x1)
++#define HCI_L2CAP_SET_CONF_ACP_SEID_OFFSET      6
++#define HCI_L2CAP_SET_CONF_ACP_SEID(data)       (((u8)(*(data + HCI_L2CAP_SET_CONF_ACP_SEID_OFFSET)) >> 2) & 0x3F)
++
++
++#define L2CAP_AVDTP_PSM                 0x0019
++#define L2CAP_SIGNALING_CID             0x0001
++#define L2CAP_CODE_CONNECT_REQ          0x02
++#define L2CAP_CODE_CONNECT_RSP          0x03
++#define L2CAP_CODE_CONFIGURE_REQ        0x04
++#define L2CAP_CODE_DISCONNECT_REQ       0x06
++#define L2CAP_CODE_DISCONNECT_RSP       0x07
++
++#define AVDTP_MESSAGE_TYPE_OFFSET          4 /* Assuming only single packet type */
++#define AVDTP_MESSAGE_TYPE_MASK            0x03
++#define AVDTP_MESSAGE_TYPE(data)           ((u8)(*(data + AVDTP_MESSAGE_TYPE_OFFSET)) & AVDTP_MESSAGE_TYPE_MASK)
++#define AVDTP_MESSAGE_TYPE_CMD             0x00
++#define AVDTP_MESSAGE_TYPE_GENERAL_REJECT  0x01
++#define AVDTP_MESSAGE_TYPE_RSP_ACCEPT      0x02
++#define AVDTP_MESSAGE_TYPE_RSP_REJECT      0x03
++
++#define AVDTP_SIGNAL_ID_OFFSET          5 /* Assuming only single packet type */
++#define AVDTP_SIGNAL_ID_MASK            0x1F
++#define AVDTP_SIGNAL_ID(data)           ((u8)(*(data + AVDTP_SIGNAL_ID_OFFSET)) & AVDTP_SIGNAL_ID_MASK)
++
++#define AVDTP_SIGNAL_ID_DISCOVER        0x01
++#define AVDTP_SIGNAL_ID_SET_CONF        0x03
++#define AVDTP_SIGNAL_ID_OPEN            0x06
++#define AVDTP_SIGNAL_ID_START           0x07
++#define AVDTP_SIGNAL_ID_CLOSE           0x08
++#define AVDTP_SIGNAL_ID_SUSPEND         0x09
++#define AVDTP_SIGNAL_ID_ABORT           0x0A
++
++#define AVDTP_SIGNAL_FLAG_MASK          (0x80000000)
++#define AVDTP_SNK_FLAG_MASK             (0x40000000)
++#define AVDTP_MESSAGE_COUNT_MASK        (0x30000000)
++#define AVDTP_GET_MESSAGE_COUNT(data)   ((data & AVDTP_MESSAGE_COUNT_MASK) >> 28)
++
++#define AVDTP_SNK_FLAG_TD_MASK             (0x00000001)
++#define AVDTP_OPEN_FLAG_TD_MASK            (0x00000002)
++
++extern uint16_t avdtp_signaling_src_cid;
++extern uint16_t avdtp_signaling_dst_cid;
++extern uint16_t avdtp_streaming_src_cid;
++extern uint16_t avdtp_streaming_dst_cid;
++extern uint16_t avdtp_hci_connection_handle;
++
++#define AVDTP_DETECT_SIGNALING_IGNORE   0
++#define AVDTP_DETECT_SIGNALING_ACTIVE   1
++#define AVDTP_DETECT_SIGNALING_INACTIVE 2
++#define AVDTP_DETECT_SIGNALING_OPEN     3
++
++void scsc_avdtp_detect_rxtx(u16 hci_connection_handle, const unsigned char *data, uint16_t length, bool is_tx);
++bool scsc_avdtp_detect_reset_connection_handle(uint16_t hci_connection_handle);
++bool scsc_bt_shm_h4_avdtp_detect_write(uint32_t flags,
++									   uint16_t l2cap_cid,
++									   uint16_t hci_connection_handle);
++void scsc_avdtp_detect_exit(void);
++
++
++#endif /* __SCSC_BT_PRIV_H */
+diff --git a/drivers/misc/samsung/scsc_bt/scsc_shm.c b/drivers/misc/samsung/scsc_bt/scsc_shm.c
+new file mode 100755
+index 000000000..602e14c36
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/scsc_shm.c
+@@ -0,0 +1,1646 @@
++/****************************************************************************
++ *
++ *       Copyright (c) 2015 Samsung Electronics Co., Ltd
++ *
++ ****************************************************************************/
++
++/* MX BT shared memory interface */
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/fs.h>
++#include <linux/module.h>
++#include <linux/firmware.h>
++#include <linux/poll.h>
++#include <linux/slab.h>
++#include <linux/cdev.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/uaccess.h>
++#include <linux/wait.h>
++#include <linux/kthread.h>
++#include <asm/io.h>
++#include <linux/wakelock.h>
++
++#include <scsc/scsc_mx.h>
++#include <scsc/scsc_mifram.h>
++#include <scsc/api/bsmhcp.h>
++#include <scsc/scsc_logring.h>
++
++#ifdef CONFIG_SCSC_LOG_COLLECTION
++#include <scsc/scsc_log_collector.h>
++#endif
++
++#include "scsc_bt_priv.h"
++#include "scsc_shm.h"
++#include "scsc_bt_hci.h"
++
++struct hci_credit_entry {
++	u16 hci_connection_handle;
++	u16 credits;
++};
++
++static u8   h4_write_buffer[BSMHCP_ACL_PACKET_SIZE + H4DMUX_HEADER_ACL];
++static u8   h4_acl_header[5];
++static u8   h4_hci_event_ncp_header[4 + BSMHCP_TRANSFER_RING_ACL_COUNT * sizeof(struct hci_credit_entry)];
++static u32  h4_hci_event_ncp_header_len = 8;
++static struct hci_credit_entry *h4_hci_credit_entries = (struct hci_credit_entry *) &h4_hci_event_ncp_header[4];
++static u8   h4_hci_event_hardware_error[4] = { HCI_EVENT_PKT, HCI_EVENT_HARDWARE_ERROR_EVENT, 1, 0 };
++static u8   h4_iq_report_evt[HCI_IQ_REPORT_MAX_LEN];
++static u32  h4_iq_report_evt_len;
++static u16  h4_irq_mask;
++
++/*
++ * The H4 stream is read and written by the BlueZ glue (scsc_bluez.c) with
++ * kernel buffers only: there is no H4 character device in this port.
++ */
++static inline unsigned long scsc_bt_copy_to(void *dst, const void *src, size_t n)
++{
++	memcpy(dst, src, n);
++	return 0;
++}
++
++static inline unsigned long scsc_bt_copy_from(void *dst, const void *src, size_t n)
++{
++	memcpy(dst, src, n);
++	return 0;
++}
++
++static void scsc_bt_shm_irq_handler(int irqbit, void *data)
++{
++	/* Clear interrupt */
++	scsc_service_mifintrbit_bit_clear(bt_service.service, irqbit);
++
++	/* Ensure irq bit is cleared before reading the mailbox indexes */
++	mb();
++
++	bt_service.interrupt_count++;
++
++	/* Wake the reader operation */
++	if (bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write !=
++	    bt_service.bsmhcp_protocol->header.mailbox_hci_evt_read ||
++	    bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write !=
++	    bt_service.bsmhcp_protocol->header.mailbox_acl_rx_read ||
++	    bt_service.bsmhcp_protocol->header.mailbox_acl_free_write !=
++	    bt_service.bsmhcp_protocol->header.mailbox_acl_free_read ||
++	    bt_service.bsmhcp_protocol->header.mailbox_iq_report_write !=
++	    bt_service.bsmhcp_protocol->header.mailbox_iq_report_read ||
++	    0 != atomic_read(&bt_service.error_count) ||
++	    bt_service.bsmhcp_protocol->header.panic_deathbed_confession) {
++		bt_service.interrupt_read_count++;
++
++		wake_lock_timeout(&bt_service.read_wake_lock, HZ);
++		wake_up(&bt_service.read_wait);
++	}
++
++	if (bt_service.bsmhcp_protocol->header.mailbox_hci_cmd_write ==
++	    bt_service.bsmhcp_protocol->header.mailbox_hci_cmd_read &&
++	    bt_service.bsmhcp_protocol->header.mailbox_acl_tx_write ==
++	    bt_service.bsmhcp_protocol->header.mailbox_acl_tx_read) {
++		bt_service.interrupt_write_count++;
++
++		if (wake_lock_active(&bt_service.write_wake_lock)) {
++			bt_service.write_wake_unlock_count++;
++			wake_unlock(&bt_service.write_wake_lock);
++		}
++	}
++}
++
++/* Assign firmware/host interrupts */
++static int scsc_bt_shm_init_interrupt(void)
++{
++	int irq_ret = 0;
++	u16 irq_num = 0;
++
++	/* To-host f/w IRQ allocations and ISR registrations */
++	irq_ret = scsc_service_mifintrbit_register_tohost(
++	    bt_service.service, scsc_bt_shm_irq_handler, NULL);
++	if (irq_ret < 0)
++		return irq_ret;
++
++	bt_service.bsmhcp_protocol->header.bg_to_ap_int_src = irq_ret;
++	h4_irq_mask |= 1 << irq_num++;
++
++	/* From-host f/w IRQ allocations */
++	irq_ret = scsc_service_mifintrbit_alloc_fromhost(
++	    bt_service.service, SCSC_MIFINTR_TARGET_R4);
++	if (irq_ret < 0)
++		return irq_ret;
++
++	bt_service.bsmhcp_protocol->header.ap_to_bg_int_src = irq_ret;
++	h4_irq_mask |= 1 << irq_num++;
++
++	irq_ret = scsc_service_mifintrbit_alloc_fromhost(
++	    bt_service.service, SCSC_MIFINTR_TARGET_R4);
++	if (irq_ret < 0)
++		return irq_ret;
++
++	bt_service.bsmhcp_protocol->header.ap_to_fg_int_src = irq_ret;
++	h4_irq_mask |= 1 << irq_num++;
++
++	SCSC_TAG_DEBUG(BT_COMMON, "Registered to-host IRQ bits %d, from-host IRQ bits %d:%d\n",
++		       bt_service.bsmhcp_protocol->header.bg_to_ap_int_src,
++		       bt_service.bsmhcp_protocol->header.ap_to_bg_int_src,
++		       bt_service.bsmhcp_protocol->header.ap_to_fg_int_src);
++
++	return 0;
++}
++
++bool scsc_bt_shm_h4_avdtp_detect_write(uint32_t flags,
++									   uint16_t l2cap_cid,
++									   uint16_t hci_connection_handle)
++{
++	uint32_t tr_read;
++	uint32_t tr_write;
++	struct BSMHCP_TD_AVDTP *td;
++
++	spin_lock(&bt_service.avdtp_detect.fw_write_lock);
++
++	/* Store the read/write pointer on the stack since both are placed in unbuffered/uncached memory */
++	tr_read = bt_service.bsmhcp_protocol->header.mailbox_avdtp_read;
++	tr_write = bt_service.bsmhcp_protocol->header.mailbox_avdtp_write;
++
++	td = &bt_service.bsmhcp_protocol->avdtp_transfer_ring[tr_write];
++
++	SCSC_TAG_DEBUG(BT_H4,
++				   "AVDTP_DETECT_PKT (flags: 0x%08X, cid: 0x%04X, handle: 0x%04X, read=%u, write=%u)\n",
++				   flags,
++				   l2cap_cid,
++				   hci_connection_handle,
++				   tr_read,
++				   tr_write);
++
++	/* Index out of bounds check */
++	if (tr_read >= BSMHCP_TRANSFER_RING_AVDTP_SIZE || tr_write >= BSMHCP_TRANSFER_RING_AVDTP_SIZE) {
++		spin_unlock(&bt_service.avdtp_detect.fw_write_lock);
++		SCSC_TAG_ERR(BT_H4,
++					 "AVDTP_DETECT_PKT - Index out of bounds (tr_read=%u, tr_write=%u)\n",
++					 tr_read,
++					 tr_write);
++		atomic_inc(&bt_service.error_count);
++		return false;
++	}
++
++	/* Does the transfer ring have room for an entry */
++	if (BSMHCP_HAS_ROOM(tr_write, tr_read, BSMHCP_TRANSFER_RING_AVDTP_SIZE)) {
++		/* Fill the transfer descriptor with the AVDTP data */
++		td->flags = flags;
++		td->l2cap_cid = l2cap_cid;
++		td->hci_connection_handle = hci_connection_handle;
++
++		/* Ensure the wake lock is acquired */
++		if (!wake_lock_active(&bt_service.write_wake_lock)) {
++			bt_service.write_wake_lock_count++;
++			wake_lock(&bt_service.write_wake_lock);
++		}
++
++		/* Increate the write pointer */
++		BSMHCP_INCREASE_INDEX(tr_write, BSMHCP_TRANSFER_RING_AVDTP_SIZE);
++		bt_service.bsmhcp_protocol->header.mailbox_avdtp_write = tr_write;
++
++		spin_unlock(&bt_service.avdtp_detect.fw_write_lock);
++
++		/* Memory barrier to ensure out-of-order execution is completed */
++		wmb();
++
++		/* Trigger the interrupt in the mailbox */
++		scsc_service_mifintrbit_bit_set(
++			bt_service.service,
++			bt_service.bsmhcp_protocol->header.ap_to_bg_int_src,
++			SCSC_MIFINTR_TARGET_R4);
++	} else {
++		/* Transfer ring full */
++		spin_unlock(&bt_service.avdtp_detect.fw_write_lock);
++		SCSC_TAG_ERR(BT_H4,
++					 "AVDTP_DETECT_PKT - No more room for messages (tr_read=%u, tr_write=%u)\n",
++					 tr_read,
++					 tr_write);
++		scsc_service_force_panic(bt_service.service);
++		return false;
++	}
++	return true;
++}
++
++
++static ssize_t scsc_bt_shm_h4_hci_cmd_write(const unsigned char *data, size_t count)
++{
++	/* Store the read/write pointer on the stack since both are placed in unbuffered/uncached memory */
++	uint32_t tr_read = bt_service.bsmhcp_protocol->header.mailbox_hci_cmd_read;
++	uint32_t tr_write = bt_service.bsmhcp_protocol->header.mailbox_hci_cmd_write;
++#ifdef CONFIG_SCSC_PRINTK
++	uint16_t op_code = *(uint16_t *) data;
++#endif
++
++	/* Temp vars */
++	struct BSMHCP_TD_CONTROL *td = &bt_service.bsmhcp_protocol->hci_cmd_transfer_ring[tr_write];
++
++	SCSC_TAG_DEBUG(BT_H4, "HCI_COMMAND_PKT (op_code=0x%04x, len=%zu, read=%u, write=%u)\n", op_code, count, tr_read, tr_write);
++
++	/* Index out of bounds check */
++	if (tr_read >= BSMHCP_TRANSFER_RING_CMD_SIZE || tr_write >= BSMHCP_TRANSFER_RING_CMD_SIZE) {
++		SCSC_TAG_ERR(BT_H4, "HCI_COMMAND_PKT - Index out of bounds (tr_read=%u, tr_write=%u)\n", tr_read, tr_write);
++		atomic_inc(&bt_service.error_count);
++		return -EIO;
++	}
++
++	/* Does the transfer ring have room for an entry */
++	if (BSMHCP_HAS_ROOM(tr_write, tr_read, BSMHCP_TRANSFER_RING_CMD_SIZE)) {
++		/* Fill the transfer descriptor with the HCI command data */
++		memcpy(td->data, data, count);
++		td->length = (u16)count;
++
++		/* Ensure the wake lock is acquired */
++		if (!wake_lock_active(&bt_service.write_wake_lock)) {
++			bt_service.write_wake_lock_count++;
++			wake_lock(&bt_service.write_wake_lock);
++		}
++
++		/* Increate the write pointer */
++		BSMHCP_INCREASE_INDEX(tr_write, BSMHCP_TRANSFER_RING_CMD_SIZE);
++		bt_service.bsmhcp_protocol->header.mailbox_hci_cmd_write = tr_write;
++
++		/* Memory barrier to ensure out-of-order execution is completed */
++		wmb();
++
++		/* Trigger the interrupt in the mailbox */
++		scsc_service_mifintrbit_bit_set(bt_service.service, bt_service.bsmhcp_protocol->header.ap_to_bg_int_src, SCSC_MIFINTR_TARGET_R4);
++	} else
++		/* Transfer ring full. Only happens if the user attempt to send more HCI command packets than
++		 * available credits */
++		count = 0;
++
++	return count;
++}
++
++static ssize_t scsc_bt_shm_h4_acl_write(const unsigned char *data, size_t count)
++{
++	/* Store the read/write pointer on the stack since both are placed in unbuffered/uncached memory */
++	uint32_t                     tr_read = bt_service.bsmhcp_protocol->header.mailbox_acl_tx_read;
++	uint32_t                     tr_write = bt_service.bsmhcp_protocol->header.mailbox_acl_tx_write;
++
++	/* Temp vars */
++	struct BSMHCP_TD_ACL_TX_DATA *td = &bt_service.bsmhcp_protocol->acl_tx_data_transfer_ring[tr_write];
++	int                          acldata_buf_index = -1;
++	u16                          l2cap_length;
++	u32                          i;
++	size_t                       payload_len = count - ACLDATA_HEADER_SIZE;
++
++	/* Index out of bounds check */
++	if (tr_read >= BSMHCP_TRANSFER_RING_ACL_SIZE || tr_write >= BSMHCP_TRANSFER_RING_ACL_SIZE) {
++		SCSC_TAG_ERR(BT_H4, "ACL_DATA_PKT - Index out of bounds (tr_read=%u, tr_write=%u)\n", tr_read, tr_write);
++		atomic_inc(&bt_service.error_count);
++		return -EIO;
++	}
++
++	/* Allocate a data slot */
++	for (i = 0; i < BSMHCP_DATA_BUFFER_TX_ACL_SIZE; i++) {
++		/* Wrap the offset index around the buffer max */
++		if (++bt_service.last_alloc == BSMHCP_DATA_BUFFER_TX_ACL_SIZE)
++			bt_service.last_alloc = 0;
++		/* Claim a free slot */
++		if (bt_service.allocated[bt_service.last_alloc] == 0) {
++			bt_service.allocated[bt_service.last_alloc] = 1;
++			acldata_buf_index = bt_service.last_alloc;
++			bt_service.allocated_count++;
++			break;
++		}
++	}
++
++	/* Is a buffer available to hold the data */
++	if (acldata_buf_index < 0) {
++		SCSC_TAG_ERR(BT_H4, "ACL_DATA_PKT - No buffers available\n");
++		atomic_inc(&bt_service.error_count);
++		return -EIO;
++	}
++
++	/* Does the transfer ring have room for an entry */
++	if (BSMHCP_HAS_ROOM(tr_write, tr_read, BSMHCP_TRANSFER_RING_ACL_SIZE)) {
++		/* Extract the ACL data header and L2CAP header and fill it into the transfer descriptor */
++		td->buffer_index = (uint8_t)acldata_buf_index;
++		td->flags = HCI_ACL_DATA_FLAGS(data);
++		td->hci_connection_handle = HCI_ACL_DATA_CON_HDL(data);
++		td->length = (u16)payload_len;
++
++		if ((td->flags & BSMHCP_ACL_BC_FLAG_BCAST_ACTIVE) ||
++		    (td->flags & BSMHCP_ACL_BC_FLAG_BCAST_ALL)) {
++			SCSC_TAG_DEBUG(BT_H4,
++				"Setting broadcast handle (hci_connection_handle=0x%03x)\n",
++				td->hci_connection_handle);
++			bt_service.connection_handle_list[td->hci_connection_handle].state = CONNECTION_ACTIVE;
++		}
++
++		/* Is this a packet marked with the start flag */
++		if ((td->flags & BSMHCP_ACL_PB_FLAG_MASK) == BSMHCP_ACL_PB_FLAG_START_NONFLUSH ||
++		    (td->flags & BSMHCP_ACL_PB_FLAG_MASK) == BSMHCP_ACL_PB_FLAG_START_FLUSH) {
++
++			/* Extract the L2CAP payload length and connection identifier */
++			td->l2cap_cid = HCI_L2CAP_CID(data);
++
++			/* data+4 to skip the HCI header, to align offsets with the rx detection. The "true" argument is to tell
++			 * the detection that this is TX */
++			scsc_avdtp_detect_rxtx(td->hci_connection_handle, data+4, td->length, true);
++
++			l2cap_length = HCI_L2CAP_LENGTH(data);
++
++			SCSC_TAG_DEBUG(BT_TX, "ACL[START] (len=%u, buffer=%u, credits=%u, l2cap_cid=0x%04x, l2cap_length=%u)\n",
++				td->length, acldata_buf_index,
++				BSMHCP_DATA_BUFFER_TX_ACL_SIZE - (bt_service.allocated_count - bt_service.freed_count),
++				HCI_L2CAP_CID(data), l2cap_length);
++
++			if (l2cap_length == payload_len - L2CAP_HEADER_SIZE)
++				/* Mark it with the END flag if packet length matches the L2CAP payload length */
++				td->flags |= BSMHCP_ACL_L2CAP_FLAG_END;
++			else if (l2cap_length < payload_len - L2CAP_HEADER_SIZE) {
++				/* Mark it with the END flag if packet length is greater than the L2CAP payload length
++				   and generate a warning notifying that this is incorrect according to the specification.
++				   This is allowed to support the BITE tester. */
++				SCSC_TAG_WARNING(BT_H4, "ACL_DATA_PKT - H4 ACL payload length > L2CAP Length (payload_len=%zu, l2cap_length=%u)\n",
++						 payload_len - L2CAP_HEADER_SIZE, l2cap_length);
++				td->flags |= BSMHCP_ACL_L2CAP_FLAG_END;
++			} else if (l2cap_length > (payload_len - L2CAP_HEADER_SIZE)) {
++				/* This is only a fragment of the packet. Save the remaining number of octets required
++				 * to complete the packet */
++				bt_service.connection_handle_list[td->hci_connection_handle].length = (u16)(l2cap_length - payload_len + L2CAP_HEADER_SIZE);
++				bt_service.connection_handle_list[td->hci_connection_handle].l2cap_cid = HCI_L2CAP_CID(data);
++			} else {
++				/* The packet is larger than the L2CAP payload length - protocol error */
++				SCSC_TAG_ERR(BT_H4, "ACL_DATA_PKT - L2CAP Length Error (l2cap_length=%u, payload_len=%zu)\n",
++					     l2cap_length, payload_len - L2CAP_HEADER_SIZE);
++				atomic_inc(&bt_service.error_count);
++				return -EIO;
++			}
++		} else if ((td->flags & BSMHCP_ACL_PB_FLAG_MASK) == BSMHCP_ACL_PB_FLAG_CONT) {
++			/* Set the L2CAP connection identifer set by the start packet */
++			td->l2cap_cid = bt_service.connection_handle_list[td->hci_connection_handle].l2cap_cid;
++
++			SCSC_TAG_DEBUG(BT_TX, "ACL[CONT] (len=%u, buffer=%u, credits=%u, l2cap_cid=0x%04x, length=%u)\n",
++				td->length, acldata_buf_index,
++				BSMHCP_DATA_BUFFER_TX_ACL_SIZE - (bt_service.allocated_count - bt_service.freed_count),
++				bt_service.connection_handle_list[td->hci_connection_handle].l2cap_cid,
++				bt_service.connection_handle_list[td->hci_connection_handle].length);
++
++			/* Does this packet complete the L2CAP frame */
++			if (bt_service.connection_handle_list[td->hci_connection_handle].length == payload_len) {
++				/* The L2CAP frame is complete. mark it with the END flag */
++				td->flags |= BSMHCP_ACL_L2CAP_FLAG_END;
++
++				/* Set the remaining length to zero */
++				bt_service.connection_handle_list[td->hci_connection_handle].length = 0;
++			} else if (bt_service.connection_handle_list[td->hci_connection_handle].length < payload_len) {
++				/* Mark it with the END flag if packet length is greater than the L2CAP missing payload length
++				   and generate a warning notifying that this is incorrect according to the specification.
++				   This is allowed to support the BITE tester. */
++				SCSC_TAG_WARNING(BT_H4, "ACL_DATA_PKT - H4 ACL payload length > L2CAP Missing Length (payload_len=%zu, missing=%u)\n",
++						 payload_len, bt_service.connection_handle_list[td->hci_connection_handle].length);
++				td->flags |= BSMHCP_ACL_L2CAP_FLAG_END;
++				/* Set the remaining length to zero */
++				bt_service.connection_handle_list[td->hci_connection_handle].length = 0;
++			} else if (bt_service.connection_handle_list[td->hci_connection_handle].length > payload_len)
++				/* This is another fragment of the packet. Save the remaining number of octets required
++				 * to complete the packet */
++				bt_service.connection_handle_list[td->hci_connection_handle].length -= (u16)payload_len;
++			else if (bt_service.connection_handle_list[td->hci_connection_handle].length < payload_len) {
++				/* The packet is larger than the L2CAP payload length - protocol error */
++				SCSC_TAG_ERR(BT_H4, "ACL_DATA_PKT - L2CAP Length Error (missing=%u, payload_len=%zu)\n",
++					     bt_service.connection_handle_list[td->hci_connection_handle].length, payload_len);
++				atomic_inc(&bt_service.error_count);
++				return -EIO;
++			}
++		} else {
++			/* Reserved flags set - report it as an error */
++			SCSC_TAG_ERR(BT_H4, "ACL_DATA_PKT - Flag set to reserved\n");
++			atomic_inc(&bt_service.error_count);
++			return -EIO;
++		}
++
++		SCSC_TAG_DEBUG(BT_H4, "ACL_DATA_PKT (len=%zu, read=%u, write=%u, slot=%u, flags=0x%04x, handle=0x%03x, l2cap_cid=0x%04x, missing=%u)\n",
++			       payload_len, tr_read, tr_write, acldata_buf_index, td->flags >> 4, td->hci_connection_handle, td->l2cap_cid,
++			       bt_service.connection_handle_list[td->hci_connection_handle].length);
++
++		/* Ensure the wake lock is acquired */
++		if (!wake_lock_active(&bt_service.write_wake_lock)) {
++			bt_service.write_wake_lock_count++;
++			wake_lock(&bt_service.write_wake_lock);
++		}
++
++		/* Copy the ACL packet into the targer buffer */
++		memcpy(&bt_service.bsmhcp_protocol->acl_tx_buffer[acldata_buf_index][0], &data[ACLDATA_HEADER_SIZE], payload_len);
++		/* Increate the write pointer */
++		BSMHCP_INCREASE_INDEX(tr_write, BSMHCP_TRANSFER_RING_ACL_SIZE);
++		bt_service.bsmhcp_protocol->header.mailbox_acl_tx_write = tr_write;
++
++		/* Memory barrier to ensure out-of-order execution is completed */
++		wmb();
++
++		/* Trigger the interrupt in the mailbox */
++		scsc_service_mifintrbit_bit_set(bt_service.service,
++						bt_service.bsmhcp_protocol->header.ap_to_fg_int_src, SCSC_MIFINTR_TARGET_R4);
++	} else {
++		/* Transfer ring full. Only happens if the user attempt to send more ACL data packets than
++		 * available credits */
++		SCSC_TAG_ERR(BT_H4, "ACL_DATA_PKT - No room in transfer ring (tr_write=%u, tr_read=%u)\n",
++			     tr_write, tr_read);
++		atomic_inc(&bt_service.error_count);
++		count = -EIO;
++	}
++
++	return count;
++}
++
++#ifdef CONFIG_SCSC_PRINTK
++static const char *scsc_hci_evt_decode_event_code(u8 hci_event_code, u8 hci_ulp_sub_code)
++{
++	const char *ret = "NA";
++
++	switch (hci_event_code) {
++	HCI_EV_DECODE(HCI_EV_INQUIRY_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_INQUIRY_RESULT);
++	HCI_EV_DECODE(HCI_EV_CONN_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_CONN_REQUEST);
++	HCI_EV_DECODE(HCI_EV_DISCONNECT_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_AUTH_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_REMOTE_NAME_REQ_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_ENCRYPTION_CHANGE);
++	HCI_EV_DECODE(HCI_EV_CHANGE_CONN_LINK_KEY_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_MASTER_LINK_KEY_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_READ_REM_SUPP_FEATURES_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_READ_REMOTE_VER_INFO_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_QOS_SETUP_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_COMMAND_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_COMMAND_STATUS);
++	HCI_EV_DECODE(HCI_EV_HARDWARE_ERROR);
++	HCI_EV_DECODE(HCI_EV_FLUSH_OCCURRED);
++	HCI_EV_DECODE(HCI_EV_ROLE_CHANGE);
++	HCI_EV_DECODE(HCI_EV_NUMBER_COMPLETED_PKTS);
++	HCI_EV_DECODE(HCI_EV_MODE_CHANGE);
++	HCI_EV_DECODE(HCI_EV_RETURN_LINK_KEYS);
++	HCI_EV_DECODE(HCI_EV_PIN_CODE_REQ);
++	HCI_EV_DECODE(HCI_EV_LINK_KEY_REQ);
++	HCI_EV_DECODE(HCI_EV_LINK_KEY_NOTIFICATION);
++	HCI_EV_DECODE(HCI_EV_LOOPBACK_COMMAND);
++	HCI_EV_DECODE(HCI_EV_DATA_BUFFER_OVERFLOW);
++	HCI_EV_DECODE(HCI_EV_MAX_SLOTS_CHANGE);
++	HCI_EV_DECODE(HCI_EV_READ_CLOCK_OFFSET_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_CONN_PACKET_TYPE_CHANGED);
++	HCI_EV_DECODE(HCI_EV_QOS_VIOLATION);
++	HCI_EV_DECODE(HCI_EV_PAGE_SCAN_MODE_CHANGE);
++	HCI_EV_DECODE(HCI_EV_PAGE_SCAN_REP_MODE_CHANGE);
++	HCI_EV_DECODE(HCI_EV_FLOW_SPEC_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_INQUIRY_RESULT_WITH_RSSI);
++	HCI_EV_DECODE(HCI_EV_READ_REM_EXT_FEATURES_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_FIXED_ADDRESS);
++	HCI_EV_DECODE(HCI_EV_ALIAS_ADDRESS);
++	HCI_EV_DECODE(HCI_EV_GENERATE_ALIAS_REQ);
++	HCI_EV_DECODE(HCI_EV_ACTIVE_ADDRESS);
++	HCI_EV_DECODE(HCI_EV_ALLOW_PRIVATE_PAIRING);
++	HCI_EV_DECODE(HCI_EV_ALIAS_ADDRESS_REQ);
++	HCI_EV_DECODE(HCI_EV_ALIAS_NOT_RECOGNISED);
++	HCI_EV_DECODE(HCI_EV_FIXED_ADDRESS_ATTEMPT);
++	HCI_EV_DECODE(HCI_EV_SYNC_CONN_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_SYNC_CONN_CHANGED);
++	HCI_EV_DECODE(HCI_EV_SNIFF_SUB_RATE);
++	HCI_EV_DECODE(HCI_EV_EXTENDED_INQUIRY_RESULT);
++	HCI_EV_DECODE(HCI_EV_ENCRYPTION_KEY_REFRESH_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_IO_CAPABILITY_REQUEST);
++	HCI_EV_DECODE(HCI_EV_IO_CAPABILITY_RESPONSE);
++	HCI_EV_DECODE(HCI_EV_USER_CONFIRMATION_REQUEST);
++	HCI_EV_DECODE(HCI_EV_USER_PASSKEY_REQUEST);
++	HCI_EV_DECODE(HCI_EV_REMOTE_OOB_DATA_REQUEST);
++	HCI_EV_DECODE(HCI_EV_SIMPLE_PAIRING_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_LST_CHANGE);
++	HCI_EV_DECODE(HCI_EV_ENHANCED_FLUSH_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_USER_PASSKEY_NOTIFICATION);
++	HCI_EV_DECODE(HCI_EV_KEYPRESS_NOTIFICATION);
++	HCI_EV_DECODE(HCI_EV_REM_HOST_SUPPORTED_FEATURES);
++	HCI_EV_DECODE(HCI_EV_TRIGGERED_CLOCK_CAPTURE);
++	HCI_EV_DECODE(HCI_EV_SYNCHRONIZATION_TRAIN_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_SYNCHRONIZATION_TRAIN_RECEIVED);
++	HCI_EV_DECODE(HCI_EV_CSB_RECEIVE);
++	HCI_EV_DECODE(HCI_EV_CSB_TIMEOUT);
++	HCI_EV_DECODE(HCI_EV_TRUNCATED_PAGE_COMPLETE);
++	HCI_EV_DECODE(HCI_EV_SLAVE_PAGE_RESPONSE_TIMEOUT);
++	HCI_EV_DECODE(HCI_EV_CSB_CHANNEL_MAP_CHANGE);
++	HCI_EV_DECODE(HCI_EV_INQUIRY_RESPONSE_NOTIFICATION);
++	HCI_EV_DECODE(HCI_EV_AUTHENTICATED_PAYLOAD_TIMEOUT_EXPIRED);
++	case HCI_EV_ULP:
++	{
++		switch (hci_ulp_sub_code) {
++		HCI_EV_DECODE(HCI_EV_ULP_CONNECTION_COMPLETE);
++		HCI_EV_DECODE(HCI_EV_ULP_ADVERTISING_REPORT);
++		HCI_EV_DECODE(HCI_EV_ULP_CONNECTION_UPDATE_COMPLETE);
++		HCI_EV_DECODE(HCI_EV_ULP_READ_REMOTE_USED_FEATURES_COMPLETE);
++		HCI_EV_DECODE(HCI_EV_ULP_LONG_TERM_KEY_REQUEST);
++		HCI_EV_DECODE(HCI_EV_ULP_REMOTE_CONNECTION_PARAMETER_REQUEST);
++		HCI_EV_DECODE(HCI_EV_ULP_DATA_LENGTH_CHANGE);
++		HCI_EV_DECODE(HCI_EV_ULP_READ_LOCAL_P256_PUB_KEY_COMPLETE);
++		HCI_EV_DECODE(HCI_EV_ULP_GENERATE_DHKEY_COMPLETE);
++		HCI_EV_DECODE(HCI_EV_ULP_ENHANCED_CONNECTION_COMPLETE);
++		HCI_EV_DECODE(HCI_EV_ULP_DIRECT_ADVERTISING_REPORT);
++		HCI_EV_DECODE(HCI_EV_ULP_PHY_UPDATE_COMPLETE);
++		HCI_EV_DECODE(HCI_EV_ULP_USED_CHANNEL_SELECTION);
++		}
++		break;
++	}
++	}
++
++	return ret;
++}
++#endif
++
++static ssize_t scsc_iq_report_evt_read(char *buf, size_t len)
++{
++	ssize_t consumed = 0;
++	ssize_t ret = 0;
++
++	/* Calculate the amount of data that can be transferred */
++	len = min(h4_iq_report_evt_len - bt_service.read_offset, len);
++
++	SCSC_TAG_DEBUG(BT_H4, "SCSC_IQ_REPORT_EVT_READ: td(h4_iq_len=%u offset=%u)\n",
++								h4_iq_report_evt_len,
++								bt_service.read_offset);
++
++	/* Copy the data to the user buffer */
++	ret = scsc_bt_copy_to(buf, &h4_iq_report_evt[bt_service.read_offset], len);
++	if (ret == 0) {
++		/* All good - Update our consumed information */
++		bt_service.read_offset += len;
++		consumed = len;
++
++		SCSC_TAG_DEBUG(BT_H4, "SCSC_IQ_REPORT_EVT_READ: (offset=%u consumed: %u)\n",
++									bt_service.read_offset,
++									consumed);
++
++		/* Have all data been copied to the userspace buffer */
++		if (bt_service.read_offset == h4_iq_report_evt_len) {
++			/* All good - read operation is completed */
++			bt_service.read_offset = 0;
++			bt_service.read_operation = BT_READ_OP_NONE;
++		}
++	} else {
++		SCSC_TAG_ERR(BT_H4, "copy returned: %zu\n", ret);
++		ret = -EACCES;
++	}
++
++	return ret == 0 ? consumed : ret;
++}
++
++static ssize_t scsc_hci_evt_read(char *buf, size_t len)
++{
++	struct BSMHCP_TD_HCI_EVT *td = &bt_service.bsmhcp_protocol->hci_evt_transfer_ring[bt_service.read_index];
++	u8                       h4_hci_event_header = HCI_EVENT_PKT;
++	ssize_t                  consumed = 0;
++	ssize_t                  ret = 0;
++
++	SCSC_TAG_DEBUG(BT_H4, "td (length=%u, hci_connection_handle=0x%03x, event_type=%u), len=%zu, read_offset=%zu\n",
++		       td->length, td->hci_connection_handle, td->event_type, len, bt_service.read_offset);
++
++	/* Is this the start of the copy operation */
++	if (0 == bt_service.read_offset) {
++		SCSC_TAG_DEBUG(BT_RX, "HCI Event [type=%s (0x%02x), length=%u]\n",
++			scsc_hci_evt_decode_event_code(td->data[0], td->data[2]), td->data[0], td->data[1]);
++
++		if (td->data[1] + HCI_EVENT_HEADER_LENGTH != td->length) {
++			SCSC_TAG_ERR(BT_H4, "Firmware sent invalid HCI event\n");
++			atomic_inc(&bt_service.error_count);
++			ret = -EFAULT;
++		}
++
++		/* Store the H4 header in the user buffer */
++		ret = scsc_bt_copy_to(buf, &h4_hci_event_header, sizeof(h4_hci_event_header));
++		if (0 == ret) {
++			/* All good - Update our consumed information */
++			consumed = sizeof(h4_hci_event_header);
++			bt_service.read_offset = sizeof(h4_hci_event_header);
++		} else {
++			SCSC_TAG_WARNING(BT_H4, "copy returned: %zu\n", ret);
++			ret = -EACCES;
++		}
++	}
++
++	/* Can more data be put into the userspace buffer */
++	if (0 == ret && (len - consumed)) {
++		/* Calculate the amount of data that can be transferred */
++		len = min((td->length - (bt_service.read_offset - sizeof(h4_hci_event_header))), (len - consumed));
++
++		/* Copy the data to the user buffer */
++		ret = scsc_bt_copy_to(&buf[consumed], &td->data[bt_service.read_offset - sizeof(h4_hci_event_header)], len);
++		if (0 == ret) {
++			/* All good - Update our consumed information */
++			bt_service.read_offset += len;
++			consumed += len;
++
++			/* Have all data been copied to the userspace buffer */
++			if (bt_service.read_offset == (sizeof(h4_hci_event_header) + td->length)) {
++				/* All good - read operation is completed */
++				bt_service.read_offset = 0;
++				bt_service.read_operation = BT_READ_OP_NONE;
++			}
++		} else {
++			SCSC_TAG_WARNING(BT_H4, "copy returned: %zu\n", ret);
++			ret = -EACCES;
++		}
++	}
++
++	return 0 == ret ? consumed : ret;
++}
++
++static ssize_t scsc_hci_evt_error_read(char *buf, size_t len)
++{
++	ssize_t ret;
++	ssize_t consumed = 0;
++
++	/* Calculate the amount of data that can be transferred */
++	len = min(sizeof(h4_hci_event_hardware_error) - bt_service.read_offset, len);
++
++	/* Copy the data to the user buffer */
++	ret = scsc_bt_copy_to(buf, &h4_hci_event_hardware_error[bt_service.read_offset], len);
++	if (0 == ret) {
++		/* All good - Update our consumed information */
++		bt_service.read_offset += len;
++		consumed = len;
++
++		/* Have all data been copied to the userspace buffer */
++		if (bt_service.read_offset == sizeof(h4_hci_event_hardware_error)) {
++			/* All good - read operation is completed */
++			bt_service.read_offset = 0;
++			bt_service.read_operation = BT_READ_OP_NONE;
++#ifdef CONFIG_SCSC_LOG_COLLECTION
++			if (bt_service.recovery_level == 0)
++				scsc_log_collector_schedule_collection(
++					SCSC_LOG_HOST_BT,
++					SCSC_LOG_HOST_BT_REASON_HCI_ERROR);
++#endif
++		}
++	} else {
++		SCSC_TAG_WARNING(BT_H4, "copy returned: %zu\n", ret);
++		ret = -EACCES;
++	}
++
++	return 0 == ret ? consumed : ret;
++}
++
++static ssize_t scsc_acl_read(char *buf, size_t len)
++{
++	struct BSMHCP_TD_ACL_RX *td = &bt_service.bsmhcp_protocol->acl_rx_transfer_ring[bt_service.read_index];
++	ssize_t                 consumed = 0;
++	size_t                  copy_len = 0;
++	ssize_t                 ret = 0;
++
++	SCSC_TAG_DEBUG(BT_H4, "td (length=%u, hci_connection_handle=0x%03x, packet_boundary=%u, broadcast_flag=%u), len=%zu, read_offset=%zu\n",
++		       td->length, td->hci_connection_handle, td->packet_boundary, td->broadcast_flag, len, bt_service.read_offset);
++
++	/* Has the header been copied to userspace */
++	if (bt_service.read_offset < sizeof(h4_acl_header)) {
++		/* Calculate the amount of data that can be transferred */
++		copy_len = min(sizeof(h4_acl_header) - bt_service.read_offset, len);
++
++		/* Fully generate the H4 header + ACL data header regardless of the available amount of user memory */
++		h4_acl_header[0] = HCI_ACLDATA_PKT;
++		h4_acl_header[1] = td->hci_connection_handle & 0x00ff;
++		h4_acl_header[2] = ((td->hci_connection_handle & 0x0f00) >> 8) | ((td->packet_boundary & 0x03) << 4) | ((td->broadcast_flag & 0x03) << 6);
++		h4_acl_header[3] = td->length & 0x00ff;
++		h4_acl_header[4] = (td->length & 0xff00) >> 8;
++
++		/* Copy the H4 header + ACL data header to the userspace buffer */
++		ret = scsc_bt_copy_to(buf, &h4_acl_header[bt_service.read_offset], copy_len);
++		if (0 == ret) {
++			/* All good - Update our consumed information */
++			consumed = copy_len;
++			bt_service.read_offset += copy_len;
++		} else {
++			SCSC_TAG_WARNING(BT_H4, "copy returned: %zu\n", ret);
++			ret = -EACCES;
++		}
++	}
++
++	/* Can more data be put into the userspace buffer */
++	if (0 == ret && bt_service.read_offset >= sizeof(h4_acl_header) && (len - consumed)) {
++		/* Calculate the amount of data that can be transferred */
++		copy_len = min((td->length - (bt_service.read_offset - sizeof(h4_acl_header))), (len - consumed));
++
++		/* Copy the data to the user buffer */
++		ret = scsc_bt_copy_to(&buf[consumed], &td->data[bt_service.read_offset - sizeof(h4_acl_header)], copy_len);
++		if (0 == ret) {
++			/* All good - Update our consumed information */
++			bt_service.read_offset += copy_len;
++			consumed += copy_len;
++
++			/* Have all data been copied to the userspace buffer */
++			if (bt_service.read_offset == (sizeof(h4_acl_header) + td->length)) {
++				/* All good - read operation is completed */
++				bt_service.read_offset = 0;
++				bt_service.read_operation = BT_READ_OP_NONE;
++
++				/* Only supported on start packet*/
++				if (td->packet_boundary == HCI_ACL_PACKET_BOUNDARY_START_FLUSH)
++					/* The "false" argument is to tell the detection that this is RX */
++					scsc_avdtp_detect_rxtx(td->hci_connection_handle, td->data, td->length, false);
++			}
++		} else {
++			SCSC_TAG_WARNING(BT_H4, "copy returned: %zu\n", ret);
++			ret = -EACCES;
++		}
++	}
++
++	SCSC_TAG_DEBUG(BT_H4, "read_offset=%zu, consumed=%zu, ret=%zd, len=%zu, copy_len=%zu\n",
++		       bt_service.read_offset, consumed, ret, len, copy_len);
++
++	return 0 == ret ? consumed : ret;
++}
++
++static ssize_t scsc_acl_credit(char *buf, size_t len)
++{
++	ssize_t                      consumed = 0;
++	ssize_t                      ret = 0;
++
++	SCSC_TAG_DEBUG(BT_H4, "len=%zu, read_offset=%zu\n", len, bt_service.read_offset);
++
++	/* Calculate the amount of data that can be transferred */
++	len = min(h4_hci_event_ncp_header_len - bt_service.read_offset, len);
++
++	/* Copy the data to the user buffer */
++	ret = scsc_bt_copy_to(buf, &h4_hci_event_ncp_header[bt_service.read_offset], len);
++	if (0 == ret) {
++		/* All good - Update our consumed information */
++		bt_service.read_offset += len;
++		consumed = len;
++
++		/* Have all data been copied to the userspace buffer */
++		if (bt_service.read_offset == h4_hci_event_ncp_header_len) {
++			/* All good - read operation is completed */
++			bt_service.read_offset = 0;
++			bt_service.read_operation = BT_READ_OP_NONE;
++		}
++	} else {
++		SCSC_TAG_WARNING(BT_H4, "copy returned: %zu\n", ret);
++		ret = -EACCES;
++	}
++
++	return 0 == ret ? consumed : ret;
++}
++
++static ssize_t scsc_bt_shm_h4_read_continue(char *buf, size_t len)
++{
++	ssize_t ret = 0;
++
++	/* Is a HCI event read operation ongoing */
++	if (BT_READ_OP_HCI_EVT == bt_service.read_operation) {
++		SCSC_TAG_DEBUG(BT_H4, "BT_READ_OP_HCI_EVT\n");
++
++		/* Copy data into the userspace buffer */
++		ret = scsc_hci_evt_read(buf, len);
++		if (BT_READ_OP_NONE == bt_service.read_operation)
++			/* All done - increase the read pointer and continue
++			 * unless this was an out-of-order read for the queue
++			 * sync helper */
++			if (bt_service.read_index == bt_service.mailbox_hci_evt_read)
++				BSMHCP_INCREASE_INDEX(bt_service.mailbox_hci_evt_read, BSMHCP_TRANSFER_RING_EVT_SIZE);
++		/* Is a ACL data read operation ongoing */
++	} else if (BT_READ_OP_ACL_DATA == bt_service.read_operation) {
++		SCSC_TAG_DEBUG(BT_H4, "BT_READ_OP_ACL_DATA\n");
++
++		/* Copy data into the userspace buffer */
++		ret = scsc_acl_read(buf, len);
++		if (BT_READ_OP_NONE == bt_service.read_operation)
++			/* All done - increase the read pointer and continue */
++			BSMHCP_INCREASE_INDEX(bt_service.mailbox_acl_rx_read, BSMHCP_TRANSFER_RING_ACL_SIZE);
++		/* Is a ACL credit update operation ongoing */
++	} else if (BT_READ_OP_ACL_CREDIT == bt_service.read_operation) {
++		SCSC_TAG_DEBUG(BT_H4, "BT_READ_OP_ACL_CREDIT\n");
++
++		/* Copy data into the userspace buffer */
++		ret = scsc_acl_credit(buf, len);
++	} else if (bt_service.read_operation == BT_READ_OP_IQ_REPORT) {
++		SCSC_TAG_DEBUG(BT_H4, "BT_READ_OP_IQ_REPORT\n");
++
++		/* Copy data into the userspace buffer */
++		ret = scsc_iq_report_evt_read(buf, len);
++		if (bt_service.read_operation == BT_READ_OP_NONE)
++			/* All done - increase the read pointer and continue */
++			BSMHCP_INCREASE_INDEX(bt_service.mailbox_iq_report_read, BSMHCP_TRANSFER_RING_IQ_REPORT_SIZE);
++	} else if (BT_READ_OP_HCI_EVT_ERROR == bt_service.read_operation) {
++		SCSC_TAG_ERR(BT_H4, "BT_READ_OP_HCI_EVT_ERROR\n");
++
++		/* Copy data into the userspace buffer */
++		ret = scsc_hci_evt_error_read(buf, len);
++		if (BT_READ_OP_NONE == bt_service.read_operation)
++			/* All done - set the stop condition */
++			bt_service.read_operation = BT_READ_OP_STOP;
++	} else if (BT_READ_OP_STOP == bt_service.read_operation)
++		ret = -EIO;
++
++	return ret;
++}
++
++static ssize_t scsc_bt_shm_h4_read_iq_report_evt(char *buf, size_t len)
++{
++	ssize_t ret = 0;
++	ssize_t consumed = 0;
++
++	if (bt_service.read_operation == BT_READ_OP_NONE &&
++	    bt_service.mailbox_iq_report_read != bt_service.mailbox_iq_report_write) {
++		struct BSMHCP_TD_IQ_REPORTING_EVT *td =
++			&bt_service.bsmhcp_protocol->iq_reporting_transfer_ring[bt_service.mailbox_iq_report_read];
++		u32 index = 0;
++		u32 j = 0;
++		u32 i;
++
++		if (!bt_service.iq_reports_enabled)
++		{
++			BSMHCP_INCREASE_INDEX(bt_service.mailbox_iq_report_read,
++			BSMHCP_TRANSFER_RING_IQ_REPORT_SIZE);
++		}
++		else
++		{
++			memset(h4_iq_report_evt, 0, sizeof(h4_iq_report_evt));
++			h4_iq_report_evt_len = 0;
++
++			h4_iq_report_evt[index++] = HCI_EVENT_PKT;
++			h4_iq_report_evt[index++] = 0x3E;
++			index++; /* Leaving room for total length of params  */
++			h4_iq_report_evt[index++] = td->subevent_code;
++
++			if (td->subevent_code == HCI_LE_CONNECTIONLESS_IQ_REPORT_EVENT_SUB_CODE) {
++				/* LE Connectionless IQ Report Event*/
++				h4_iq_report_evt[index++] = td->sync_handle & 0xFF;
++				h4_iq_report_evt[index++] = (td->sync_handle >> 8) & 0xFF;
++			} else if (td->subevent_code == HCI_LE_CONNECTION_IQ_REPORT_EVENT_SUB_CODE) {
++				/* LE connection IQ Report Event */
++				h4_iq_report_evt[index++] = td->connection_handle & 0xFF;
++				h4_iq_report_evt[index++] = (td->connection_handle >> 8) & 0xFF;
++				h4_iq_report_evt[index++] = td->rx_phy;
++
++			}
++			h4_iq_report_evt[index++] = td->channel_index;
++			h4_iq_report_evt[index++] = td->rssi & 0xFF;
++			h4_iq_report_evt[index++] = (td->rssi >> 8) & 0xFF;
++			h4_iq_report_evt[index++] = td->rssi_antenna_id;
++			h4_iq_report_evt[index++] = td->cte_type;
++			h4_iq_report_evt[index++] = td->slot_durations;
++			h4_iq_report_evt[index++] = td->packet_status;
++			h4_iq_report_evt[index++] = td->sample_count;
++
++			/* Total length of hci event */
++			h4_iq_report_evt_len = index + (2 * td->sample_count);
++
++			/* Total length of hci event parameters */
++			h4_iq_report_evt[2] = h4_iq_report_evt_len - 3;
++
++			for (i = 0; i < td->sample_count; i++) {
++				h4_iq_report_evt[index + i] = td->data[j++];
++				h4_iq_report_evt[(index + td->sample_count) + i] = td->data[j++];
++			}
++
++			bt_service.read_operation = BT_READ_OP_IQ_REPORT;
++			bt_service.read_index = bt_service.mailbox_iq_report_read;
++
++			ret = scsc_iq_report_evt_read(&buf[consumed], len - consumed);
++			if (ret > 0) {
++				/* All good - Update our consumed information */
++				consumed += ret;
++				ret = 0;
++
++				/**
++				 * Update the index if all the data could be copied to the userspace
++				 * buffer otherwise stop processing the HCI events
++				 */
++				if (bt_service.read_operation == BT_READ_OP_NONE)
++					BSMHCP_INCREASE_INDEX(bt_service.mailbox_iq_report_read,
++									  BSMHCP_TRANSFER_RING_IQ_REPORT_SIZE);
++			}
++		}
++	}
++
++	return ret == 0 ? consumed : ret;
++}
++
++static ssize_t scsc_bt_shm_h4_read_hci_evt(char *buf, size_t len)
++{
++	ssize_t ret = 0;
++	ssize_t consumed = 0;
++
++	while (BT_READ_OP_NONE == bt_service.read_operation && 0 == ret && !bt_service.hci_event_paused && bt_service.mailbox_hci_evt_read != bt_service.mailbox_hci_evt_write) {
++		struct BSMHCP_TD_HCI_EVT *td = &bt_service.bsmhcp_protocol->hci_evt_transfer_ring[bt_service.mailbox_hci_evt_read];
++
++		/* This event has already been processed - skip it */
++		if (bt_service.processed[bt_service.mailbox_hci_evt_read]) {
++			bt_service.processed[bt_service.mailbox_hci_evt_read] = false;
++			BSMHCP_INCREASE_INDEX(bt_service.mailbox_hci_evt_read, BSMHCP_TRANSFER_RING_EVT_SIZE);
++			continue;
++		}
++
++		/* A connection event has been detected by the firmware */
++		if (td->event_type == BSMHCP_EVENT_TYPE_CONNECTED) {
++			/* Sanity check of the HCI connection handle */
++			if (td->hci_connection_handle >= SCSC_BT_CONNECTION_INFO_MAX) {
++				SCSC_TAG_ERR(BT_H4, "connection handle is beyond max (hci_connection_handle=0x%03x)\n",
++					     td->hci_connection_handle);
++				atomic_inc(&bt_service.error_count);
++				break;
++			}
++
++			SCSC_TAG_DEBUG(BT_H4, "connected (hci_connection_handle=0x%03x, state=%u)\n",
++				       td->hci_connection_handle, bt_service.connection_handle_list[td->hci_connection_handle].state);
++
++			/* Update the connection table to mark it as active */
++			bt_service.connection_handle_list[td->hci_connection_handle].state = CONNECTION_ACTIVE;
++			bt_service.connection_handle_list[td->hci_connection_handle].length = 0;
++
++			/* ACL data processing can now continue */
++			bt_service.acldata_paused = false;
++
++			/* A disconnection event has been detected by the firmware */
++		} else if (td->event_type == BSMHCP_EVENT_TYPE_DISCONNECTED) {
++			SCSC_TAG_DEBUG(BT_H4, "disconnected (hci_connection_handle=0x%03x, state=%u)\n",
++				       td->hci_connection_handle, bt_service.connection_handle_list[td->hci_connection_handle].state);
++
++			/* If this ACL connection had an avdtp stream, mark it gone and interrupt the bg */
++			if (scsc_avdtp_detect_reset_connection_handle(td->hci_connection_handle))
++				wmb();
++
++			/* If the connection is marked as active the ACL disconnect packet hasn't yet arrived */
++			if (CONNECTION_ACTIVE == bt_service.connection_handle_list[td->hci_connection_handle].state) {
++				/* Pause the HCI event procssing until the ACL disconnect packet arrives */
++				bt_service.hci_event_paused = true;
++				break;
++			}
++
++			/* Firmware does not have more ACL data - Mark the connection as inactive */
++			bt_service.connection_handle_list[td->hci_connection_handle].state = CONNECTION_NONE;
++		} else if (td->event_type == BSMHCP_EVENT_TYPE_IQ_REPORT_ENABLED) {
++			bt_service.iq_reports_enabled = true;
++		} else if (td->event_type == BSMHCP_EVENT_TYPE_IQ_REPORT_DISABLED) {
++			bt_service.iq_reports_enabled = false;
++		}
++
++		/* Start a HCI event copy to userspace */
++		bt_service.read_operation = BT_READ_OP_HCI_EVT;
++		bt_service.read_index = bt_service.mailbox_hci_evt_read;
++		ret = scsc_hci_evt_read(&buf[consumed], len - consumed);
++		if (ret > 0) {
++			/* All good - Update our consumed information */
++			consumed += ret;
++			ret = 0;
++
++			/* Update the index if all the data could be copied to the userspace buffer otherwise stop processing the HCI events */
++			if (BT_READ_OP_NONE == bt_service.read_operation)
++				BSMHCP_INCREASE_INDEX(bt_service.mailbox_hci_evt_read, BSMHCP_TRANSFER_RING_EVT_SIZE);
++			else
++				break;
++		}
++	}
++
++	return 0 == ret ? consumed : ret;
++}
++
++/**
++ * Start the acl data to userspace copy
++ *
++ * Acl processing should be stopped if either unable to read a complete packet
++ * or a complete packet is read and BlueZ is enabled
++ *
++ * @param[out]    ret      result of read operations written to here
++ * @param[in,out] consumed read bytes added to this
++ *
++ * @return true if ACL data processing should stop
++ */
++static bool scsc_bt_shm_h4_acl_start_copy(char *buf,
++	size_t len,
++	ssize_t *ret,
++	ssize_t *consumed)
++{
++	bt_service.read_operation = BT_READ_OP_ACL_DATA;
++	bt_service.read_index = bt_service.mailbox_acl_rx_read;
++	*ret = scsc_acl_read(&buf[*consumed], len - *consumed);
++	if (*ret <= 0)
++		return *ret < 0; /* Break the loop for errors */
++
++	/* Update our consumed information */
++	*consumed += *ret;
++	*ret = 0;
++
++	/* Stop processing if all the data could not be copied to userspace */
++	if (bt_service.read_operation != BT_READ_OP_NONE)
++		return true;
++
++	BSMHCP_INCREASE_INDEX(bt_service.mailbox_acl_rx_read, BSMHCP_TRANSFER_RING_ACL_SIZE);
++
++	return false;
++}
++
++static ssize_t scsc_bt_shm_h4_read_acl_data(char *buf, size_t len)
++{
++	ssize_t ret = 0;
++	ssize_t consumed = 0;
++
++	while (bt_service.read_operation == BT_READ_OP_NONE &&
++	       !bt_service.acldata_paused &&
++	       bt_service.mailbox_acl_rx_read != bt_service.mailbox_acl_rx_write) {
++		struct BSMHCP_TD_ACL_RX *td = &bt_service.bsmhcp_protocol->acl_rx_transfer_ring[bt_service.mailbox_acl_rx_read];
++
++		/* Bypass packet inspection and connection handling for data dump */
++		if (SCSC_BT_ACL_RAW == (td->hci_connection_handle & SCSC_BT_ACL_RAW_MASK)) {
++			if (scsc_bt_shm_h4_acl_start_copy(buf, len, &ret, &consumed))
++				break;
++		}
++
++		/* Sanity check of the HCI connection handle */
++		if (td->hci_connection_handle >= SCSC_BT_CONNECTION_INFO_MAX) {
++			SCSC_TAG_ERR(BT_H4, "connection handle is beyond max (hci_connection_handle=0x%03x)\n",
++				     td->hci_connection_handle);
++			atomic_inc(&bt_service.error_count);
++			break;
++		}
++
++		/* Only process ACL data if the connection is marked active aka a HCI connection complete event has arrived */
++		if (CONNECTION_ACTIVE == bt_service.connection_handle_list[td->hci_connection_handle].state) {
++			/* Is this the final packet for the indicated ACL connection */
++			if (td->disconnected) {
++				SCSC_TAG_DEBUG(BT_H4, "ACL disconnected (hci_connection_handle=0x%03x, state=%u)\n",
++					       td->hci_connection_handle, bt_service.connection_handle_list[td->hci_connection_handle].state);
++
++				/* Update the connection table to mark it as disconnected */
++				bt_service.connection_handle_list[td->hci_connection_handle].state = CONNECTION_DISCONNECTED;
++
++				/* Clear the HCI event processing to allow for the HCI disconnect event to be transferred to userspace */
++				bt_service.hci_event_paused = false;
++
++				/* Update the read pointer */
++				BSMHCP_INCREASE_INDEX(bt_service.mailbox_acl_rx_read, BSMHCP_TRANSFER_RING_ACL_SIZE);
++			} else {
++				if (scsc_bt_shm_h4_acl_start_copy(buf, len, &ret, &consumed))
++					break;
++			}
++			/* If the connection state is inactive the HCI connection complete information hasn't yet arrived. Stop processing ACL data */
++		} else if (CONNECTION_NONE == bt_service.connection_handle_list[td->hci_connection_handle].state) {
++			SCSC_TAG_DEBUG(BT_H4, "ACL empty (hci_connection_handle=0x%03x, state=%u)\n",
++				       td->hci_connection_handle, bt_service.connection_handle_list[td->hci_connection_handle].state);
++			bt_service.acldata_paused = true;
++			/* If the connection state is disconnection the firmware sent ACL after the ACL disconnect packet which is an FW error */
++		} else {
++			SCSC_TAG_ERR(BT_H4, "ACL data received after disconnected indication\n");
++			atomic_inc(&bt_service.error_count);
++			break;
++		}
++	}
++
++	return 0 == ret ? consumed : ret;
++}
++
++static ssize_t scsc_bt_shm_h4_read_acl_credit(char *buf, size_t len)
++{
++	ssize_t ret = 0;
++	ssize_t consumed = 0;
++
++	if (BT_READ_OP_NONE == bt_service.read_operation && 0 == ret &&
++	    bt_service.mailbox_acl_free_read != bt_service.mailbox_acl_free_write) {
++		u32 entries = 0;
++		u32 index;
++
++		memset(h4_hci_event_ncp_header, 0, sizeof(h4_hci_event_ncp_header));
++
++		while (bt_service.mailbox_acl_free_read != bt_service.mailbox_acl_free_write) {
++			struct BSMHCP_TD_ACL_TX_FREE *td =
++			    &bt_service.bsmhcp_protocol->acl_tx_free_transfer_ring[bt_service.mailbox_acl_free_read];
++			uint16_t sanitized_conn_handle = td->hci_connection_handle & SCSC_BT_ACL_HANDLE_MASK;
++
++			if (bt_service.connection_handle_list[sanitized_conn_handle].state == CONNECTION_ACTIVE) {
++				SCSC_TAG_DEBUG(BT_H4, "td (hci_connection_handle=0x%03x, buffer_index=%u)\n",
++					td->hci_connection_handle & SCSC_BT_ACL_HANDLE_MASK, td->buffer_index);
++
++				for (index = 0; index < BSMHCP_TRANSFER_RING_ACL_COUNT; index++) {
++					if (0 == h4_hci_credit_entries[index].hci_connection_handle) {
++						h4_hci_credit_entries[index].hci_connection_handle =
++						    td->hci_connection_handle;
++						h4_hci_credit_entries[index].credits = 1;
++						entries++;
++						break;
++					} else if ((h4_hci_credit_entries[index].hci_connection_handle &
++						    SCSC_BT_ACL_HANDLE_MASK) == sanitized_conn_handle) {
++						h4_hci_credit_entries[index].hci_connection_handle =
++						    td->hci_connection_handle;
++						h4_hci_credit_entries[index].credits++;
++						break;
++					}
++				}
++			} else
++				SCSC_TAG_WARNING(BT_H4,
++					"No active connection ((hci_connection_handle=0x%03x)\n",
++					sanitized_conn_handle);
++
++			BSMHCP_INCREASE_INDEX(bt_service.mailbox_acl_free_read, BSMHCP_TRANSFER_RING_ACL_SIZE);
++		}
++
++		if (entries) {
++			/* Fill the number of completed packets data into the temp buffer */
++			h4_hci_event_ncp_header[0] = HCI_EVENT_PKT;
++			h4_hci_event_ncp_header[1] = HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS_EVENT;
++			h4_hci_event_ncp_header[2] = 1 + (4 * entries);                           /* Parameter length */
++			h4_hci_event_ncp_header[3] = entries;                                     /* Number_of_Handles */
++			h4_hci_event_ncp_header_len = 4 + (4 * entries);
++
++			/* Start a ACL credit copy to userspace */
++			bt_service.read_operation = BT_READ_OP_ACL_CREDIT;
++			bt_service.read_index = bt_service.mailbox_acl_free_read;
++			ret = scsc_acl_credit(&buf[consumed], len - consumed);
++			if (ret > 0) {
++				/* Update our consumed information */
++				consumed += ret;
++				ret = 0;
++			}
++		}
++	}
++
++	return 0 == ret ? consumed : ret;
++}
++
++ssize_t scsc_bt_shm_h4_queue_sync_helper(char *buf, size_t len)
++{
++	ssize_t ret = 0;
++	bool    found = false;
++	u32     mailbox_hci_evt_read = bt_service.mailbox_hci_evt_read;
++
++	/* If both the HCI event transfer ring and ACL data transfer ring has been
++	 * paused the entire HCI event transfer ring is scanned for the presence
++	 * of the connected indication. Once present this is transferred to the host
++	 * stack and marked as processed. This will unlock the hci event processing */
++	while (bt_service.hci_event_paused && bt_service.acldata_paused) {
++		struct BSMHCP_TD_ACL_RX *acl_td = &bt_service.bsmhcp_protocol->acl_rx_transfer_ring[bt_service.mailbox_acl_rx_read];
++
++		while (mailbox_hci_evt_read != bt_service.mailbox_hci_evt_write) {
++			struct BSMHCP_TD_HCI_EVT *td = &bt_service.bsmhcp_protocol->hci_evt_transfer_ring[mailbox_hci_evt_read];
++
++			if (td->event_type & BSMHCP_EVENT_TYPE_CONNECTED && acl_td->hci_connection_handle == td->hci_connection_handle) {
++				/* Update the connection table to mark it as active */
++				bt_service.connection_handle_list[td->hci_connection_handle].state = CONNECTION_ACTIVE;
++				bt_service.connection_handle_list[td->hci_connection_handle].length = 0;
++
++				/* ACL data processing can now continue */
++				bt_service.acldata_paused = false;
++
++				/* Mark the event as processed */
++				bt_service.processed[mailbox_hci_evt_read] = true;
++
++				/* Indicate the event have been found */
++				found = true;
++
++				/* Start a HCI event copy to userspace */
++				bt_service.read_operation = BT_READ_OP_HCI_EVT;
++				bt_service.read_index = mailbox_hci_evt_read;
++				ret = scsc_hci_evt_read(buf, len);
++				break;
++			}
++
++			BSMHCP_INCREASE_INDEX(mailbox_hci_evt_read, BSMHCP_TRANSFER_RING_EVT_SIZE);
++		}
++
++		if (!found) {
++			ret = wait_event_interruptible_timeout(bt_service.read_wait,
++							       ((mailbox_hci_evt_read != bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write ||
++								 0 != atomic_read(&bt_service.error_count) ||
++								 bt_service.bsmhcp_protocol->header.panic_deathbed_confession)), HZ);
++			if (0 == ret) {
++				SCSC_TAG_ERR(BT_H4, "firmware didn't send the connected event within the given timeframe\n");
++				atomic_inc(&bt_service.error_count);
++				break;
++			} else if (1 != ret) {
++				SCSC_TAG_INFO(BT_H4, "user interrupt\n");
++				break;
++			}
++		}
++	}
++
++	return ret;
++}
++
++ssize_t scsc_bt_shm_h4_read(struct file *file, char *buf, size_t len, loff_t *offset)
++{
++	ssize_t consumed = 0;
++	ssize_t ret = 0;
++	ssize_t res;
++	bool    gen_bg_int = false;
++	bool    gen_fg_int = false;
++
++	if (len == 0)
++		return 0;
++
++	/* Only 1 reader is allowed */
++	if (1 != atomic_inc_return(&bt_service.h4_readers)) {
++		atomic_dec(&bt_service.h4_readers);
++		return -EIO;
++	}
++
++	/* Update the cached variables with the non-cached variables */
++	bt_service.mailbox_hci_evt_write  = bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write;
++	bt_service.mailbox_acl_rx_write   = bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write;
++	bt_service.mailbox_acl_free_write = bt_service.bsmhcp_protocol->header.mailbox_acl_free_write;
++	bt_service.mailbox_iq_report_write = bt_service.bsmhcp_protocol->header.mailbox_iq_report_write;
++
++	/* Only generate the HCI hardware error event if any pending operation has been completed
++	 * and the event hasn't already neen sent. This check assume the main while loop will exit
++	 * on a completed operation in the next section */
++	if (0 != atomic_read(&bt_service.error_count) && BT_READ_OP_NONE == bt_service.read_operation)
++		bt_service.read_operation = BT_READ_OP_HCI_EVT_ERROR;
++
++	/* put the remaining data from the transfer ring into the available userspace buffer */
++	if (BT_READ_OP_NONE != bt_service.read_operation) {
++		ret = scsc_bt_shm_h4_read_continue(buf, len);
++		/* Update the consumed variable in case a operation was ongoing */
++		if (0 < ret) {
++			consumed = ret;
++			ret = 0;
++		}
++	}
++
++	/* Main loop - Can only be entered when no operation is present on entering this function
++	 * or no hardware error has been detected. It loops until data has been placed in the
++	 * userspace buffer or an error has been detected */
++	while (0 == atomic_read(&bt_service.error_count) && 0 == consumed) {
++		/* If both the HCI event processing and ACL data processing has been disabled this function
++		 * helps exit this condition by scanning the HCI event queue for the connection established
++		 * event and return it to userspace */
++		ret = scsc_bt_shm_h4_queue_sync_helper(buf, len);
++		if (ret > 0) {
++			consumed = ret;
++			break;
++		}
++
++		/* Does any of the read/write pairs differs */
++		if ((bt_service.mailbox_hci_evt_read == bt_service.mailbox_hci_evt_write || bt_service.hci_event_paused) &&
++		    (bt_service.mailbox_acl_rx_read == bt_service.mailbox_acl_rx_write || bt_service.acldata_paused) &&
++		    bt_service.mailbox_acl_free_read == bt_service.mailbox_acl_free_write &&
++		    bt_service.mailbox_iq_report_read == bt_service.mailbox_iq_report_write &&
++		    0 == atomic_read(&bt_service.error_count) &&
++		    0 == bt_service.bsmhcp_protocol->header.panic_deathbed_confession) {
++			/* Don't wait if in NONBLOCK mode */
++			if (file->f_flags & O_NONBLOCK) {
++				ret = -EAGAIN;
++				break;
++			}
++
++			/* All read/write pairs are identical - wait for the firmware. The conditional
++			 * check is used to verify that a read/write pair has actually changed */
++			ret = wait_event_interruptible(
++				bt_service.read_wait,
++				((bt_service.mailbox_hci_evt_read !=
++				  bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write &&
++				  !bt_service.hci_event_paused) ||
++				 (bt_service.mailbox_acl_rx_read !=
++				  bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write &&
++				  !bt_service.acldata_paused) ||
++				 (bt_service.mailbox_acl_free_read !=
++				  bt_service.bsmhcp_protocol->header.mailbox_acl_free_write) ||
++				 (bt_service.mailbox_iq_report_read !=
++				  bt_service.bsmhcp_protocol->header.mailbox_iq_report_write) ||
++				 atomic_read(&bt_service.error_count) != 0 ||
++				 bt_service.bsmhcp_protocol->header.panic_deathbed_confession));
++
++			/* Has an error been detected elsewhere in the driver then just return from this function */
++			if (0 != atomic_read(&bt_service.error_count))
++				break;
++
++			/* Any failures is handled by the userspace application */
++			if (ret)
++				break;
++
++			/* Refresh our write indexes before starting to process the protocol */
++			bt_service.mailbox_hci_evt_write = bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write;
++			bt_service.mailbox_acl_rx_write = bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write;
++			bt_service.mailbox_acl_free_write = bt_service.bsmhcp_protocol->header.mailbox_acl_free_write;
++			bt_service.mailbox_iq_report_write = bt_service.bsmhcp_protocol->header.mailbox_iq_report_write;
++		}
++
++		SCSC_TAG_DEBUG(BT_H4, "hci_evt_read=%u, hci_evt_write=%u, acl_rx_read=%u,acl_rx_write=%u\n",
++									bt_service.mailbox_hci_evt_read,
++									bt_service.mailbox_hci_evt_write,
++									bt_service.mailbox_acl_rx_read,
++									bt_service.mailbox_acl_rx_write);
++
++		SCSC_TAG_DEBUG(BT_H4, "acl_free_read=%u, acl_free_write=%u, iq_report_read=%u iq_report_write=%u\n",
++									bt_service.mailbox_acl_free_read,
++									bt_service.mailbox_acl_free_write,
++									bt_service.mailbox_iq_report_read,
++									bt_service.mailbox_iq_report_write);
++
++		SCSC_TAG_DEBUG(BT_H4, "read_operation=%u, hci_event_paused=%u, acldata_paused=%u\n",
++			       bt_service.read_operation, bt_service.hci_event_paused,
++			       bt_service.acldata_paused);
++
++		while (bt_service.mailbox_acl_free_read_scan != bt_service.mailbox_acl_free_write) {
++			struct BSMHCP_TD_ACL_TX_FREE *td = &bt_service.bsmhcp_protocol->acl_tx_free_transfer_ring[bt_service.mailbox_acl_free_read_scan];
++
++			/* Free the buffer in the allocation table */
++			if (td->buffer_index < BSMHCP_DATA_BUFFER_TX_ACL_SIZE) {
++				bt_service.allocated[td->buffer_index] = 0;
++				bt_service.freed_count++;
++
++				SCSC_TAG_DEBUG(BT_TX, "ACL[CREDIT] (index=%u, buffer=%u, credits=%u)\n",
++					bt_service.mailbox_acl_free_read_scan,
++					td->buffer_index,
++					BSMHCP_DATA_BUFFER_TX_ACL_SIZE - (bt_service.allocated_count - bt_service.freed_count));
++			}
++
++			BSMHCP_INCREASE_INDEX(bt_service.mailbox_acl_free_read_scan, BSMHCP_TRANSFER_RING_ACL_SIZE);
++		}
++
++		/* First: process any pending HCI event that needs to be sent to userspace */
++		res = scsc_bt_shm_h4_read_hci_evt(&buf[consumed], len - consumed);
++		if (res < 0) {
++			ret = res;
++			break;
++		}
++		consumed += res;
++
++		/* Second: process any pending ACL data that needs to be sent to userspace */
++		res = scsc_bt_shm_h4_read_acl_data(&buf[consumed], len - consumed);
++		if (res < 0) {
++			ret = res;
++			break;
++		}
++		consumed += res;
++
++		/* Third: process any pending ACL data that needs to be sent to userspace */
++		res = scsc_bt_shm_h4_read_acl_credit(&buf[consumed], len - consumed);
++		if (res < 0) {
++			ret = res;
++			break;
++		}
++		consumed += res;
++
++		res = scsc_bt_shm_h4_read_iq_report_evt(&buf[consumed], len - consumed);
++		if (res < 0) {
++			ret = res;
++			break;
++		}
++		consumed += res;
++	}
++
++	if (0 == ret && 0 == consumed) {
++		if (0 != atomic_read(&bt_service.error_count) && BT_READ_OP_NONE == bt_service.read_operation)
++			bt_service.read_operation = BT_READ_OP_HCI_EVT_ERROR;
++
++		if (BT_READ_OP_HCI_EVT_ERROR == bt_service.read_operation) {
++			SCSC_TAG_ERR(BT_H4, "BT_READ_OP_HCI_EVT_ERROR\n");
++
++			/* Copy data into the userspace buffer */
++			ret = scsc_hci_evt_error_read(buf, len);
++			if (ret > 0) {
++				consumed += ret;
++				ret = 0;
++			}
++
++			if (BT_READ_OP_NONE == bt_service.read_operation)
++				/* All done - set the stop condition */
++				bt_service.read_operation = BT_READ_OP_STOP;
++		}
++	}
++
++	/* If anything was read, generate the appropriate interrupt(s) */
++	if (bt_service.bsmhcp_protocol->header.mailbox_hci_evt_read !=
++	    bt_service.mailbox_hci_evt_read)
++		gen_bg_int = true;
++
++	if (bt_service.bsmhcp_protocol->header.mailbox_acl_rx_read !=
++	    bt_service.mailbox_acl_rx_read ||
++	    bt_service.bsmhcp_protocol->header.mailbox_acl_free_read !=
++	    bt_service.mailbox_acl_free_read)
++		gen_fg_int = true;
++
++	if (bt_service.bsmhcp_protocol->header.mailbox_iq_report_read !=
++	    bt_service.mailbox_iq_report_read)
++		gen_fg_int = true;
++
++
++	/* Update the read index for all transfer rings */
++	bt_service.bsmhcp_protocol->header.mailbox_hci_evt_read = bt_service.mailbox_hci_evt_read;
++	bt_service.bsmhcp_protocol->header.mailbox_acl_rx_read = bt_service.mailbox_acl_rx_read;
++	bt_service.bsmhcp_protocol->header.mailbox_acl_free_read = bt_service.mailbox_acl_free_read;
++	bt_service.bsmhcp_protocol->header.mailbox_iq_report_read = bt_service.mailbox_iq_report_read;
++
++	/* Ensure the data is updating correctly in memory */
++	wmb();
++
++	if (gen_bg_int)
++		scsc_service_mifintrbit_bit_set(bt_service.service, bt_service.bsmhcp_protocol->header.ap_to_bg_int_src, SCSC_MIFINTR_TARGET_R4);
++
++	if (gen_fg_int)
++		/* Trigger the interrupt in the mailbox */
++		scsc_service_mifintrbit_bit_set(bt_service.service,
++						bt_service.bsmhcp_protocol->header.ap_to_fg_int_src, SCSC_MIFINTR_TARGET_R4);
++
++	if (BT_READ_OP_STOP != bt_service.read_operation)
++		SCSC_TAG_DEBUG(BT_H4, "hci_evt_read=%u, acl_rx_read=%u, acl_free_read=%u, read_operation=%u, consumed=%zd, ret=%zd\n",
++			       bt_service.mailbox_hci_evt_read, bt_service.mailbox_acl_rx_read, bt_service.mailbox_acl_free_read, bt_service.read_operation, consumed, ret);
++
++	/* Decrease the H4 readers counter */
++	atomic_dec(&bt_service.h4_readers);
++
++	return 0 == ret ? consumed : ret;
++}
++
++ssize_t scsc_bt_shm_h4_write(struct file *file, const char *buf, size_t count, loff_t *offset)
++{
++	size_t  length;
++	size_t  hci_pkt_len;
++	ssize_t written = 0;
++	ssize_t ret = 0;
++
++	SCSC_TAG_DEBUG(BT_H4, "enter\n");
++
++	UNUSED(file);
++	UNUSED(offset);
++
++	/* Only 1 writer is allowed */
++	if (1 != atomic_inc_return(&bt_service.h4_writers)) {
++		atomic_dec(&bt_service.h4_writers);
++		return -EIO;
++	}
++
++	/* Has en error been detect then just return with an error */
++	if (0 != atomic_read(&bt_service.error_count)) {
++		/* SCSC_TAG_WARNING(BT_H4, "firmware panicked or protocol error (error_count=%u)\n", atomic_read(&bt_service.error_count));*/
++		atomic_dec(&bt_service.h4_writers);
++		return -EIO;
++	}
++
++	while (written != count && 0 == ret) {
++		length = min(count - written, sizeof(h4_write_buffer) - bt_service.h4_write_offset);
++		SCSC_TAG_DEBUG(BT_H4, "count: %zu, length: %zu, h4_write_offset: %zu, written:%zu, size:%zu\n",
++			       count, length, bt_service.h4_write_offset, written, sizeof(h4_write_buffer));
++
++		/* Is there room in the temp buffer */
++		if (0 == length) {
++			SCSC_TAG_ERR(BT_H4, "no room in the buffer\n");
++			atomic_inc(&bt_service.error_count);
++			ret = -EIO;
++			break;
++		}
++
++		/* Copy the userspace data to the target buffer */
++		ret = scsc_bt_copy_from(&h4_write_buffer[bt_service.h4_write_offset], &buf[written], length);
++		if (0 == ret) {
++			/* Is there enough data to include a HCI command header and is the type a HCI_COMMAND_PKT */
++			if ((length + bt_service.h4_write_offset) >= H4DMUX_HEADER_HCI && HCI_COMMAND_PKT == h4_write_buffer[0]) {
++				/* Extract the HCI command packet length */
++				hci_pkt_len = h4_write_buffer[3] + 3;
++
++				/* Is it a complete packet available */
++				if ((hci_pkt_len + 1) <= (length + bt_service.h4_write_offset)) {
++					/* Transfer the packet to the HCI command transfer ring */
++					ret = scsc_bt_shm_h4_hci_cmd_write(&h4_write_buffer[1], hci_pkt_len);
++					if (ret >= 0) {
++						written += ((hci_pkt_len + 1) - bt_service.h4_write_offset);
++						bt_service.h4_write_offset = 0;
++						ret = 0;
++					}
++				} else {
++					/* Still needing data to have the complete packet */
++					SCSC_TAG_WARNING(BT_H4, "missing data (need=%zu, got=%zu)\n", (hci_pkt_len + 1), (length + bt_service.h4_write_offset));
++					written += length;
++					bt_service.h4_write_offset += (u32) length;
++				}
++				/* Is there enough data to include a ACL data header and is the type a HCI_ACLDATA_PKT */
++			} else if ((length + bt_service.h4_write_offset) >= H4DMUX_HEADER_ACL && HCI_ACLDATA_PKT == h4_write_buffer[0]) {
++				/* Extract the ACL data packet length */
++				hci_pkt_len = (h4_write_buffer[3] | (h4_write_buffer[4] << 8));
++
++				/* Sanity check on the packet length */
++				if (hci_pkt_len > BSMHCP_ACL_PACKET_SIZE) {
++					SCSC_TAG_ERR(BT_H4, "ACL packet length is larger than read buffer size specifies (%zu > %u)\n", hci_pkt_len, BSMHCP_ACL_PACKET_SIZE);
++					atomic_inc(&bt_service.error_count);
++					ret = -EIO;
++					break;
++				}
++
++				/* Is it a complete packet available */
++				if ((hci_pkt_len + 5) <= (length + bt_service.h4_write_offset)) {
++					/* Transfer the packet to the ACL data transfer ring */
++					ret = scsc_bt_shm_h4_acl_write(&h4_write_buffer[1], hci_pkt_len + 4);
++					if (ret >= 0) {
++						written += ((hci_pkt_len + 5) - bt_service.h4_write_offset);
++						bt_service.h4_write_offset = 0;
++						ret = 0;
++					}
++				} else {
++					/* Still needing data to have the complete packet */
++					SCSC_TAG_WARNING(BT_H4, "missing data (need=%zu, got=%zu)\n", (hci_pkt_len + 5), (length - bt_service.h4_write_offset));
++					written += length;
++					bt_service.h4_write_offset += (u32) length;
++				}
++				/* Is there less data than a header then just wait for more */
++			} else if (length <= 5) {
++				bt_service.h4_write_offset += length;
++				written += length;
++				/* Header is unknown - unable to proceed */
++			} else {
++				atomic_inc(&bt_service.error_count);
++				ret = -EIO;
++			}
++		} else {
++			SCSC_TAG_WARNING(BT_H4, "copy returned: %zu\n", ret);
++			ret = -EACCES;
++		}
++	}
++
++	SCSC_TAG_DEBUG(BT_H4, "h4_write_offset=%zu, ret=%zu, written=%zu\n",
++		       bt_service.h4_write_offset, ret, written);
++
++	/* Decrease the H4 readers counter */
++	atomic_dec(&bt_service.h4_writers);
++
++	return 0 == ret ? written : ret;
++}
++
++unsigned scsc_bt_shm_h4_poll(struct file *file, poll_table *wait)
++{
++	/* Add the wait queue to the polling queue */
++	poll_wait(file, &bt_service.read_wait, wait);
++
++	/* Has en error been detect then just return with an error */
++	if (((bt_service.bsmhcp_protocol->header.mailbox_hci_evt_write !=
++	      bt_service.bsmhcp_protocol->header.mailbox_hci_evt_read ||
++	      bt_service.bsmhcp_protocol->header.mailbox_acl_rx_write !=
++	      bt_service.bsmhcp_protocol->header.mailbox_acl_rx_read ||
++	      bt_service.bsmhcp_protocol->header.mailbox_acl_free_write !=
++	      bt_service.bsmhcp_protocol->header.mailbox_acl_free_read) &&
++	     bt_service.read_operation != BT_READ_OP_STOP) ||
++	    (bt_service.read_operation != BT_READ_OP_NONE &&
++	     bt_service.read_operation != BT_READ_OP_STOP) ||
++	    ((BT_READ_OP_STOP != bt_service.read_operation) &&
++	     (0 != atomic_read(&bt_service.error_count) ||
++	     bt_service.bsmhcp_protocol->header.panic_deathbed_confession))) {
++		SCSC_TAG_DEBUG(BT_H4, "queue(s) changed\n");
++		return POLLIN | POLLRDNORM; /* readeable */
++	}
++
++	SCSC_TAG_DEBUG(BT_H4, "no change\n");
++
++	return POLLOUT; /* writeable */
++}
++
++/* Initialise the shared memory interface */
++int scsc_bt_shm_init(void)
++{
++	/* Get kmem pointer to the shared memory ref */
++	bt_service.bsmhcp_protocol = scsc_mx_service_mif_addr_to_ptr(bt_service.service, bt_service.bsmhcp_ref);
++	if (bt_service.bsmhcp_protocol == NULL) {
++		SCSC_TAG_ERR(BT_COMMON, "couldn't map kmem to shm_ref 0x%08x\n", (u32)bt_service.bsmhcp_ref);
++		return -ENOMEM;
++	}
++
++	/* Clear the protocol shared memory area */
++	memset(bt_service.bsmhcp_protocol, 0, sizeof(*bt_service.bsmhcp_protocol));
++	bt_service.bsmhcp_protocol->header.magic_value = BSMHCP_PROTOCOL_MAGICVALUE;
++	bt_service.mailbox_hci_evt_read = 0;
++	bt_service.mailbox_acl_rx_read = 0;
++	bt_service.mailbox_acl_free_read = 0;
++	bt_service.mailbox_acl_free_read_scan = 0;
++	bt_service.mailbox_iq_report_read = 0;
++	bt_service.read_index = 0;
++	bt_service.allocated_count = 0;
++	bt_service.iq_reports_enabled = false;
++	h4_irq_mask = 0;
++
++	/* Initialise the interrupt handlers */
++	if (scsc_bt_shm_init_interrupt() < 0) {
++		SCSC_TAG_ERR(BT_COMMON, "Failed to register IRQ bits\n");
++		return -EIO;
++	}
++
++	return 0;
++}
++
++/* Terminate the shared memory interface, stopping its thread.
++ *
++ * Note: The service must be stopped prior to calling this function.
++ *       The shared memory can only be released after calling this function.
++ */
++void scsc_bt_shm_exit(void)
++{
++	u16 irq_num = 0;
++
++	/* Release IRQs */
++	if (bt_service.bsmhcp_protocol != NULL) {
++
++		if (h4_irq_mask & 1 << irq_num++)
++			scsc_service_mifintrbit_unregister_tohost(
++			    bt_service.service, bt_service.bsmhcp_protocol->header.bg_to_ap_int_src);
++		if (h4_irq_mask & 1 << irq_num++)
++			scsc_service_mifintrbit_free_fromhost(
++			    bt_service.service, bt_service.bsmhcp_protocol->header.ap_to_bg_int_src, SCSC_MIFINTR_TARGET_R4);
++		if (h4_irq_mask & 1 << irq_num++)
++			scsc_service_mifintrbit_free_fromhost(
++			    bt_service.service, bt_service.bsmhcp_protocol->header.ap_to_fg_int_src, SCSC_MIFINTR_TARGET_R4);
++	}
++
++	/* Clear all control structures */
++	bt_service.last_alloc = 0;
++	bt_service.hci_event_paused = false;
++	bt_service.acldata_paused = false;
++	bt_service.bsmhcp_protocol = NULL;
++
++	memset(bt_service.allocated, 0, sizeof(bt_service.allocated));
++	memset(bt_service.connection_handle_list, 0, sizeof(bt_service.connection_handle_list));
++}
++
+diff --git a/drivers/misc/samsung/scsc_bt/scsc_shm.h b/drivers/misc/samsung/scsc_bt/scsc_shm.h
+new file mode 100644
+index 000000000..8dc1e33f6
+--- /dev/null
++++ b/drivers/misc/samsung/scsc_bt/scsc_shm.h
+@@ -0,0 +1,37 @@
++/****************************************************************************
++ *
++ *       Copyright (c) 2015 Samsung Electronics Co., Ltd
++ *
++ ****************************************************************************/
++
++/* Shared memory interface API */
++
++#ifndef __SCSC_SHM_H__
++#define __SCSC_SHM_H__
++#include <scsc/api/bsmhcp.h>
++#include <scsc/api/asmhcp.h>
++
++/* Bluetooth specific functions */
++int scsc_bt_shm_init(void);
++void scsc_bt_shm_exit(void);
++ssize_t scsc_bt_shm_h4_read(struct file *file,
++			    char *buf,
++			    size_t len,
++			    loff_t *offset);
++ssize_t scsc_bt_shm_h4_write(struct file *file,
++			     const char *buf,
++			     size_t len, loff_t *offset);
++unsigned scsc_bt_shm_h4_poll(struct file *file, poll_table *wait);
++
++/* ANT specific functions */
++int scsc_ant_shm_init(void);
++void scsc_ant_shm_exit(void);
++ssize_t scsc_shm_ant_read(struct file *file,
++			  char *buf,
++			  size_t len,
++			  loff_t *offset);
++ssize_t scsc_shm_ant_write(struct file *file,
++			   const char *buf,
++			   size_t len, loff_t *offset);
++unsigned int scsc_shm_ant_poll(struct file *file, poll_table *wait);
++#endif
+-- 
+2.53.0
+

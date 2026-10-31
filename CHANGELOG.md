@@ -10,6 +10,30 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.10.0 — Bluetooth (build #82)
+
+- The tablet's own Bluetooth works: the adapter `hci0` with the tablet's
+  factory address, BlueZ and blueman (its tray icon is back). Pairing,
+  Bluetooth LE, and the tablet as a speaker for a phone (A2DP, with the
+  phone's play/pause and volume over AVRCP) are tried with an iPhone;
+  headphones, keyboards and mice go the same way but are untried.
+- Not possible yet: calls through a Bluetooth headset (HFP/HSP). The
+  firmware sends call audio to the audio DSP, whose Bluetooth side is not
+  ported.
+- A phone connected while the login screen is up plays to the tablet only
+  after it is connected again from the session (the login screen has its
+  own sound server).
+- In the kernel: Samsung's Bluetooth service for the WLBT chip (the one that
+  also does Wi-Fi) with a new BlueZ driver on top. The adapter appears once
+  `t510-firmware` finds the Bluetooth configuration on Android's VENDOR
+  partition. The Wi-Fi/Bluetooth core now reads its files from the system's
+  root also when the kernel itself asks for them (kernel threads still saw
+  the startup ramdisk).
+
+Builds: #80 (the BlueZ driver), #81 (warnings fixed; the adapter appeared,
+but the firmware started without its configuration and address and
+failed), #82 (the files read from the system's root: works).
+
 ## 0.9.0 — USB devices on the USB-C port (build #79)
 
 - The USB-C port works as a host: a flash drive, a keyboard, a mouse, a

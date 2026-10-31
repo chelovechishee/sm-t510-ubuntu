@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 21/41] ASoC: samsung: abox: keep the DSP on, defer DSP
+Subject: [PATCH 21/43] ASoC: samsung: abox: keep the DSP on, defer DSP
  component controls, 64K RDMA buffer
 
 - probe by default (snd_soc_abox.enable=0 keeps it off); keep ABOX

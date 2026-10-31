@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 25/41] arm64: dts: exynos7885: GPU DVFS through ACPM, G3D TMU
+Subject: [PATCH 25/43] arm64: dts: exynos7885: GPU DVFS through ACPM, G3D TMU
  and GPU thermal zone
 
 Panfrost devfreq (simple_ondemand) over the ACPM G3D clock: the levels of

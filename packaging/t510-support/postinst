@@ -9,6 +9,10 @@ UNITS="usb-gadget.service resize-rootfs.service boot-ok.service
 	t510-audio.service t510-no-lmk.service zram-manual.service
 	t510-chrome.service t510-update.service"
 
+# blueman's applet (tray icon, pairing agent) starts again now that there is
+# Bluetooth: 0.7.0-0.9.0 hid it with this file
+dpkg-maintscript-helper rm_conffile /etc/xdg/xdg-xfce/autostart/blueman.desktop 0.10.0~ t510-support -- "$@"
+
 case $1 in
 configure | abort-upgrade | abort-deconfigure | abort-remove)
 	for u in $UNITS; do

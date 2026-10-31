@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 17/41] clk: samsung: exynos7885: CMU_DISPAUD audio clocks; add
+Subject: [PATCH 17/43] clk: samsung: exynos7885: CMU_DISPAUD audio clocks; add
  PLL1431x
 
 PLL1431x is PLL0831x with K in PLL_CON3 (+0xc). Only the ABOX/UAIF part of

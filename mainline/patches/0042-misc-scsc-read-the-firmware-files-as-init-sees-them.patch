@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 42/43] misc: scsc: read the firmware files as init sees them
+
+mx140_request_file() resolved its path against the caller's root. The
+HCI core powers Bluetooth on from a work, and kernel threads keep the
+initramfs root after switch_root (it moves the real root over / and
+chroots only itself), so the Bluetooth configuration on /vendor and the
+address on /efs were not found and the firmware started without them.
+Wi-Fi never saw it: NetworkManager starts it from a process.
+
+Open the files from the root of PID 1 instead.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/misc/samsung/scsc/mx140_file.c | 47 ++++++++++++++++++++++++--
+ 1 file changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/misc/samsung/scsc/mx140_file.c b/drivers/misc/samsung/scsc/mx140_file.c
+index 39720a60e..6ce510ad6 100644
+--- a/drivers/misc/samsung/scsc/mx140_file.c
++++ b/drivers/misc/samsung/scsc/mx140_file.c
+@@ -9,6 +9,10 @@
+ #include <linux/firmware.h>
+ #include <linux/kernel_read_file.h>
+ #include <linux/fs.h>
++#include <linux/fs_struct.h>
++#include <linux/file.h>
++#include <linux/pid.h>
++#include <linux/sched/task.h>
+ #include <asm/uaccess.h>
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+@@ -359,6 +363,44 @@ int mx140_file_download_fw(struct scsc_mx *mx, void *dest, size_t dest_size, u32
+ 	return r;
+ }
+ 
++/*
++ * Read a file as init (PID 1) sees it. The HCI core powers Bluetooth on from
++ * a work, and kernel threads keep the initramfs root after switch_root (it
++ * moves the real root over / and chroots only itself), where neither /vendor
++ * nor /efs is.
++ */
++static ssize_t mx140_read_file_as_init(const char *path, void **buf,
++				       size_t *file_size)
++{
++	struct task_struct *init;
++	struct path root = {};
++	struct file *file;
++	ssize_t r;
++
++	rcu_read_lock();
++	init = pid_task(find_pid_ns(1, &init_pid_ns), PIDTYPE_PID);
++	if (init) {
++		task_lock(init);
++		if (init->fs)
++			get_fs_root(init->fs, &root);
++		task_unlock(init);
++	}
++	rcu_read_unlock();
++
++	if (!root.mnt)
++		return kernel_read_file_from_path(path, 0, buf, INT_MAX,
++						  file_size, READING_FIRMWARE);
++
++	file = file_open_root(&root, path, O_RDONLY, 0);
++	path_put(&root);
++	if (IS_ERR(file))
++		return PTR_ERR(file);
++
++	r = kernel_read_file(file, 0, buf, INT_MAX, file_size, READING_FIRMWARE);
++	fput(file);
++	return r;
++}
++
+ int mx140_request_file(struct scsc_mx *mx, char *path, const struct firmware **firmp)
+ {
+ 	struct firmware *firm;
+@@ -381,9 +423,8 @@ int mx140_request_file(struct scsc_mx *mx, char *path, const struct firmware **f
+ 	if (!firm)
+ 		return -ENOMEM;
+ 
+-	/* mainline: kernel_read_file_from_path() replaces set_fs() + vfs_read() */
+-	r = kernel_read_file_from_path(path, 0, &buf, INT_MAX, &file_size,
+-				       READING_FIRMWARE);
++	/* mainline: kernel_read_file() replaces set_fs() + vfs_read() */
++	r = mx140_read_file_as_init(path, &buf, &file_size);
+ 	if (r < 0) {
+ 		kfree(firm);
+ 		SCSC_TAG_ERR(MX_FILE, "reading %s failed: %zd\n", path, r);
+-- 
+2.53.0
+

@@ -248,6 +248,8 @@ CONFIG_SCSC_CORE=y
 CONFIG_SCSC_PLATFORM=y
 CONFIG_SCSC_CM_MX_CLIENT_TEST=y
 CONFIG_SCSC_CORE_FW_LOCATION="/vendor/etc/wifi"
+# Bluetooth: the SCSC BT service as hci0 for BlueZ (drivers/misc/samsung/scsc_bt)
+CONFIG_SCSC_BT=y
 
 # Wi-Fi: cfg80211 + Samsung SCSC wlan driver (drivers/net/wireless/scsc)
 CONFIG_WIRELESS=y

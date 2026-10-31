@@ -11,6 +11,10 @@ undivert() {
 	dpkg-divert --package t510-support --rename --remove "$1" >/dev/null
 }
 
+# blueman's applet (tray icon, pairing agent) starts again now that there is
+# Bluetooth: 0.7.0-0.9.0 hid it with this file
+dpkg-maintscript-helper rm_conffile /etc/xdg/xdg-xfce/autostart/blueman.desktop 0.10.0~ t510-support -- "$@"
+
 case $1 in
 remove)
 	[ -d /run/systemd/system ] && systemctl --system daemon-reload >/dev/null || true

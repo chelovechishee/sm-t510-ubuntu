@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 09/41] i2c: add Exynos SPEEDY bus driver; mfd/rtc/regulator:
+Subject: [PATCH 09/43] i2c: add Exynos SPEEDY bus driver; mfd/rtc/regulator:
  S2MPU08; arm64: dts: gta3xlwifi: PMIC, RTC, microSD
 
 Co-Authored-By: Claude <noreply@anthropic.com>
