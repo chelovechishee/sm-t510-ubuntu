@@ -39,10 +39,19 @@ migrate() {
 	done
 }
 
+# Ubuntu's login message (pam_motd on the console and ssh) gives way to
+# t510-greeting; run-parts skips the renamed scripts (a dot in the name)
+MOTD="00-header 10-help-text 50-motd-news 60-unminimize 85-fwupd
+	90-updates-available 91-contract-ua-esm-status 91-release-upgrade
+	92-unattended-upgrades 95-hwe-eol 98-fsck-at-reboot 98-reboot-required"
+
 case $1 in
 install | upgrade)
 	divert /usr/share/dbus-1/services/org.gnome.keyring.SystemPrompter.service
 	divert /usr/share/dbus-1/services/org.gnome.keyring.PrivatePrompter.service
+	for m in $MOTD; do
+		divert "/etc/update-motd.d/$m"
+	done
 	if [ -z "$2" ]; then
 		cat <<'EOF' | migrate
 @LEGACY@

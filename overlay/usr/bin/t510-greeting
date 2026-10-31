@@ -1,0 +1,162 @@
+#!/bin/bash
+# The greeting of a terminal: what this is, where it comes from, and how the
+# tablet is doing. /etc/profile.d/t510-greeting.sh runs it for login shells:
+# the console, ssh and xfce4-terminal. ~/.hushlogin turns it off.
+# Box and block characters only from the console font (no rounded corners).
+REPO=https://github.com/chelovechishee/sm-t510-ubuntu
+BAT=/sys/class/power_supply/s2mu005-fuel-gauge
+CHG=/sys/class/power_supply/s2mu005-charger
+
+# Ubuntu orange where the terminal has 256 colours, plain yellow (the
+# console's brown-orange) where it has 8
+if [ -t 1 ] && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+	if [ "$(tput colors)" -ge 256 ]; then A=$'\e[38;5;208m'; else A=$'\e[33m'; fi
+	B=$'\e[1m' D=$'\e[2m' R=$'\e[31m' Y=$'\e[33m' G=$'\e[32m' N=$'\e[0m'
+fi
+
+# bar <percent> <colour>: 10 cells, one per 10%
+bar() {
+	local on=$((($1 + 5) / 10)) full empty
+	printf -v full '%*s' "$on" ''
+	printf -v empty '%*s' $((10 - on)) ''
+	printf '%s%s%s%s%s' "$2" "${full// /█}" "$D" "${empty// /░}" "$N"
+}
+
+# load <percent>: green, yellow from 70 %, red from 90 %
+load() {
+	if [ "$1" -ge 90 ]; then echo "$R"
+	elif [ "$1" -ge 70 ]; then echo "$Y"
+	else echo "$G"; fi
+}
+
+# size <KiB>: 535 MiB, 1.9 GiB, 25 GiB (rounded)
+size() {
+	local tenths=$((($1 * 10 + 524288) / 1048576))
+	if [ "$tenths" -ge 100 ]; then echo "$(((tenths + 5) / 10)) GiB"
+	elif [ "$tenths" -ge 10 ]; then echo "$((tenths / 10)).$((tenths % 10)) GiB"
+	else echo "$((($1 + 512) / 1024)) MiB"; fi
+}
+
+# line <label> <text>
+line() {
+	printf '  %s%-9s%s %s\n' "$A" "$1" "$N" "$2"
+}
+
+# --- the box ---------------------------------------------------------------
+. /etc/os-release
+title="$PRETTY_NAME on the Galaxy Tab A 10.1 (SM-T510)"
+w=$((${#title} > ${#REPO} ? ${#title} : ${#REPO}))
+printf -v rule '%*s' $((w + 4)) ''
+rule=${rule// /─}
+printf '%s┌%s┐%s\n' "$A" "$rule" "$N"
+printf '%s│%s  %s%-*s%s  %s│%s\n' "$A" "$N" "$B" "$w" "$title" "$N" "$A" "$N"
+printf '%s│%s  %s%-*s%s  %s│%s\n' "$A" "$N" "$D" "$w" "$REPO" "$N" "$A" "$N"
+printf '%s└%s┘%s\n' "$A" "$rule" "$N"
+
+# --- version, time, boot ---------------------------------------------------
+version=$(dpkg-query -W -f '${Version}' t510-support 2>/dev/null)
+build=$(uname -v)
+line Version "t510-support $version ${D}·${N} kernel $(uname -r | cut -d- -f1) ${build%% *}"
+line Time "$(date '+%A, %-d %B %Y, %H:%M')"
+
+# systemd: microseconds from the kernel's start to the end of the boot
+boot=$(busctl get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+	org.freedesktop.systemd1.Manager FinishTimestampMonotonic 2>/dev/null)
+boot=${boot#t }
+read -r up _ < /proc/uptime
+up=${up%.*}
+if [ "$up" -ge 86400 ]; then up="$((up / 86400)) d $((up % 86400 / 3600)) h"
+elif [ "$up" -ge 3600 ]; then up="$((up / 3600)) h $((up % 3600 / 60)) min"
+else up="$((up / 60)) min"; fi
+if [ "${boot:-0}" -gt 0 ]; then
+	line Boot "$((boot / 1000000)).$((boot / 100000 % 10)) s ${D}·${N} up $up"
+else
+	line Boot "still starting ${D}·${N} up $up"
+fi
+
+# --- the last login before this session (/var/log/wtmp, struct utmp of arm64:
+# 400 bytes; type 7 = a user's login) ---------------------------------------
+since=$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1/session/auto \
+	org.freedesktop.login1.Session Timestamp 2>/dev/null)
+since=${since#t }
+since=$((${since:-0} / 1000000))
+[ "$since" -gt 0 ] || since=$(date +%s)
+read -r at tty host < <(perl -e '
+	my ($user, $since) = @ARGV;
+	open my $f, "<", "/var/log/wtmp" or exit;
+	my @last;
+	while (read $f, my $r, 400) {
+		my ($type, $line, $name, $host, $sec) = unpack "s x6 Z32 x4 Z32 Z256 x12 q", $r;
+		@last = ($sec, $line, $host) if $type == 7 && $name eq $user && $sec < $since;
+	}
+	print "@last\n" if @last;' "$USER" "$since")
+if [ -n "$at" ]; then
+	case $host in
+	'') where="on $tty" ;;
+	:*) where="on the desktop" ;;
+	*) where="ssh from $host" ;;
+	esac
+	line Last "$(date -d "@$at" '+%a %-d %b, %H:%M') ${D}·${N} $where"
+fi
+
+# --- battery ---------------------------------------------------------------
+if [ -r "$BAT/capacity" ]; then
+	read -r cap < "$BAT/capacity"
+	read -r status < "$BAT/status"
+	read -r ua < "$BAT/current_now"
+	ma=$((${ua#-} / 1000))
+	case $status in
+	Charging)
+		read -r kind < "$CHG/usb_type"
+		kind=${kind#*[}
+		kind=${kind%%]*}
+		read -r limit < "$CHG/input_current_limit"
+		case $kind in
+		SDP) kind="PC port" ;;
+		CDP) kind="charging port" ;;
+		DCP) kind="charger" ;;
+		esac
+		state="charging $ma mA ${D}·${N} $kind, up to $((limit / 1000)) mA" ;;
+	Full) state="full" ;;
+	*) state="on battery, $ma mA" ;;
+	esac
+	if [ "$cap" -le 15 ]; then c=$R; elif [ "$cap" -le 40 ]; then c=$Y; else c=$G; fi
+	line Battery "$(bar "$cap" "$c") $(printf '%3d' "$cap") %  $state"
+fi
+
+# --- memory and disks ------------------------------------------------------
+while read -r key kib _; do
+	case $key in
+	MemTotal:) total=$kib ;;
+	MemAvailable:) avail=$kib ;;
+	esac
+done < /proc/meminfo
+pct=$(((total - avail) * 100 / total))
+line Memory "$(bar "$pct" "$(load "$pct")") $(printf '%3d' "$pct") %  $(size $((total - avail))) of $(size "$total")"
+
+# the system and what the user mounts (microSD, USB); not Android's /efs, /vendor
+df -k --output=source,target,used,avail 2>/dev/null | while read -r dev dir used free; do
+	case $dev in /dev/*) ;; *) continue ;; esac
+	case $dir in /efs | /vendor) continue ;; esac
+	[ "$dir" = / ] && name=Disk || name=${dir##*/}
+	pct=$((used * 100 / (used + free)))
+	line "$name" "$(bar "$pct" "$(load "$pct")") $(printf '%3d' "$pct") %  $(size "$used") of $(size $((used + free)))"
+done
+
+# --- temperatures (Exynos 7885 TMU, throttling from 75 C) ------------------
+temps=
+for z in /sys/class/thermal/thermal_zone*; do
+	read -r type < "$z/type"
+	read -r t < "$z/temp"
+	t=$((t / 1000))
+	if [ "$t" -ge 90 ]; then c=$R; elif [ "$t" -ge 75 ]; then c=$Y; else c=; fi
+	type=${type%-thermal}
+	temps+="${temps:+ ${D}·${N} }${type^^} $c$t °C$N"
+done
+[ -n "$temps" ] && line Temp "$temps"
+
+# --- what to do ------------------------------------------------------------
+[ -e /run/reboot-required ] && echo && echo "  ${Y}An update needs a restart to finish.${N}"
+echo
+echo "  ${D}Update:${N} sudo apt update && sudo apt upgrade   ${D}Hide this:${N} touch ~/.hushlogin"
+echo

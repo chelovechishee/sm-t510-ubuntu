@@ -24,6 +24,8 @@ configure | abort-upgrade | abort-deconfigure | abort-remove)
 	if [ -d /run/systemd/system ]; then
 		systemctl --system daemon-reload >/dev/null || true
 		udevadm control --reload-rules >/dev/null 2>&1 || true
+		# sshd_config.d: a reload keeps the open sessions
+		systemctl try-reload-or-restart ssh.service >/dev/null 2>&1 || true
 	fi
 	# the rotation's files (Xorg, touch, speaker channels) are the tablet's
 	# own and change with it; a system without them gets the current ones

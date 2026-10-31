@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SM-T510: login shells, so that /etc/profile.d (t510-greeting) runs -->
+<channel name="xfce4-terminal" version="1.0">
+  <property name="command-login-shell" type="bool" value="true"/>
+</channel>

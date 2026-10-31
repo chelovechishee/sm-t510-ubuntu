@@ -56,7 +56,7 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 | Other | microSD, clock (RTC in the PMIC over the SPEEDY bus), USB network and console to a PC, network printing |
 
 **Not working yet:** Bluetooth, headphones and microphone (COD3035 codec),
-cameras, suspend, USB host/OTG. Shader derivatives are broken on the G71, so
+cameras, USB host/OTG. Shader derivatives are broken on the G71, so
 GTK4 draws with cairo (`GSK_RENDERER=cairo`).
 
 ## Using the tablet
@@ -94,6 +94,10 @@ On the touch screen: hold a finger still for a moment for a right click;
 desktop icons open with one tap. There is no mouse pointer: a small dot
 shows where the finger is. The on-screen keyboard suggests words above its
 keys and marks a misspelt word there; a tap on a suggestion types it.
+
+A terminal (and a login on the console or over ssh) starts with a short
+report: version, boot time, last login, battery, memory, disks and
+temperatures. `touch ~/.hushlogin` hides it.
 
 ## How it fits together
 

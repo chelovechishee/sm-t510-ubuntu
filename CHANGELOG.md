@@ -10,6 +10,21 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.8.4 — a greeting in the terminal (build #70)
+
+- A terminal greets you: the console, ssh and xfce4-terminal show a box
+  with the system and the project's address, then the version and kernel
+  build, the time, how long the boot took and the uptime, the last login
+  before this one, the battery (charge, current, cable), memory, the disks
+  (the microSD card and USB drives too), the temperatures, and a notice
+  when an update waits for a restart. `~/.hushlogin` turns it off.
+- It replaces Ubuntu's login message (help links, "this system has been
+  minimized", ESM, fsck warnings about the Android partitions): its scripts
+  in `/etc/update-motd.d` are moved aside, and come back when `t510-support`
+  is removed. sshd no longer prints its own "Last login".
+- xfce4-terminal starts login shells by default, so that `/etc/profile.d`
+  runs there too.
+
 ## 0.8.3 — the charger follows the cable, asleep too (build #70)
 
 - The charging current now changes with the cable. The charger's
