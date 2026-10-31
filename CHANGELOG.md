@@ -10,6 +10,16 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.10.1 — no workspace switcher on the panel (build #82)
+
+- The workspace switcher is gone from the top panel: in portrait the panel
+  has little room. There is one workspace now, so that windows cannot
+  vanish onto another one (a scroll on the desktop or Ctrl+Alt+arrow used
+  to switch). Existing users get both at their next login, once.
+- README: the Bluetooth icon in the panel's list.
+
+The kernel is unchanged (build #82).
+
 ## 0.10.0 — Bluetooth (build #82)
 
 - The tablet's own Bluetooth works: the adapter `hci0` with the tablet's

@@ -1,5 +1,6 @@
 <?xml version="1.1" encoding="UTF-8"?>
-<!-- SM-T510: panel on top (56 px), dock at the bottom; keyboard and rotation buttons, CPU/GPU temperature (t510-temps).
+<!-- SM-T510: panel on top (56 px), dock at the bottom; keyboard and rotation buttons, CPU/GPU temperature (t510-temps);
+     no workspace switcher (one workspace, xfwm4.xml), the panel has little room in portrait.
      Our launchers by full path: a bare name is looked up among the menu's visible
      entries, and ours are hidden from the menu (NoDisplay), so the panel dropped them -->
 
@@ -19,8 +20,6 @@
         <value type="int" value="1"/>
         <value type="int" value="2"/>
         <value type="int" value="3"/>
-        <value type="int" value="4"/>
-        <value type="int" value="5"/>
         <value type="int" value="30"/>
         <value type="int" value="31"/>
         <value type="int" value="32"/>
@@ -59,10 +58,6 @@
     </property>
     <property name="plugin-3" type="string" value="separator">
       <property name="expand" type="bool" value="true"/>
-      <property name="style" type="uint" value="0"/>
-    </property>
-    <property name="plugin-4" type="string" value="pager"/>
-    <property name="plugin-5" type="string" value="separator">
       <property name="style" type="uint" value="0"/>
     </property>
     <property name="plugin-6" type="string" value="systray">

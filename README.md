@@ -77,6 +77,7 @@ The top panel, left to right:
 | battery | charge; tap it for screen brightness and the power settings |
 | CPU / GPU | temperatures: orange from 75 ° (the chip starts to slow down), red from 90 ° |
 | network | Wi-Fi networks |
+| Bluetooth | devices: search, pairing, connecting (blueman) |
 | date and time | calendar |
 | your name | lock, log out, restart, shut down |
 

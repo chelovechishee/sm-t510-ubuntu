@@ -1,29 +1,71 @@
 #!/bin/sh
-# Once per user, at login: the Xfce panel keeps its own copies of what it was
-# set up with, so a 0.7.0 user's panel still runs our programs from
-# /usr/local (the temperature monitor, the rotation and keyboard buttons),
-# where t510-support no longer has them. Point those copies at /usr.
+# Once per user and change, at login: the Xfce panel and window manager keep
+# this user's own copies of what they were set up with, so a change of the
+# project's defaults reaches existing users only through here. Each step
+# leaves a mark in ~/.config/t510 and never runs again.
 set -u
 
 CFG=${XDG_CONFIG_HOME:-$HOME/.config}
-MARK=$CFG/t510/migrated-0.7.1
-[ -e "$MARK" ] && exit 0
+restart=0
 
-SUB='s#/usr/local/sbin/t510-#/usr/sbin/t510-#g
+mark() {
+	mkdir -p "$CFG/t510" && touch "$CFG/t510/$1"
+}
+
+# 0.7.1: a 0.7.0 user's panel still runs our programs from /usr/local (the
+# temperature monitor, the rotation and keyboard buttons), where t510-support
+# no longer has them. Point those copies at /usr.
+if [ ! -e "$CFG/t510/migrated-0.7.1" ]; then
+	SUB='s#/usr/local/sbin/t510-#/usr/sbin/t510-#g
 s#/usr/local/bin/t510-#/usr/bin/t510-#g
 s#/usr/local/share/applications/t510-#/usr/share/applications/t510-#g'
-OLD='/usr/local/\(s\?bin\|share/applications\)/t510-'
+	OLD='/usr/local/\(s\?bin\|share/applications\)/t510-'
 
-# the launchers' .desktop copies: read when the panel starts
-restart=0
-for f in $(grep -rl "$OLD" "$CFG/xfce4/panel" 2>/dev/null); do
-	sed -i "$SUB" "$f" && restart=1
-done
-# panel properties (the monitor's command) belong to xfconfd: through it
-xfconf-query -c xfce4-panel -l -v 2>/dev/null | grep "$OLD" |
-	while read -r prop value; do
-		xfconf-query -c xfce4-panel -p "$prop" -s "$(printf '%s' "$value" | sed "$SUB")"
+	# the launchers' .desktop copies: read when the panel starts
+	for f in $(grep -rl "$OLD" "$CFG/xfce4/panel" 2>/dev/null); do
+		sed -i "$SUB" "$f" && restart=1
 	done
-[ "$restart" = 0 ] || xfce4-panel -r
+	# panel properties (the monitor's command) belong to xfconfd: through it
+	xfconf-query -c xfce4-panel -l -v 2>/dev/null | grep "$OLD" |
+		while read -r prop value; do
+			xfconf-query -c xfce4-panel -p "$prop" -s "$(printf '%s' "$value" | sed "$SUB")"
+		done
+	mark migrated-0.7.1
+fi
 
-mkdir -p "$(dirname "$MARK")" && touch "$MARK"
+# 0.10.1: no workspace switcher on the panel (it has little room in
+# portrait), and one workspace, so that windows cannot vanish onto another
+if [ ! -e "$CFG/t510/migrated-0.10.1" ]; then
+	for plugin in $(xfconf-query -c xfce4-panel -l -v 2>/dev/null |
+		awk '$2 == "pager" { print $1 }'); do
+		id=${plugin##*-}
+		for ids in $(xfconf-query -c xfce4-panel -l 2>/dev/null |
+			grep '^/panels/panel-[0-9]*/plugin-ids$'); do
+			old=$(xfconf-query -c xfce4-panel -p "$ids" | grep -E '^[0-9]+$')
+			printf '%s\n' "$old" | grep -qx "$id" || continue
+			# the gap after the switcher goes with it
+			drop=$id
+			next=$(printf '%s\n' "$old" | grep -A1 -x "$id" | sed -n 2p)
+			if [ -n "$next" ] &&
+				[ "$(xfconf-query -c xfce4-panel -p "/plugins/plugin-$next" 2>/dev/null)" = separator ] &&
+				[ "$(xfconf-query -c xfce4-panel -p "/plugins/plugin-$next/expand" 2>/dev/null)" != true ]; then
+				drop="$drop $next"
+			fi
+			args=
+			for i in $old; do
+				case " $drop " in *" $i "*) continue ;; esac
+				args="$args -t int -s $i"
+			done
+			# one word per array item
+			xfconf-query -c xfce4-panel -p "$ids" --force-array $args
+			for i in $drop; do
+				xfconf-query -c xfce4-panel -p "/plugins/plugin-$i" -r -R
+			done
+			restart=1
+		done
+	done
+	xfconf-query -c xfwm4 -p /general/workspace_count -n -t int -s 1
+	mark migrated-0.10.1
+fi
+
+[ "$restart" = 0 ] || xfce4-panel -r
