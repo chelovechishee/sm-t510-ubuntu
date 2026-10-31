@@ -10,6 +10,15 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.8.1 — a dot under the finger instead of the pointer (build #67)
+
+- The pointer is hidden: Chrome hid it on every touch and showed it again
+  on the motion that followed, so it blinked. `longpress` hides it for the
+  whole screen (XFixes) while the session runs.
+- A small round dot marks the finger instead: a solid rim, inside it dark
+  in the middle and light at the rim. It shows on the touch, follows the
+  finger and goes a moment after the lift; touches pass through it.
+
 ## 0.8.0 — sleep (build #67)
 
 - The tablet sleeps: a short press of the power key locks it, turns the

@@ -85,8 +85,8 @@ mkdir -p "$S/usr/libexec/t510"
 cp -a "$T/overlay/." "$S/"
 find "$S" -name __pycache__ -prune -exec rm -rf {} +
 "$CC" -O2 -o "$S/usr/libexec/t510/fbtool" "$T/tools/fbtool.c"
-"$CC" -O2 -o "$S/usr/libexec/t510/longpress" "$T/tools/longpress.c" -lX11 -lXi -lXtst ||
-	die "longpress does not link: sudo apt install libx11-dev:arm64 libxi-dev:arm64 libxtst-dev:arm64"
+"$CC" -O2 -o "$S/usr/libexec/t510/longpress" "$T/tools/longpress.c" -lX11 -lXi -lXtst -lXfixes -lXext -lm ||
+	die "longpress does not link: sudo apt install libx11-dev:arm64 libxi-dev:arm64 libxtst-dev:arm64 libxfixes-dev:arm64 libxext-dev:arm64"
 "$CC" -O2 -shared -fPIC -o "$S/usr/libexec/t510/nograb.so" "$T/tools/nograb.c"
 "$CC" -O2 -shared -fPIC -o "$S/usr/libexec/t510/noblank.so" "$T/tools/noblank.c"
 aarch64-linux-gnu-strip "$S"/usr/libexec/t510/{fbtool,longpress,nograb.so,noblank.so}

@@ -91,7 +91,8 @@ The power key:
 | hold 3 s | the power dialog (log out, restart, shut down) |
 
 On the touch screen: hold a finger still for a moment for a right click;
-desktop icons open with one tap.
+desktop icons open with one tap. There is no mouse pointer: a small dot
+shows where the finger is.
 
 ## How it fits together
 

@@ -3,7 +3,7 @@ Version: @VERSION@
 Architecture: arm64
 Maintainer: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
 Installed-Size: @SIZE@
-Depends: libc6, libx11-6, libxi6, libxtst6, python3, t510-archive-keyring
+Depends: libc6, libx11-6, libxext6, libxfixes3, libxi6, libxtst6, python3, t510-archive-keyring
 Recommends: t510-kernel
 Section: misc
 Priority: optional
