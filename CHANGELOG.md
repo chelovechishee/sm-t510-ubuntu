@@ -10,6 +10,34 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.9.0 — USB devices on the USB-C port (build #79)
+
+- The USB-C port works as a host: a flash drive, a keyboard, a mouse, a
+  network adapter or a phone on an OTG adapter or a C-to-C cable. The
+  tablet powers the device (5.1 V, up to 1.5 A, from the charger's boost).
+  A PC on the cable still sees the tablet as before (the USB network).
+- The port follows the USB-C controller (S2MM005): its firmware decides
+  who is the host and who gives power, also with a phone over USB PD. A
+  phone usually takes the host role and charges the tablet; the tablet can
+  ask for the other roles itself:
+  `echo host | sudo tee /sys/class/typec/port0/data_role` and
+  `echo source | sudo tee /sys/class/typec/port0/power_role`.
+- New in the kernel: USB storage (UAS too), keyboards, mice and game
+  controllers (Logitech receivers, Xbox pads), network adapters (Realtek,
+  ASIX, CDC, iPhone tethering), USB sound cards, webcams (UVC), serial
+  adapters (FTDI, CP210x, CH341, PL2303), USB printers, and BlueZ with
+  USB Bluetooth adapters (the tablet's own Bluetooth comes with 0.10.0).
+
+Builds: #71, #72 (UVC webcams and Logitech receivers were missing their
+dependencies; the controller stayed in the detached state with a cable
+in), #73 (its state in the log), #74 (its automatic low-power mode on, as
+the vendor kernel does), #75, #76 (its versions, register dump and raw
+commands for the bring-up: the firmware works; a PC on a USB-A cable
+leaves it detached, a phone takes it through to a PD contract), #77 (the
+data and power roles apart, so a phone's role swaps are followed), #78
+(the tablet asks for role swaps itself: a phone became its USB device, and
+the tablet gave it power), #79 (the bring-up commands removed).
+
 ## 0.8.4 — a greeting in the terminal (build #70)
 
 - A terminal greets you: the console, ssh and xfce4-terminal show a box

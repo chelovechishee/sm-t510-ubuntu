@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 01/38] arm64: dts: exynos: add Samsung Galaxy Tab A 10.1
+Subject: [PATCH 01/41] arm64: dts: exynos: add Samsung Galaxy Tab A 10.1
  (2019) Wi-Fi (SM-T510)
 
 Co-Authored-By: Claude <noreply@anthropic.com>

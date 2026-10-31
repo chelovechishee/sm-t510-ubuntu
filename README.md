@@ -53,10 +53,11 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 | Sound | speakers: ABOX + 2×TFA9896, PipeWire, volume keys |
 | Power | CPU DVFS through ACPM, cpuidle (C2) on all 8 cores, temperatures and throttling |
 | Battery | charge level (S2MU005), charging at stock currents by the kernel driver, set again for every cable (asleep too) |
-| Other | microSD, clock (RTC in the PMIC over the SPEEDY bus), USB network and console to a PC, network printing |
+| USB | USB-C host and device by the S2MM005 controller: flash drives, keyboards, mice, network adapters, sound cards, webcams, phones; the USB network and console to a PC |
+| Other | microSD, clock (RTC in the PMIC over the SPEEDY bus), network printing |
 
-**Not working yet:** Bluetooth, headphones and microphone (COD3035 codec),
-cameras, USB host/OTG. Shader derivatives are broken on the G71, so
+**Not working yet:** Bluetooth (0.10.0), headphones and microphone (COD3035
+codec, 0.11.0), cameras (0.12.0). Shader derivatives are broken on the G71, so
 GTK4 draws with cairo (`GSK_RENDERER=cairo`).
 
 ## Using the tablet
@@ -94,6 +95,13 @@ On the touch screen: hold a finger still for a moment for a right click;
 desktop icons open with one tap. There is no mouse pointer: a small dot
 shows where the finger is. The on-screen keyboard suggests words above its
 keys and marks a misspelt word there; a tap on a suggestion types it.
+
+The USB-C port takes USB devices through an OTG adapter or a C-to-C cable;
+the tablet powers them. A phone on a C-to-C cable usually becomes the host
+and charges the tablet; to make the phone a USB device of the tablet, run
+`echo host | sudo tee /sys/class/typec/port0/data_role`, and
+`echo source | sudo tee /sys/class/typec/port0/power_role` to charge it from
+the tablet.
 
 A terminal (and a login on the console or over ssh) starts with a short
 report: version, boot time, last login, battery, memory, disks and

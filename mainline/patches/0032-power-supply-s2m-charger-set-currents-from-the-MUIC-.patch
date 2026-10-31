@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 32/38] power: supply: s2m-charger: set currents from the MUIC
+Subject: [PATCH 32/41] power: supply: s2m-charger: set currents from the MUIC
  BC1.2 result without a MUIC node
 
 On the Galaxy Tab A 10.1 2019 the USB-C port is behind an S2MM005 CC

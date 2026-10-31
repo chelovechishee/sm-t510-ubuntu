@@ -19,6 +19,7 @@ one DT, `exynos7885.dts`, between them.
 | 6 | display through KMS (own `exynos7885-decon` driver), Mali-G71 GPU on Panfrost, X on modesetting + glamor | **works** |
 | — | cpuidle: idle cores powered down (C2), tick from the MCT | **works** |
 | — | S2MU005 charger: stock currents by adapter type | **works** |
+| — | USB-C host/OTG: S2MM005 CC controller (own `s2mm005` driver), dwc3 role switch, OTG boost of the S2MU005 | **works** |
 | — | Ubuntu 26.04.1 LTS on the 7.3 kernel | **works** |
 | — | COD3035 codec (headphones, microphones) | — |
 | — | Bluetooth (SCSC BT) | — |
@@ -49,8 +50,39 @@ The initramfs (`initramfs/init`) takes the RNDIS interface name from configfs
 (`rndis0` on 4.4, `usb0` on mainline), and Ubuntu's network (`50-usb.network`)
 matches both.
 
-USB is device-only for now (`dr_mode = "peripheral"`): the S2MM005 CCIC is not
-supported. A running mainline system can rewrite its kernel with `dd` to `p15`.
+A running mainline system can rewrite its kernel with `dd` to `p15`.
+
+## USB-C roles (S2MM005)
+
+The port is behind the S2MM005 CC controller (`i2c_6`, `0x33`, interrupt
+`gpa0-2`, falling edge). Its firmware handles the CC lines and USB PD by
+itself and reports the result in a status block read over I2C with 16-bit
+register addresses (2 address bytes, then the data); the vendor driver is
+`drivers/ccic/s2mm005*.c` of the 4.4 kernel. Our `drivers/usb/typec/s2mm005.c`
+only follows it:
+
+- `0x20` FUNC_STATE: byte 0 the policy engine state (0 detached, 3–7 source,
+  17/18/21 sink, 29 error recovery, 52/64 the two halves of a power role
+  swap), bit 25 source, bit 26 DFP. Source states turn the VBUS supply on,
+  sink states off; DFP makes dwc3 the host (USB role switch).
+- `0x10` commands: `01` clears the interrupt (after reading the status
+  words at `0x30`), `0f 06` turns on the automatic low-power mode (the vendor
+  kernel sends it at probe and after a controller reset, bit 31 of
+  FUNC_STATE), `03 10` / `03 11` ask the partner for a power / data role
+  swap (`power_role` / `data_role` in `/sys/class/typec/port0`), `aa` makes the
+  next read come from the firmware header (versions: chip 02.00.00 boot 7,
+  firmware 10.00.4a boot 8 on this tablet). Five dummy reads of `0x08` wake
+  the controller before a command.
+- A PC on a USB-A cable leaves the firmware detached (state 0): dwc3 then
+  keeps its default role, the device, so the USB network needs no CC event.
+  A phone on a C-to-C cable goes to a PD contract (state 21) and becomes
+  the host; a data role swap made it a USB device of the tablet, a power role
+  swap made the tablet its source.
+- VBUS comes from the S2MU005 OTG boost: an `otg-vbus` regulator of the
+  charger driver (vendor sequence: switches off, OTG mode, 1 ms
+  over-current debounce, boost on, 5.1 V, 1.5 A, 1 MHz).
+
+`/sys/kernel/debug/s2mm005/regs` dumps `0x00`–`0x7f`.
 
 ## Touchscreen
 

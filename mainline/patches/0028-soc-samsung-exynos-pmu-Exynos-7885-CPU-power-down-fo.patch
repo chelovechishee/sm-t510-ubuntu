@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 28/38] soc: samsung: exynos-pmu: Exynos 7885 CPU power down
+Subject: [PATCH 28/41] soc: samsung: exynos-pmu: Exynos 7885 CPU power down
  for cpuidle
 
 The EL3 monitor's PSCI CPU_SUSPEND only executes WFI; the PMU gates the

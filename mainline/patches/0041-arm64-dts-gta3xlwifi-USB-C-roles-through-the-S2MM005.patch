@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 41/41] arm64: dts: gta3xlwifi: USB-C roles through the S2MM005
+ CC controller
+
+The S2MM005 sits on i2c_6 at 0x33 with its interrupt on gpa0-2. Its
+connector is linked to dwc3, now in OTG mode with a USB role switch and
+the device as its default role (the USB network to a PC keeps working
+without a CC event), and takes VBUS from the S2MU005 OTG boost.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts | 57 ++++++++++++++++++-
+ 1 file changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index de4135933..e0dcf0dfb 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -389,6 +389,13 @@ pmic@3d {
+ 		 * charger sets the input current for it; asleep it stays at 500 mA.
+ 		 */
+ 		wakeup-source;
++
++		/* OTG boost: VBUS for a device on the port, switched by the CCIC */
++		otg_vbus: otg-vbus {
++			regulator-name = "otg-vbus";
++			regulator-min-microvolt = <5100000>;
++			regulator-max-microvolt = <5100000>;
++		};
+ 	};
+ };
+ 
+@@ -444,6 +451,37 @@ touchscreen@49 {
+ 	};
+ };
+ 
++&i2c_6 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	/* USB-C CC controller with its own firmware; the role follows it */
++	typec@33 {
++		compatible = "samsung,s2mm005";
++		reg = <0x33>;
++		interrupt-parent = <&gpa0>;
++		interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&ccic_irq>;
++
++		connector {
++			compatible = "usb-c-connector";
++			label = "USB-C";
++			power-role = "dual";
++			data-role = "dual";
++			try-power-role = "sink";
++			typec-power-opmode = "default";
++			vbus-supply = <&otg_vbus>;
++
++			port {
++				ccic_hs: endpoint {
++					remote-endpoint = <&dwc3_hs>;
++				};
++			};
++		};
++	};
++};
++
+ &mmc_0 {
+ 	/* HS400 stays off until the HS200 path is proven on this board */
+ 	mmc-hs200-1_8v;
+@@ -553,13 +591,21 @@ &usbdrd {
+ };
+ 
+ &usbdrd_dwc3 {
+-	/* VBUS and role come from the S2MM005 CCIC, not supported yet */
+-	dr_mode = "peripheral";
++	/* the S2MM005 CCIC switches the role; without a cable a device, for the USB network */
++	dr_mode = "otg";
++	usb-role-switch;
++	role-switch-default-mode = "peripheral";
+ 	/* GUSB2PHYCFG (8-bit UTMI+, no PHY suspend) and GFLADJ as in the downstream kernel */
+ 	phy_type = "utmi";
+ 	snps,quirk-frame-length-adjustment = <0x20>;
+ 	snps,dis_u2_susphy_quirk;
+ 	snps,dis_enblslpm_quirk;
++
++	port {
++		dwc3_hs: endpoint {
++			remote-endpoint = <&ccic_hs>;
++		};
++	};
+ };
+ 
+ &usbdrd_phy {
+@@ -601,6 +647,13 @@ key_power: key-power-pins {
+ 		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+ 	};
+ 
++	ccic_irq: ccic-irq-pins {
++		samsung,pins = "gpa0-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
++	};
++
+ 	/* open drain, pulled up on the board: the bootloader's pull-down holds it low */
+ 	if_pmic_irq: if-pmic-irq-pins {
+ 		samsung,pins = "gpa2-2";
+-- 
+2.53.0
+

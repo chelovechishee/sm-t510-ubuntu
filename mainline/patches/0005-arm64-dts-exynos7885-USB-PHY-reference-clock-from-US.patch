@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 05/38] arm64: dts: exynos7885: USB PHY reference clock from
+Subject: [PATCH 05/41] arm64: dts: exynos7885: USB PHY reference clock from
  USB PLL
 
 Co-Authored-By: Claude <noreply@anthropic.com>

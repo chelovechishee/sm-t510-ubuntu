@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 39/41] power: supply: s2m-charger: OTG VBUS regulator for a CC
+ controller
+
+Boards without a MUIC node (Galaxy Tab A 10.1 2019) have the USB-C port
+behind a separate CC controller, so nothing turned on the OTG boost. An
+"otg-vbus" child of the PMIC node now registers a regulator for it: the
+CC controller's driver switches it as its VBUS supply. The order and
+values are the vendor kernel's for this board: the switches off, OTG
+mode, a 1 ms over-current debounce, then the boost on at 5.1 V, 1.5 A
+and 1 MHz; off is the charger mode again.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/power/supply/s2m-charger.c | 127 +++++++++++++++++++++++++++++
+ 1 file changed, 127 insertions(+)
+
+diff --git a/drivers/power/supply/s2m-charger.c b/drivers/power/supply/s2m-charger.c
+index 8f453284d..dd30e9b1a 100644
+--- a/drivers/power/supply/s2m-charger.c
++++ b/drivers/power/supply/s2m-charger.c
+@@ -18,6 +18,8 @@
+ #include <linux/platform_device.h>
+ #include <linux/power_supply.h>
+ #include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++#include <linux/regulator/of_regulator.h>
+ 
+ struct s2m_chgr {
+ 	struct device *dev;
+@@ -32,6 +34,10 @@ struct s2m_chgr {
+ 	int usb_type;
+ };
+ 
++/* S2MU005 test registers the vendor kernel touches around OTG */
++#define S2MU005_REG_CHGR_OTG_OCP_DEB	0x88
++#define S2MU005_CHGR_OTG_OCP_DEB	GENMASK(3, 2)
++
+ static int s2mu005_chgr_get_online(struct s2m_chgr *priv, int *value)
+ {
+ 	u32 val;
+@@ -301,6 +307,123 @@ static irqreturn_t s2mu005_chgr_cable_irq(int irq, void *data)
+ 	return IRQ_HANDLED;
+ }
+ 
++/*
++ * VBUS for a USB device on the port (OTG boost), switched by the CC
++ * controller's driver through the "otg-vbus" regulator. The order and values
++ * are the vendor kernel's for this board: switches off, OTG mode, then the
++ * boost on at 5.1 V and 1.5 A; off is the charger mode again.
++ */
++static int s2mu005_otg_vbus_enable(struct regulator_dev *rdev)
++{
++	struct s2m_chgr *priv = rdev_get_drvdata(rdev);
++	struct regmap *map = priv->regmap;
++	int ret;
++
++	ret = regmap_clear_bits(map, S2MU005_REG_CHGR_CTRL15, S2MU005_CHGR_OTG_EN) ?:
++	      regmap_set_bits(map, S2MU005_REG_CHGR_CTRL4, S2MU005_CHGR_OTG_OCP_ON) ?:
++	      regmap_update_bits(map, S2MU005_REG_CHGR_CTRL0, S2MU005_CHGR_OP_MODE,
++				 S2MU005_CHGR_OP_MODE_OTG) ?:
++	      /* over-current debounce 1 ms */
++	      regmap_update_bits(map, S2MU005_REG_CHGR_OTG_OCP_DEB, S2MU005_CHGR_OTG_OCP_DEB,
++				 FIELD_PREP(S2MU005_CHGR_OTG_OCP_DEB, 3));
++	if (ret)
++		goto err;
++
++	usleep_range(5000, 6000);
++
++	ret = regmap_update_bits(map, S2MU005_REG_CHGR_CTRL15, S2MU005_CHGR_OTG_EN,
++				 FIELD_PREP(S2MU005_CHGR_OTG_EN, 1)) ?:
++	      regmap_clear_bits(map, S2MU005_REG_CHGR_CTRL4, S2MU005_CHGR_OTG_OCP_ON) ?:
++	      /* boost at 1 MHz */
++	      regmap_update_bits(map, S2MU005_REG_CHGR_CTRL11, S2MU005_CHGR_OSC_BOOST,
++				 FIELD_PREP(S2MU005_CHGR_OSC_BOOST, 2)) ?:
++	      regmap_update_bits(map, S2MU005_REG_CHGR_CTRL4, S2MU005_CHGR_OTG_OCP,
++				 FIELD_PREP(S2MU005_CHGR_OTG_OCP, S2MU005_CHGR_OTG_OCP_1P5A)) ?:
++	      /* the VBUS switches open on over-current */
++	      regmap_clear_bits(map, S2MU005_REG_CHGR_CTRL4, S2MU005_CHGR_OTG_OCP_OFF) ?:
++	      regmap_set_bits(map, S2MU005_REG_CHGR_CTRL4, S2MU005_CHGR_OTG_OCP_ON) ?:
++	      regmap_update_bits(map, S2MU005_REG_CHGR_CTRL5, S2MU005_CHGR_VMID_BOOST,
++				 FIELD_PREP(S2MU005_CHGR_VMID_BOOST,
++					    S2MU005_CHGR_VMID_BOOST_5P1V));
++	if (ret)
++		goto err;
++
++	dev_info(priv->dev, "OTG VBUS on\n");
++	return 0;
++
++err:
++	dev_err(priv->dev, "failed to turn on OTG VBUS (%d)\n", ret);
++	return ret;
++}
++
++static int s2mu005_otg_vbus_disable(struct regulator_dev *rdev)
++{
++	struct s2m_chgr *priv = rdev_get_drvdata(rdev);
++	int ret;
++
++	ret = regmap_update_bits(priv->regmap, S2MU005_REG_CHGR_CTRL0, S2MU005_CHGR_OP_MODE,
++				 S2MU005_CHGR_OP_MODE_CHG) ?:
++	      regmap_update_bits(priv->regmap, S2MU005_REG_CHGR_OTG_OCP_DEB,
++				 S2MU005_CHGR_OTG_OCP_DEB,
++				 FIELD_PREP(S2MU005_CHGR_OTG_OCP_DEB, 2));
++	if (ret) {
++		dev_err(priv->dev, "failed to turn off OTG VBUS (%d)\n", ret);
++		return ret;
++	}
++
++	dev_info(priv->dev, "OTG VBUS off\n");
++	return 0;
++}
++
++static int s2mu005_otg_vbus_is_enabled(struct regulator_dev *rdev)
++{
++	struct s2m_chgr *priv = rdev_get_drvdata(rdev);
++	unsigned int reg;
++	int ret;
++
++	ret = regmap_read(priv->regmap, S2MU005_REG_CHGR_CTRL0, &reg);
++	if (ret)
++		return ret;
++
++	return FIELD_GET(S2MU005_CHGR_OP_MODE, reg) == S2MU005_CHGR_OP_MODE_OTG;
++}
++
++static const struct regulator_ops s2mu005_otg_vbus_ops = {
++	.enable = s2mu005_otg_vbus_enable,
++	.disable = s2mu005_otg_vbus_disable,
++	.is_enabled = s2mu005_otg_vbus_is_enabled,
++};
++
++static const struct regulator_desc s2mu005_otg_vbus_desc = {
++	.name = "otg-vbus",
++	.type = REGULATOR_VOLTAGE,
++	.owner = THIS_MODULE,
++	.ops = &s2mu005_otg_vbus_ops,
++	.n_voltages = 1,
++	.fixed_uV = 5100000,
++};
++
++static int s2mu005_otg_vbus_register(struct s2m_chgr *priv)
++{
++	struct device_node *np __free(device_node) =
++		of_get_child_by_name(priv->dev->parent->of_node, "otg-vbus");
++	struct regulator_config cfg = {
++		.dev = priv->dev,
++		.driver_data = priv,
++		.regmap = priv->regmap,
++	};
++	struct regulator_dev *rdev;
++
++	if (!np)
++		return 0;
++
++	cfg.of_node = np;
++	cfg.init_data = of_get_regulator_init_data(priv->dev, np, &s2mu005_otg_vbus_desc);
++	rdev = devm_regulator_register(priv->dev, &s2mu005_otg_vbus_desc, &cfg);
++
++	return PTR_ERR_OR_ZERO(rdev);
++}
++
+ static int s2mu005_chgr_probe_standalone(struct s2m_chgr *priv,
+ 					 struct platform_device *pdev)
+ {
+@@ -308,6 +431,10 @@ static int s2mu005_chgr_probe_standalone(struct s2m_chgr *priv,
+ 	struct power_supply_battery_info *info;
+ 	int i, irq, ret;
+ 
++	ret = s2mu005_otg_vbus_register(priv);
++	if (ret)
++		return dev_err_probe(priv->dev, ret, "failed to register OTG VBUS\n");
++
+ 	ret = devm_delayed_work_autocancel(priv->dev, &priv->detect_work,
+ 					   s2mu005_chgr_detect_work);
+ 	if (ret)
+-- 
+2.53.0
+
