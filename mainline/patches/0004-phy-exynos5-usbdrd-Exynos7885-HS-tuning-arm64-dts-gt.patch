@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 04/34] phy: exynos5-usbdrd: Exynos7885 HS tuning; arm64: dts:
+Subject: [PATCH 04/38] phy: exynos5-usbdrd: Exynos7885 HS tuning; arm64: dts:
  gta3xlwifi: UTMI 8-bit, GFLADJ
 
 Co-Authored-By: Claude <noreply@anthropic.com>

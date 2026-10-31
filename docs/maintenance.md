@@ -101,8 +101,10 @@ mailing list) and take each new 7.3.N, at least the ones that fix CVEs.
    release, makes a new tree and applies `mainline/patches/` on top. If a
    patch does not apply, fix it in the new tree (compare with the old one)
    and run `mainline/export-patches.sh`.
-3. `mainline/make-boot.sh` (and `INSTALL=1` for the installer image, for an
-   image release).
+3. `mainline/make-boot.sh initramfs` (and `INSTALL=1` for the installer
+   image, for an image release). Without the argument it packs the bring-up
+   initramfs, which stops after printing its report; `make-debs.sh` refuses
+   that image.
 4. Try it on your tablet first without a package: copy the boot image over
    and `dd` it to `/dev/mmcblk0p15`, restart. Keep the previous image on the
    PC.

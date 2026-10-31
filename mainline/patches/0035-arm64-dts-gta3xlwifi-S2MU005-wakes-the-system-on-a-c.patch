@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 35/38] arm64: dts: gta3xlwifi: S2MU005 wakes the system on a
+ cable change
+
+The charger sets the input current from the BC1.2 result when VBUS comes
+or goes, but asleep its interrupt is disabled: a cable plugged in during
+s2idle charged at the bootloader's 500 mA until something else woke the
+tablet. Mark the PMIC as a wakeup source; the I2C core then makes its
+interrupt a wake IRQ and sec-common keeps it armed over suspend.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index c94c9f9bb..1a98cf704 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -382,6 +382,11 @@ pmic@3d {
+ 		interrupt-parent = <&gpa2>;
+ 		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
+ 		monitored-battery = <&battery>;
++		/*
++		 * A cable plugged in or out during sleep wakes the tablet, so the
++		 * charger sets the input current for it; asleep it stays at 500 mA.
++		 */
++		wakeup-source;
+ 	};
+ };
+ 
+-- 
+2.53.0
+

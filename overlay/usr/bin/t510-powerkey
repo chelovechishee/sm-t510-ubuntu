@@ -4,7 +4,9 @@
 A press with the screen off turns it on at once. With the screen on, a short
 press (released before LONG_PRESS) locks, turns it off and suspends (s2idle,
 when the kernel has it; the key wakes the tablet and the screen comes back
-on); released after a longer hold it takes a screenshot (t510-screenshot:
+on; a cable plugged in or out wakes it too, and then it goes back to sleep
+with the screen off once the charger has set its current); released after a
+longer hold it takes a screenshot (t510-screenshot:
 Pictures/Screenshots and the clipboard); held for POWER_PRESS it opens the
 Xfce power dialog (log out, restart, shut down) while still held. When the
 session is locked the screenshot and the dialog would both land behind the
@@ -26,6 +28,8 @@ EV_KEY = 0x01
 KEY_POWER = 116
 LONG_PRESS = 0.8  # seconds: screenshot instead of lock
 POWER_PRESS = 3.0  # seconds: power dialog
+CHARGER_SETTLE = 3.0  # seconds: BC1.2 ends (attach) a moment after VBUS
+CHARGER_ONLINE = "/sys/class/power_supply/s2mu005-charger/online"
 
 children = []
 
@@ -94,6 +98,15 @@ def can_suspend():
 def slept():
     """Seconds spent suspended since boot: BOOTTIME runs on, MONOTONIC stops."""
     return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+
+
+def charger_online():
+    """Whether a cable is in, as the charger reads it now; None without one."""
+    try:
+        with open(CHARGER_ONLINE) as f:
+            return f.read().strip()
+    except OSError:
+        return None
 
 
 def loginctl_value(*args):
@@ -181,6 +194,8 @@ def main():
         asleep = None
         # wake_press: the next press is the one that woke the tablet
         wake_press = False
+        # cable: charger_online() when it went to sleep
+        cable = None
         try:
             while True:
                 timeout = None
@@ -200,9 +215,19 @@ def main():
                     power_dialog()
                 if not ready:
                     if woke:
-                        # woken by something else: no press to turn it on
                         wake_press = False
-                        screen_on()
+                        if cable is not None and charger_online() != cable:
+                            # a cable plugged in or out woke it (the PMIC is a
+                            # wakeup source): the charger sets the current for
+                            # it, then back to sleep, unless the key is pressed
+                            # meanwhile (read in the next round)
+                            if not select.select([fd], [], [], CHARGER_SETTLE)[0]:
+                                cable = charger_online()
+                                asleep = slept()
+                                subprocess.run(["systemctl", "suspend"])
+                        else:
+                            # woken by something else: no press to turn it on
+                            screen_on()
                     continue
                 data = os.read(fd, 24 * 16)
                 if not data:
@@ -227,6 +252,7 @@ def main():
                         pressed = None
                         if held < LONG_PRESS:
                             asleep = slept()
+                            cable = charger_online()
                             lock_and_off()
                         else:
                             screenshot()

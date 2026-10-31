@@ -10,6 +10,25 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.8.3 — the charger follows the cable, asleep too (build #70)
+
+- The charging current now changes with the cable. The charger's
+  interrupts never reached the kernel (three faults: the device tree named
+  the wrong interrupt line for the pin, the bootloader's pull-down held the
+  pin low, and the MUIC's interrupts stayed masked), so the current was set
+  once, at boot, for the cable plugged in then: a charger plugged in later
+  charged at 500 mA, a PC port plugged in after a charger was asked for
+  more than it gives.
+- A cable plugged in or out during sleep wakes the tablet for a moment:
+  the charger sets the current for it, and the tablet goes back to sleep
+  with the screen off. A charger plugged in at night now charges at full
+  current.
+- `make-debs.sh` refuses a boot image whose initramfs does not start Ubuntu
+  (`make-boot.sh` without its `initramfs` argument packs the bring-up one).
+
+Builds: #68 (only the wakeup; the charger's interrupts still lost), #69
+(the interrupt line: an interrupt storm through the pull-down), #70.
+
 ## 0.8.2 — word suggestions on the on-screen keyboard (build #67)
 
 - Onboard suggests words above its keys as you type (English); a tap on one

@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 03/34] phy: exynos5-usbdrd: add Exynos7885 support; arm64:
+Subject: [PATCH 03/38] phy: exynos5-usbdrd: add Exynos7885 support; arm64:
  dts: exynos7885/gta3xlwifi: add USB DRD
 
 Co-Authored-By: Claude <noreply@anthropic.com>

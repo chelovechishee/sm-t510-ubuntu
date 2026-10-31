@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 06/34] Input: add STMicroelectronics FTS1BA90A touchscreen
+Subject: [PATCH 06/38] Input: add STMicroelectronics FTS1BA90A touchscreen
  driver; arm64: dts: gta3xlwifi: touchscreen
 
 Co-Authored-By: Claude <noreply@anthropic.com>

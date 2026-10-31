@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 18/34] ASoC: samsung: add ABOX from the downstream kernel
+Subject: [PATCH 18/38] ASoC: samsung: add ABOX from the downstream kernel
  (WIP); arm64: dts: gta3xlwifi: ABOX, SysMMU, ABOX GIC
 
 Port to the 7.3 ASoC API (components instead of codec/platform drivers),

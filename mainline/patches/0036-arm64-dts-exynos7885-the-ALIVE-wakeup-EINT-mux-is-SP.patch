@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 36/38] arm64: dts: exynos7885: the ALIVE wakeup EINT mux is
+ SPI 16
+
+gpa0 and gpa1 have one GIC interrupt per pin (SPI 0-15); the other
+wakeup banks (gpa2, gpq0) share one more, SPI 16 in the vendor device
+tree. SPI 130 named here belongs to the DISPAUD pin controller, so no
+interrupt of gpa2 or gpq0 ever arrived: on the Galaxy Tab A 10.1 the
+S2MU005 charger (gpa2-2) only set its currents once, at probe.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index 4f137dcfa..4a71882fe 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -601,7 +601,8 @@ wakeup-interrupt-controller {
+ 				compatible = "samsung,exynos7885-wakeup-eint",
+ 					     "samsung,exynos7-wakeup-eint";
+ 				interrupt-parent = <&gic>;
+-				interrupts = <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>;
++				/* gpa2 and gpq0 (gpa0/gpa1 have one SPI per pin) */
++				interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
+ 			};
+ 		};
+ 
+-- 
+2.53.0
+

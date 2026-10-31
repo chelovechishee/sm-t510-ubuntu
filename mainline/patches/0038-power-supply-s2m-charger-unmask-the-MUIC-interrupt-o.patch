@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 38/38] power: supply: s2m-charger: unmask the MUIC interrupt
+ output
+
+S-Boot leaves INT_MASK set in MUIC CTRL1, as the vendor MUIC driver
+clears it at probe and we have none on boards without a MUIC node. The
+attach status then latches but never raises the interrupt: with VBUS
+read 100 ms after it comes, before BC1.2 is done, a dedicated charger
+plugged in after boot stayed "Unknown" at 500 mA.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/power/supply/s2m-charger.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/power/supply/s2m-charger.c b/drivers/power/supply/s2m-charger.c
+index c0bbaace4..8f453284d 100644
+--- a/drivers/power/supply/s2m-charger.c
++++ b/drivers/power/supply/s2m-charger.c
+@@ -337,6 +337,13 @@ static int s2mu005_chgr_probe_standalone(struct s2m_chgr *priv,
+ 					     irqs[i]);
+ 	}
+ 
++	/*
++	 * The bootloader leaves the MUIC's interrupt output masked: attach,
++	 * which comes when BC1.2 has found a dedicated charger, would then only
++	 * be read along with a VBUS interrupt, and that one comes before it.
++	 */
++	regmap_clear_bits(priv->regmap, S2MU005_REG_MUIC_CTRL1, S2MU005_MUIC_IRQ);
++
+ 	schedule_delayed_work(&priv->detect_work, 0);
+ 
+ 	return 0;
+-- 
+2.53.0
+

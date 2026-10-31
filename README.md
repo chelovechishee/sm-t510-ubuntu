@@ -52,7 +52,7 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 | Wi-Fi | Samsung SCSC (ported Samsung driver), 2.4 and 5 GHz, NetworkManager |
 | Sound | speakers: ABOX + 2×TFA9896, PipeWire, volume keys |
 | Power | CPU DVFS through ACPM, cpuidle (C2) on all 8 cores, temperatures and throttling |
-| Battery | charge level (S2MU005), charging at stock currents by the kernel driver |
+| Battery | charge level (S2MU005), charging at stock currents by the kernel driver, set again for every cable (asleep too) |
 | Other | microSD, clock (RTC in the PMIC over the SPEEDY bus), USB network and console to a PC, network printing |
 
 **Not working yet:** Bluetooth, headphones and microphone (COD3035 codec),

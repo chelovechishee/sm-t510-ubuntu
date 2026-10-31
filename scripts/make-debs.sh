@@ -110,7 +110,26 @@ build "$S" "$P/t510-support/control" -e "s/@VERSION@/$VERSION/"
 IMAGE=$K/arch/arm64/boot/Image
 [ -f "$BOOT" ] && [ -f "$IMAGE" ] || die "no kernel build (README.md, \"Building\")"
 n=$(find "$K/.config" "$IMAGE" "$T/initramfs" -newer "$BOOT" -print -quit)
-[ -z "$n" ] || die "$BOOT is older than $n: run mainline/make-boot.sh"
+[ -z "$n" ] || die "$BOOT is older than $n: run mainline/make-boot.sh initramfs"
+# its initramfs starts Ubuntu: make-boot.sh without an argument packs the
+# bring-up one (initramfs-phase0, stops after its report), INSTALL=1 the
+# installer's; either would leave every tablet that takes the package hanging
+python3 - "$BOOT" <<'EOF' || die "$BOOT does not start Ubuntu: run mainline/make-boot.sh initramfs"
+import gzip, struct, sys
+d = open(sys.argv[1], "rb").read()
+kernel, _, ramdisk = struct.unpack_from("<3I", d, 8)
+page = struct.unpack_from("<I", d, 36)[0]
+off = page + (kernel + page - 1) // page * page
+cpio = gzip.decompress(d[off:off + ramdisk])
+files, i = {}, 0
+while cpio[i:i + 6] == b"070701":  # newc: header, name, data, 4-byte aligned
+    size, namesize = int(cpio[i + 54:i + 62], 16), int(cpio[i + 94:i + 102], 16)
+    name = cpio[i + 110:i + 109 + namesize].decode().removeprefix("./")
+    i = (i + 110 + namesize + 3) & ~3
+    files[name] = cpio[i:i + size]
+    i = (i + size + 3) & ~3
+sys.exit(b"exec switch_root /newroot" not in files.get("init", b"") or "install" in files)
+EOF
 # no Samsung firmware built in: the published kernel reads it from the tablet
 grep -qx 'CONFIG_EXTRA_FIRMWARE=""' "$K/.config" ||
 	die "the kernel builds firmware in: $(grep '^CONFIG_EXTRA_FIRMWARE=' "$K/.config")"

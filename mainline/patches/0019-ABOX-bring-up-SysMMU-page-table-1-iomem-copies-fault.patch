@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 19/34] ABOX bring-up: SysMMU page table 1, iomem copies, fault
+Subject: [PATCH 19/38] ABOX bring-up: SysMMU page table 1, iomem copies, fault
  stop
 
 iommu/exynos: samsung,sysmmu-pt-id1 (second page table of the 7885 ABOX

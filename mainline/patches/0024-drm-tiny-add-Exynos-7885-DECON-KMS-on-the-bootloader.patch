@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 24/34] drm/tiny: add Exynos 7885 DECON KMS on the bootloader
+Subject: [PATCH 24/38] drm/tiny: add Exynos 7885 DECON KMS on the bootloader
  setup; arm64: dts: exynos7885/gta3xlwifi: DECON, Mali-G71
 
 S-Boot leaves DECON0 (video mode), DSIM and the panel running and scans out
