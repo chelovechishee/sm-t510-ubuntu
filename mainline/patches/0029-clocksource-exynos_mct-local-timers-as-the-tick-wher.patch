@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 29/43] clocksource: exynos_mct: local timers as the tick where
+Subject: [PATCH 29/46] clocksource: exynos_mct: local timers as the tick where
  the arch timer stops
 
 On Exynos 7885 the arch timer stops when cpuidle powers a core down. The MCT

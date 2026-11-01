@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 02/43] arm64: dts: exynos: gta3xlwifi: add reboot modes
+Subject: [PATCH 02/46] arm64: dts: exynos: gta3xlwifi: add reboot modes
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---

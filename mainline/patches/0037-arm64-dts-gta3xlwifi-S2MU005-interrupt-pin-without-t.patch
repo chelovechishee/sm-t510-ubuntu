@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 37/43] arm64: dts: gta3xlwifi: S2MU005 interrupt pin without
+Subject: [PATCH 37/46] arm64: dts: gta3xlwifi: S2MU005 interrupt pin without
  the pull-down
 
 The S2MU005 INT output is open drain with a pull-up on the board. The

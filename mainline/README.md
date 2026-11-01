@@ -22,7 +22,7 @@ one DT, `exynos7885.dts`, between them.
 | — | USB-C host/OTG: S2MM005 CC controller (own `s2mm005` driver), dwc3 role switch, OTG boost of the S2MU005 | **works** |
 | — | Ubuntu 26.04.1 LTS on the 7.3 kernel | **works** |
 | — | Bluetooth: SCSC BT service + own BlueZ driver (`scsc_bluez`) | **works** |
-| — | COD3035 codec (headphones, microphones) | — |
+| — | COD3035 codec: built-in microphone (headphones without jack detection, untried) | **works** |
 
 The volume keys work together with the sound card (without it Xfce showed
 "no sound").
@@ -456,6 +456,22 @@ ABOX DSP, whose Bluetooth side is not ported.
   (`hw:0,0`) → back end UAIF3 (I2S, ABOX is master) → two TFA9896 (`tfa989x`,
   0x96 added; i2c_3: 0x34 right, 0x35 left, `SpkR`/`SpkL Amp Input`).
   `t510-audio.service` sets the route SPUS OUT0 → SIFS1 → UAIF SPK3.
+  Capture: front end WDMA1 (`hw:0,1`; front ends come first, their link
+  index is the PCM number) ← back end UAIF0 (I2S, ABOX is master) ← COD3035X;
+  ABOX route UAIF0 → NSRC0 → WDMA1. Board widgets: built-in mic on IN1L,
+  headset mic on IN3L, headphone on HPOUTLN; MIC1/MIC2 on bias 1, MIC3 on
+  bias 2, as in the downstream DT.
+- **Codec** COD3035X (`sound/soc/codecs/cod3035x.c`), ported from 4.4: the
+  codec block of the S2MPU08 PMIC, digital part SPEEDY device 3, analog part
+  device 7 (DNC/delay registers of the headphone path), both I2C clients of
+  the SPEEDY driver. Controls keep their downstream names, so Android's
+  mixer paths still apply. ABOX gives it MCLK (`abox_enable_mclk()`: UAIF2
+  CTRL0); with ABOX never suspended and LDO36/LDO37 always on the codec
+  stays powered — no runtime PM or cache restore. The mic biases are DAPM
+  supplies (`MICBIAS1`/`MICBIAS2`). PMIC register 0x59 bit 7 marks the
+  Lassen A02 revision (this tablet: 2). Not ported: jack, button and water
+  detection (PMIC interrupt + GPADC). The downstream write of 0x7D is
+  dropped (outside the register map, so it never reached the codec).
 - **PipeWire**: WirePlumber 0.5 does not read `main.lua.d` — the rule "no
   automatic card setup" is in `/etc/wireplumber/wireplumber.conf.d/51-t510.conf`,
   otherwise WirePlumber tries every format (the DSP firmware crashes) and makes

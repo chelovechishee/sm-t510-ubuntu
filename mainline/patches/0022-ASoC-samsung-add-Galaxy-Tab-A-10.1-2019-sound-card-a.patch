@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 22/43] ASoC: samsung: add Galaxy Tab A 10.1 (2019) sound card;
+Subject: [PATCH 22/46] ASoC: samsung: add Galaxy Tab A 10.1 (2019) sound card;
  arm64: dts: gta3xlwifi: speakers
 
 DPCM card: RDMA0 front end, UAIF3 (I2S, ABOX clock provider) back end to

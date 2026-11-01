@@ -35,8 +35,8 @@
 Working routes (tested):
 
 - speakers: `RDMA0 (hw:0,0) → SPUS OUT0 → SIFS1 → UAIF3 → TFA9896 ×2`;
-- headphones: `RDMA0 → SPUS OUT0 → SIFS0 → UAIF0 → COD3035 HP` (on the jack sensor; untested, no headphones);
-- microphone: `MIC1 → COD3035 ADC → UAIF0 → NSRC0 → WDMA1 (hw:0,9)`, MIC1 boost 2 + ADC 132 (speech ≈ −38 dBFS).
+- headphones: `RDMA0 → SPUS OUT0 → SIFS0 → UAIF0 → COD3035 HP` (on the jack sensor, which the mainline codec driver does not have yet; untested, no headphones);
+- microphone: `MIC1 → COD3035 ADC → UAIF0 → NSRC0 → WDMA1 (hw:0,1)`, MIC1 boost 2 (20 dB) + ADC 150 (+12 dB, its top): speech peaks around −10 dBFS. The PipeWire source `t510-input` starts at volume 1.26 (×2, set once per user by `migrate-user`) and has `priority.session` 1001: WirePlumber counts the speakers' monitor as a source too and took it as the default on a tie.
 
 Android's tables (`/vendor/etc/mixer_paths.xml`) are turned into `amixer`
 commands by `tools/mixer_paths2amixer.py`. RDMA7 (as in Android's

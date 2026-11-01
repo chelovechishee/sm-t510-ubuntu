@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 27/43] firmware: psci: preserve all registers around
+Subject: [PATCH 27/46] firmware: psci: preserve all registers around
  CPU_SUSPEND on SMC
 
 The Exynos 7885 EL3 monitor returns from a denied CPU_SUSPEND (an interrupt

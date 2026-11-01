@@ -10,6 +10,27 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.11.0 — microphone (build #84)
+
+- The built-in microphone works: "Built-in Microphone" in the sound
+  settings, for calls, voice messages and recording. Its volume starts at
+  126 % (software gain on top of the codec's own, which is at its top);
+  existing users get that at their next login, once, and can change it.
+- In the kernel: the audio codec inside the PMIC (COD3035X), ported from
+  Samsung's kernel, and a capture path through the audio DSP. The sound
+  card now has a second device, `hw:0,1`, for recording.
+- Headphones: the codec's headphone output is in the driver, but nothing
+  switches to it yet. Plugging headphones in is not detected (the codec's
+  jack detection is not ported), and the headphone path is untried. The
+  headset microphone is in the same state.
+
+Builds:
+
+- #83 — the codec and the capture path; recording works, one write to a
+  register outside the codec's map failed at start.
+- #84 — that write left out (it never reached the codec in Samsung's
+  kernel either).
+
 ## 0.10.1 — no workspace switcher on the panel (build #82)
 
 - The workspace switcher is gone from the top panel: in portrait the panel

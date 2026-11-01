@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 45/46] ASoC: samsung: gta3xl: capture and the COD3035X codec
+
+A WDMA1 capture front end (the card's PCM 1) and a UAIF0 back end to the
+COD3035X codec next to the speaker path, with the built-in (MIC1) and
+headset (MIC3) microphones and the headphone as board widgets. The mic
+biases follow the downstream DT: MIC1 and MIC2 on bias 1, MIC3 on bias 2.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ sound/soc/samsung/Kconfig  |   4 +-
+ sound/soc/samsung/gta3xl.c | 154 ++++++++++++++++++++++++++-----------
+ 2 files changed, 112 insertions(+), 46 deletions(-)
+
+diff --git a/sound/soc/samsung/Kconfig b/sound/soc/samsung/Kconfig
+index 914b076ad..6319c457c 100644
+--- a/sound/soc/samsung/Kconfig
++++ b/sound/soc/samsung/Kconfig
+@@ -154,7 +154,9 @@ config SND_SOC_SAMSUNG_GTA3XL
+ 	tristate "Sound card of the Samsung Galaxy Tab A 10.1 (2019) SM-T510"
+ 	depends on SND_SOC_SAMSUNG_ABOX && I2C
+ 	select SND_SOC_TFA989X
++	select SND_SOC_COD3035X
+ 	help
+-	  ABOX playback to the two TFA9896 speaker amplifiers of the SM-T510.
++	  ABOX playback to the two TFA9896 speaker amplifiers and the COD3035X
++	  codec (microphones, headphones) of the SM-T510.
+ 
+ endif #SND_SOC_SAMSUNG
+diff --git a/sound/soc/samsung/gta3xl.c b/sound/soc/samsung/gta3xl.c
+index e417a86df..f916f80b9 100644
+--- a/sound/soc/samsung/gta3xl.c
++++ b/sound/soc/samsung/gta3xl.c
+@@ -2,11 +2,13 @@
+ /*
+  * Sound card of the Samsung Galaxy Tab A 10.1 (2019), SM-T510.
+  *
+- * Playback goes through the ABOX DSP: the RDMA0 front end (the PCM device)
+- * is mixed by ABOX and sent out of UAIF3 to the two TFA9896 speaker
+- * amplifiers. The ABOX mixer route (SPUS OUT0 -> SIFS1 -> UAIF SPK3) is set
+- * from userspace with its ALSA controls. The COD3035 codec (headphones,
+- * microphones) on UAIF0 is not described yet.
++ * Everything goes through the ABOX DSP. Front ends (the PCM devices):
++ * RDMA0 playback (hw:0,0) and WDMA1 capture (hw:0,1). Back ends: UAIF3 to
++ * the two TFA9896 speaker amplifiers and UAIF0 to the COD3035X codec
++ * (headphones, built-in and headset microphones). ABOX is the I2S clock
++ * provider on both. The ABOX mixer routes (SPUS OUT0 -> SIFS1 -> UAIF SPK3
++ * for the speakers, UAIF0 -> NSRC0 -> WDMA1 for capture) are set from
++ * userspace with its ALSA controls.
+  */
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -16,28 +18,100 @@
+ 
+ static const struct snd_soc_dapm_widget gta3xl_widgets[] = {
+ 	SND_SOC_DAPM_SPK("Speaker", NULL),
++	SND_SOC_DAPM_HP("Headphone", NULL),
++	SND_SOC_DAPM_MIC("Built-in Mic", NULL),
++	SND_SOC_DAPM_MIC("Headset Mic", NULL),
+ };
+ 
+ static const struct snd_soc_dapm_route gta3xl_routes[] = {
+ 	{ "Speaker", NULL, "SpkL OUT" },
+ 	{ "Speaker", NULL, "SpkR OUT" },
++
++	{ "Headphone", NULL, "HPOUTLN" },
++
++	/* mic bias as in the downstream DT: MIC1/MIC2 bias 1, MIC3 bias 2 */
++	{ "IN1L", NULL, "Built-in Mic" },
++	{ "MIC1_PGA", NULL, "MICBIAS1" },
++	{ "MIC2_PGA", NULL, "MICBIAS1" },
++	{ "IN3L", NULL, "Headset Mic" },
++	{ "MIC3_PGA", NULL, "MICBIAS2" },
+ };
+ 
++/* a DPCM front end: an ABOX DMA DAI with its DMA platform */
++static int gta3xl_front_end(struct device *dev, struct snd_soc_dai_link *link,
++			    const char *name, struct device_node *platform_np,
++			    bool capture)
++{
++	struct snd_soc_dai_link_component *cpu, *platform;
++
++	cpu = devm_kzalloc(dev, sizeof(*cpu), GFP_KERNEL);
++	platform = devm_kzalloc(dev, sizeof(*platform), GFP_KERNEL);
++	if (!cpu || !platform)
++		return -ENOMEM;
++	cpu->dai_name = name;
++	platform->of_node = platform_np;
++
++	link->name = name;
++	link->stream_name = name;
++	link->cpus = cpu;
++	link->num_cpus = 1;
++	link->codecs = &snd_soc_dummy_dlc;
++	link->num_codecs = 1;
++	link->platforms = platform;
++	link->num_platforms = 1;
++	link->dynamic = 1;
++	link->ignore_suspend = 1;
++	if (capture) {
++		link->capture_only = 1;
++		link->trigger[SNDRV_PCM_STREAM_CAPTURE] = SND_SOC_DPCM_TRIGGER_POST;
++	} else {
++		link->playback_only = 1;
++		link->trigger[SNDRV_PCM_STREAM_PLAYBACK] = SND_SOC_DPCM_TRIGGER_POST;
++	}
++	return 0;
++}
++
++/* a DPCM back end: an ABOX UAIF, I2S with ABOX as clock provider */
++static int gta3xl_back_end(struct device *dev, struct snd_soc_dai_link *link,
++			   const char *name, struct snd_soc_dai_link_component *codecs,
++			   int num_codecs)
++{
++	struct snd_soc_dai_link_component *cpu;
++
++	cpu = devm_kzalloc(dev, sizeof(*cpu), GFP_KERNEL);
++	if (!cpu)
++		return -ENOMEM;
++	cpu->dai_name = name;
++
++	link->name = name;
++	link->stream_name = name;
++	link->cpus = cpu;
++	link->num_cpus = 1;
++	link->codecs = codecs;
++	link->num_codecs = num_codecs;
++	link->no_pcm = 1;
++	link->ignore_suspend = 1;
++	link->ignore_pmdown_time = 1;
++	link->dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
++			SND_SOC_DAIFMT_CBC_CFC;
++	link->be_hw_params_fixup = abox_hw_params_fixup_helper;
++	return 0;
++}
++
+ static int gta3xl_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct device_node *np = dev->of_node;
+-	struct snd_soc_dai_link_component *fe_cpu, *fe_platform, *be_cpu, *amps;
++	struct device_node *rdma, *wdma;
++	struct snd_soc_dai_link_component *amps, *codec;
+ 	struct snd_soc_dai_link *links;
+ 	struct snd_soc_card *card;
+-	int i, n_amps;
++	int i, n_amps, ret;
+ 
+ 	card = devm_kzalloc(dev, sizeof(*card), GFP_KERNEL);
+-	links = devm_kcalloc(dev, 2, sizeof(*links), GFP_KERNEL);
+-	fe_cpu = devm_kzalloc(dev, sizeof(*fe_cpu), GFP_KERNEL);
+-	fe_platform = devm_kzalloc(dev, sizeof(*fe_platform), GFP_KERNEL);
+-	be_cpu = devm_kzalloc(dev, sizeof(*be_cpu), GFP_KERNEL);
+-	if (!card || !links || !fe_cpu || !fe_platform || !be_cpu)
++	links = devm_kcalloc(dev, 4, sizeof(*links), GFP_KERNEL);
++	codec = devm_kzalloc(dev, sizeof(*codec), GFP_KERNEL);
++	if (!card || !links || !codec)
+ 		return -ENOMEM;
+ 
+ 	n_amps = of_count_phandle_with_args(np, "samsung,speaker-amps", NULL);
+@@ -51,46 +125,36 @@ static int gta3xl_probe(struct platform_device *pdev)
+ 		amps[i].dai_name = "tfa989x-hifi";
+ 	}
+ 
+-	/* front end: the RDMA0 PCM, DMA by its ABOX RDMA platform */
+-	fe_cpu->dai_name = "RDMA0";
+-	fe_platform->of_node = of_parse_phandle(np, "samsung,abox-rdma", 0);
+-	if (!fe_platform->of_node)
++	codec->of_node = of_parse_phandle(np, "samsung,codec", 0);
++	if (!codec->of_node)
++		return dev_err_probe(dev, -EINVAL, "no samsung,codec\n");
++	codec->dai_name = "cod3035x-aif";
++
++	rdma = of_parse_phandle(np, "samsung,abox-rdma", 0);
++	if (!rdma)
+ 		return dev_err_probe(dev, -EINVAL, "no samsung,abox-rdma\n");
++	wdma = of_parse_phandle(np, "samsung,abox-wdma", 0);
++	if (!wdma)
++		return dev_err_probe(dev, -EINVAL, "no samsung,abox-wdma\n");
+ 
+-	links[0].name = "RDMA0";
+-	links[0].stream_name = "RDMA0";
+-	links[0].cpus = fe_cpu;
+-	links[0].num_cpus = 1;
+-	links[0].codecs = &snd_soc_dummy_dlc;
+-	links[0].num_codecs = 1;
+-	links[0].platforms = fe_platform;
+-	links[0].num_platforms = 1;
+-	links[0].dynamic = 1;
+-	links[0].playback_only = 1;
+-	links[0].ignore_suspend = 1;
+-	links[0].trigger[SNDRV_PCM_STREAM_PLAYBACK] = SND_SOC_DPCM_TRIGGER_POST;
+-
+-	/* back end: UAIF3, I2S with ABOX as clock provider, to the amplifiers */
+-	be_cpu->dai_name = "UAIF3";
+-	links[1].name = "UAIF3";
+-	links[1].stream_name = "UAIF3";
+-	links[1].cpus = be_cpu;
+-	links[1].num_cpus = 1;
+-	links[1].codecs = amps;
+-	links[1].num_codecs = n_amps;
+-	links[1].no_pcm = 1;
+-	links[1].playback_only = 1;
+-	links[1].ignore_suspend = 1;
+-	links[1].ignore_pmdown_time = 1;
+-	links[1].dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
+-			   SND_SOC_DAIFMT_CBC_CFC;
+-	links[1].be_hw_params_fixup = abox_hw_params_fixup_helper;
++	/* front ends first: their link index is the PCM device number */
++	ret = gta3xl_front_end(dev, &links[0], "RDMA0", rdma, false);
++	if (!ret)
++		ret = gta3xl_front_end(dev, &links[1], "WDMA1", wdma, true);
++	if (!ret)
++		ret = gta3xl_back_end(dev, &links[2], "UAIF3", amps, n_amps);
++	if (!ret)
++		ret = gta3xl_back_end(dev, &links[3], "UAIF0", codec, 1);
++	if (ret)
++		return ret;
++	/* the amplifiers only play */
++	links[2].playback_only = 1;
+ 
+ 	card->dev = dev;
+ 	card->owner = THIS_MODULE;
+ 	card->name = "SM-T510";
+ 	card->dai_link = links;
+-	card->num_links = 2;
++	card->num_links = 4;
+ 	card->dapm_widgets = gta3xl_widgets;
+ 	card->num_dapm_widgets = ARRAY_SIZE(gta3xl_widgets);
+ 	card->dapm_routes = gta3xl_routes;
+-- 
+2.53.0
+

@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 36/43] arm64: dts: exynos7885: the ALIVE wakeup EINT mux is
+Subject: [PATCH 36/46] arm64: dts: exynos7885: the ALIVE wakeup EINT mux is
  SPI 16
 
 gpa0 and gpa1 have one GIC interrupt per pin (SPI 0-15); the other

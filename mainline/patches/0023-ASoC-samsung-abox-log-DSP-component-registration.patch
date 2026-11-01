@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 23/43] ASoC: samsung: abox: log DSP component registration
+Subject: [PATCH 23/46] ASoC: samsung: abox: log DSP component registration
 
 Components arrive by IPC from the DSP firmware; with ABOX kept on, only
 "PCM ext" is reported at boot.

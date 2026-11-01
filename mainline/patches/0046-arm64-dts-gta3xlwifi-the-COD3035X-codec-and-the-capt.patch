@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 46/46] arm64: dts: gta3xlwifi: the COD3035X codec and the
+ capture DMA
+
+The codec block of the PMIC at SPEEDY device 3, supplied by LDO36 and
+LDO37, with the bias and debounce values of the downstream DT; the sound
+card gets it and ABOX WDMA1.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts | 27 +++++++++++++++++--
+ 1 file changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index e0dcf0dfb..8f5b6c845 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -329,7 +329,9 @@ abox_wdma_4: abox-wdma@14a52400 {
+ 	sound {
+ 		compatible = "samsung,gta3xlwifi-sound";
+ 		samsung,abox-rdma = <&abox_rdma_0>;
++		samsung,abox-wdma = <&abox_wdma_1>;
+ 		samsung,speaker-amps = <&speaker_right>, <&speaker_left>;
++		samsung,codec = <&audio_codec>;
+ 	};
+ 
+ 	gpio-keys {
+@@ -569,14 +571,14 @@ vmmc_sd: ldo35 {
+ 				regulator-max-microvolt = <3000000>;
+ 			};
+ 
+-			ldo36 {
++			vdd_ldo36: ldo36 {
+ 				regulator-name = "vdd_ldo36";
+ 				regulator-min-microvolt = <1800000>;
+ 				regulator-max-microvolt = <1800000>;
+ 				regulator-always-on;
+ 			};
+ 
+-			ldo37 {
++			vdd_ldo37: ldo37 {
+ 				regulator-name = "vdd_ldo37";
+ 				regulator-min-microvolt = <2900000>;
+ 				regulator-max-microvolt = <2900000>;
+@@ -584,6 +586,27 @@ ldo37 {
+ 			};
+ 		};
+ 	};
++
++	/*
++	 * COD3035X codec block of the PMIC: digital part SPEEDY device 3,
++	 * analog part device 7. Bias and debounce values from the
++	 * downstream DT.
++	 */
++	audio_codec: codec@3 {
++		compatible = "samsung,cod3035x";
++		reg = <0x3>;
++		#sound-dai-cells = <1>;
++		vdd-supply = <&vdd_ldo36>;
++		vdd2-supply = <&vdd_ldo37>;
++		samsung,mic-bias1-voltage = <1>;
++		samsung,mic-bias2-voltage = <1>;
++		samsung,mic-bias-ldo-voltage = <3>;
++		samsung,rcv-drv-current = <1>;
++		samsung,feature-flag = <0x02>;
++		samsung,jackin-dbnc-time = <0xd0>;
++		samsung,jackout-dbnc-time = <0x04>;
++		samsung,lassen-a;
++	};
+ };
+ 
+ &usbdrd {
+-- 
+2.53.0
+

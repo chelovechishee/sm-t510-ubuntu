@@ -68,4 +68,24 @@ if [ ! -e "$CFG/t510/migrated-0.10.1" ]; then
 	mark migrated-0.10.1
 fi
 
+# 0.11.0: the microphone works; even with the codec's gains at their top
+# speech stays quiet, so its PipeWire source starts at 1.26 (x2, +6 dB),
+# as one would set it in the sound settings. Later changes are the user's:
+# WirePlumber keeps them. PipeWire may still be starting at login, so wait
+# for the node in the background.
+if [ ! -e "$CFG/t510/migrated-0.11.0" ]; then
+	(
+		for i in $(seq 30); do
+			id=$(pw-cli ls Node 2>/dev/null | awk '
+				/^\tid / { id = $2; sub(",", "", id) }
+				/node.name = "t510-input"/ { print id; exit }')
+			if [ -n "$id" ] && wpctl set-volume "$id" 1.26; then
+				mark migrated-0.11.0
+				exit
+			fi
+			sleep 2
+		done
+	) &
+fi
+
 [ "$restart" = 0 ] || xfce4-panel -r

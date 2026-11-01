@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 41/43] arm64: dts: gta3xlwifi: USB-C roles through the S2MM005
+Subject: [PATCH 41/46] arm64: dts: gta3xlwifi: USB-C roles through the S2MM005
  CC controller
 
 The S2MM005 sits on i2c_6 at 0x33 with its interrupt on gpa0-2. Its

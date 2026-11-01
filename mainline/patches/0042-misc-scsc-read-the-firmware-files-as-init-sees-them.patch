@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 42/43] misc: scsc: read the firmware files as init sees them
+Subject: [PATCH 42/46] misc: scsc: read the firmware files as init sees them
 
 mx140_request_file() resolved its path against the caller's root. The
 HCI core powers Bluetooth on from a work, and kernel threads keep the
