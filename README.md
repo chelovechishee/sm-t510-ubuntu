@@ -300,12 +300,15 @@ What the version numbers mean and how updates are made:
 - [VDavid003/minimal_sboot_wrapper](https://github.com/VDavid003/minimal_sboot_wrapper) — running mainline from S-Boot.
 - Samsung and [gta3xlwifi-dev](https://github.com/gta3xlwifi-dev/android_kernel_gta3xlwifi) — the GPL kernel code the Wi-Fi (SCSC) and audio (ABOX) drivers were ported from, and where many registers were looked up.
 - Panfrost and Mesa — Mali graphics without closed drivers.
+- Claude (Anthropic) — a huge contribution to the translation: the documentation, changelog and interface strings were translated into English by Claude.
 
 ## Authors
 
 - [chelovechishee](https://github.com/chelovechishee) — author.
 - Claude (Anthropic), in Claude Code — co-author of the code, patches and
-  documentation; named in the patches themselves (`Co-Authored-By`).
+  documentation; named in the patches themselves (`Co-Authored-By`). Special
+  thanks for the huge work on the translation: the documentation, changelog
+  and interface strings were translated into English by Claude.
 
 ## License
 
