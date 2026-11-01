@@ -39,24 +39,28 @@ version after it that apt can bring.
 
 | Package | Contents | Version |
 |---|---|---|
-| `t510-support` | `overlay/` (services, udev rules, Xorg, PipeWire, Xfce defaults, apt pins) and the programs of `tools/` (`longpress`, `fbtool`, `nograb.so`, `noblank.so`) | the project version, `0.7.1` |
+| `t510-support` | `overlay/` (services, udev rules, Xorg, PipeWire, Xfce defaults, apt pins) and the programs of `tools/` (`longpress`, `fbtool`, `nograb.so`, `noblank.so`, `t510-camera`) | the project version, `0.7.1` |
 | `t510-kernel` | the boot image (`boot-mainline.img`: kernel, DTB, initramfs); its install script writes it to BOOT (`mmcblk0p15`) | kernel version + build, `7.3.0+66` |
 | `t510-archive-keyring` | the key the repository is signed with and its apt source | changes only with the key |
+| `libcamera0.7`, `libcamera-ipa` | Ubuntu's libcamera with `camera/libcamera-0.7.0-t510.patch` (the CSIS in the simple pipeline, the sensors, software ISP fixes), built by `camera/build-libcamera.sh` | Ubuntu's version + `+t510.N`, `0.7.0-1ubuntu2+t510.5` |
 
 The files of `image/` are in no package: they change on the tablet itself
 (rotation, keyboard layout, hardware name), so a change to them reaches new
 installs only. A fix that installed tablets need goes into `overlay/`.
 
 The repository holds only these. Ubuntu's packages come from Ubuntu's
-archive as on any Ubuntu system. Our packages own no file of Ubuntu's, and
+archive as on any Ubuntu system. Our own packages own no file of Ubuntu's, and
 Ubuntu's kernel packages (`linux-image-*`, `linux-generic`, `flash-kernel`)
 are pinned off: they cannot reach the BOOT partition.
 
-If one of ours ever has to replace a package of Ubuntu's (a Mesa with
-`gpu/mesa-26.0.8-g71-zero-derivatives.patch`, say), it is Ubuntu's version
-with a suffix, `26.0.8-1ubuntu0.3+t510.1`, pinned above Ubuntu's. Each
-Ubuntu update of that package then needs our rebuild on top of it, or the
-tablets keep the old one. Avoid this while there is another way.
+A package of Ubuntu's that we have to replace is Ubuntu's version with a
+suffix, pinned above Ubuntu's (`overlay/etc/apt/preferences.d/`). So far
+that is libcamera: `0.7.0-1ubuntu2+t510.5`. Each Ubuntu update of it then
+needs our rebuild on top (`camera/build-libcamera.sh`: its comments say what
+it needs), or the tablets keep the old one; `make-debs.sh` leaves those
+packages in `out/debs/`, and `publish.sh` publishes them with ours. Avoid
+more of these while there is another way (a Mesa with
+`gpu/mesa-26.0.8-g71-zero-derivatives.patch`, say).
 
 ## A fix, step by step
 

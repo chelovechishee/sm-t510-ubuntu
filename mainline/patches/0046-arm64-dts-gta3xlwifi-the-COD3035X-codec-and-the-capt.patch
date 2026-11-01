@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 46/46] arm64: dts: gta3xlwifi: the COD3035X codec and the
+Subject: [PATCH 46/52] arm64: dts: gta3xlwifi: the COD3035X codec and the
  capture DMA
 
 The codec block of the PMIC at SPEEDY device 3, supplied by LDO36 and

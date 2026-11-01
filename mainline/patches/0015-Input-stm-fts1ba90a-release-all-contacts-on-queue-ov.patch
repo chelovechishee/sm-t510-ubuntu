@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 15/46] Input: stm-fts1ba90a: release all contacts on queue
+Subject: [PATCH 15/52] Input: stm-fts1ba90a: release all contacts on queue
  overflow/ESD; arm64: dts: gta3xlwifi: battery info
 
 The controller drops queued events, releases included, when its queue

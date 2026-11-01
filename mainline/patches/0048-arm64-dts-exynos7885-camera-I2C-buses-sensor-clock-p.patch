@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 48/52] arm64: dts: exynos7885: camera I2C buses, sensor clock
+ pins and CSIS
+
+The HSI2C controllers 0-2 the camera modules sit on, the CIS_CLK pin
+functions, the MIPI CSI-2 receivers CSIS0 and CSIS1 with the shared
+CSIS-DMA block, and SYSREG_CAM, whose D-PHY resets they use. S-Boot
+leaves the CAM power domain and CMU_CAM running.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7885-pinctrl.dtsi   | 14 ++++
+ arch/arm64/boot/dts/exynos/exynos7885.dtsi    | 70 +++++++++++++++++++
+ 2 files changed, 84 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885-pinctrl.dtsi b/arch/arm64/boot/dts/exynos/exynos7885-pinctrl.dtsi
+index 34bb12191..faf3d43fe 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885-pinctrl.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885-pinctrl.dtsi
+@@ -582,6 +582,20 @@ hs_i2c3_bus: hs-i2c3-bus-pins {
+ 		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_UP>;
+ 	};
+ 
++	cis_clk0: cis-clk0-pins {
++		samsung,pins = "gpc0-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV3>;
++	};
++
++	cis_clk1: cis-clk1-pins {
++		samsung,pins = "gpc0-1";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV3>;
++	};
++
+ 	/* USI0 UART */
+ 	uart3_bus_single: uart3-bus-single-pins {
+ 		samsung,pins = "gpc2-3", "gpc2-2", "gpc2-1", "gpc2-0";
+diff --git a/arch/arm64/boot/dts/exynos/exynos7885.dtsi b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+index 4a71882fe..d8696f885 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7885.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7885.dtsi
+@@ -22,6 +22,8 @@ aliases {
+ 		pinctrl1 = &pinctrl_dispaud;
+ 		pinctrl2 = &pinctrl_fsys;
+ 		pinctrl3 = &pinctrl_top;
++		csis0 = &csis0;
++		csis1 = &csis1;
+ 	};
+ 
+ 	arm-a53-pmu {
+@@ -869,6 +871,74 @@ i2c_6: i2c@13890000 {
+ 			status = "disabled";
+ 		};
+ 
++		hsi2c_0: i2c@138a0000 {
++			compatible = "samsung,exynos7-hsi2c";
++			reg = <0x138a0000 0x1000>;
++			interrupts = <GIC_SPI 257 IRQ_TYPE_LEVEL_HIGH>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&hs_i2c0_bus>;
++			clocks = <&cmu_peri CLK_GOUT_HSI2C0_PCLK>;
++			clock-names = "hsi2c";
++			status = "disabled";
++		};
++
++		hsi2c_1: i2c@138b0000 {
++			compatible = "samsung,exynos7-hsi2c";
++			reg = <0x138b0000 0x1000>;
++			interrupts = <GIC_SPI 258 IRQ_TYPE_LEVEL_HIGH>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&hs_i2c1_bus>;
++			clocks = <&cmu_peri CLK_GOUT_HSI2C1_PCLK>;
++			clock-names = "hsi2c";
++			status = "disabled";
++		};
++
++		hsi2c_2: i2c@138c0000 {
++			compatible = "samsung,exynos7-hsi2c";
++			reg = <0x138c0000 0x1000>;
++			interrupts = <GIC_SPI 259 IRQ_TYPE_LEVEL_HIGH>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&hs_i2c2_bus>;
++			clocks = <&cmu_peri CLK_GOUT_HSI2C2_PCLK>;
++			clock-names = "hsi2c";
++			status = "disabled";
++		};
++
++		/*
++		 * MIPI CSI-2 receivers with their own DMA; CSIS-DMA (0x14440000)
++		 * splits the DMA SRAM between them. The CAM power domain and
++		 * CMU_CAM are left running by S-Boot.
++		 */
++		csis0: csis@14400000 {
++			compatible = "samsung,exynos7885-csis";
++			reg = <0x14400000 0x2000>, <0x14440000 0x100>;
++			interrupts = <GIC_SPI 297 IRQ_TYPE_LEVEL_HIGH>;
++			samsung,phy-isolation = <&pmu_system_controller 0x67c>;
++			samsung,phy-reset = <&sysreg_cam 0x840 16>;
++			status = "disabled";
++		};
++
++		csis1: csis@14410000 {
++			compatible = "samsung,exynos7885-csis";
++			reg = <0x14410000 0x2000>, <0x14440000 0x100>;
++			interrupts = <GIC_SPI 298 IRQ_TYPE_LEVEL_HIGH>;
++			samsung,phy-isolation = <&pmu_system_controller 0x680>;
++			samsung,phy-reset = <&sysreg_cam 0x840 8>;
++			status = "disabled";
++		};
++
++		/* the CSIS D-PHY resets at 0x840 */
++		sysreg_cam: syscon@14510000 {
++			compatible = "syscon";
++			reg = <0x14510000 0x1000>;
++		};
++
+ 		/* USI mode selection registers at 0x2000..0x2008 */
+ 		syscon_peri: syscon@10030000 {
+ 			compatible = "syscon";
+-- 
+2.53.0
+

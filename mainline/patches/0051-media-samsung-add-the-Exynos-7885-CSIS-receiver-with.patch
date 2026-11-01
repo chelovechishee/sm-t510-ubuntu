@@ -1,0 +1,1116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 51/52] media: samsung: add the Exynos 7885 CSIS receiver with
+ DMA
+
+The CSIS v5.1 MIPI CSI-2 receivers write what they receive straight to
+memory, without the camera ISP and its closed library: raw Bayer frames
+(RAW10 in 16 bit words) for a software ISP such as libcamera's. One video
+node per receiver, linked from the sensor; the D-PHY is switched with its
+PMU isolation and SYSREG_CAM reset bits.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/media/platform/samsung/Kconfig        |    1 +
+ drivers/media/platform/samsung/Makefile       |    1 +
+ .../platform/samsung/exynos7885-csis/Kconfig  |   19 +
+ .../platform/samsung/exynos7885-csis/Makefile |    1 +
+ .../samsung/exynos7885-csis/exynos7885-csis.c | 1028 +++++++++++++++++
+ 5 files changed, 1050 insertions(+)
+ create mode 100644 drivers/media/platform/samsung/exynos7885-csis/Kconfig
+ create mode 100644 drivers/media/platform/samsung/exynos7885-csis/Makefile
+ create mode 100644 drivers/media/platform/samsung/exynos7885-csis/exynos7885-csis.c
+
+diff --git a/drivers/media/platform/samsung/Kconfig b/drivers/media/platform/samsung/Kconfig
+index 0e34c5fc1..3d866f540 100644
+--- a/drivers/media/platform/samsung/Kconfig
++++ b/drivers/media/platform/samsung/Kconfig
+@@ -4,6 +4,7 @@ comment "Samsung media platform drivers"
+ 
+ source "drivers/media/platform/samsung/exynos-gsc/Kconfig"
+ source "drivers/media/platform/samsung/exynos4-is/Kconfig"
++source "drivers/media/platform/samsung/exynos7885-csis/Kconfig"
+ source "drivers/media/platform/samsung/s3c-camif/Kconfig"
+ source "drivers/media/platform/samsung/s5p-g2d/Kconfig"
+ source "drivers/media/platform/samsung/s5p-jpeg/Kconfig"
+diff --git a/drivers/media/platform/samsung/Makefile b/drivers/media/platform/samsung/Makefile
+index 21fea3330..78abaea99 100644
+--- a/drivers/media/platform/samsung/Makefile
++++ b/drivers/media/platform/samsung/Makefile
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-y += exynos-gsc/
+ obj-y += exynos4-is/
++obj-y += exynos7885-csis/
+ obj-y += s3c-camif/
+ obj-y += s5p-g2d/
+ obj-y += s5p-jpeg/
+diff --git a/drivers/media/platform/samsung/exynos7885-csis/Kconfig b/drivers/media/platform/samsung/exynos7885-csis/Kconfig
+new file mode 100644
+index 000000000..bdbb33348
+--- /dev/null
++++ b/drivers/media/platform/samsung/exynos7885-csis/Kconfig
+@@ -0,0 +1,19 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++config VIDEO_EXYNOS7885_CSIS
++	tristate "Samsung Exynos 7885 MIPI CSI-2 receiver with DMA"
++	depends on V4L_PLATFORM_DRIVERS
++	depends on VIDEO_DEV && OF && HAS_DMA
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	select MEDIA_CONTROLLER
++	select MFD_SYSCON
++	select V4L2_FWNODE
++	select VIDEO_V4L2_SUBDEV_API
++	select VIDEOBUF2_DMA_CONTIG
++	help
++	  The MIPI CSI-2 receivers (CSIS v5.1) of the Exynos 7885 with their
++	  own write DMA: raw Bayer frames from a camera sensor to memory,
++	  without the camera ISP.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called exynos7885-csis.
+diff --git a/drivers/media/platform/samsung/exynos7885-csis/Makefile b/drivers/media/platform/samsung/exynos7885-csis/Makefile
+new file mode 100644
+index 000000000..bb6632520
+--- /dev/null
++++ b/drivers/media/platform/samsung/exynos7885-csis/Makefile
+@@ -0,0 +1 @@
++obj-$(CONFIG_VIDEO_EXYNOS7885_CSIS) += exynos7885-csis.o
+diff --git a/drivers/media/platform/samsung/exynos7885-csis/exynos7885-csis.c b/drivers/media/platform/samsung/exynos7885-csis/exynos7885-csis.c
+new file mode 100644
+index 000000000..f0429b551
+--- /dev/null
++++ b/drivers/media/platform/samsung/exynos7885-csis/exynos7885-csis.c
+@@ -0,0 +1,1028 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Exynos 7885 MIPI CSI-2 receiver (CSIS v5.1) with its own write DMA
++ *
++ * Each CSIS writes what it receives straight to memory, without the 3AA
++ * and ISP blocks: the frames are raw Bayer for a software ISP. Register
++ * layout and order follow the Samsung kernel of the Galaxy Tab A 10.1
++ * (2019), fimc-is2 csi v5.0.
++ *
++ * Power and clocks: S-Boot leaves the CAM power domain on and CMU_CAM
++ * running from CAM_BUS with Q-channel clock gating, so nothing of that is
++ * handled here. The D-PHY is switched with two bits: the isolation in the
++ * PMU and the reset in SYSREG_CAM.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <media/media-device.h>
++#include <media/v4l2-async.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
++#include <media/v4l2-ioctl.h>
++#include <media/v4l2-mc.h>
++#include <media/v4l2-subdev.h>
++#include <media/videobuf2-dma-contig.h>
++
++#define CSIS_DRV_NAME			"exynos7885-csis"
++
++/* CSIS */
++#define CSIS_VERSION			0x0000
++#define CSIS_CMN_CTRL			0x0004
++#define  CSIS_CMN_CTRL_PHY_SEL_CPHY	BIT(21)
++#define  CSIS_CMN_CTRL_UPDATE_SHADOW	GENMASK(19, 16)
++#define  CSIS_CMN_CTRL_DESKEW_EN	BIT(12)
++#define  CSIS_CMN_CTRL_INTERLEAVE	GENMASK(11, 10)
++#define  CSIS_CMN_CTRL_LANE_NUMBER	GENMASK(9, 8)
++#define  CSIS_CMN_CTRL_SW_RESET		BIT(1)
++#define  CSIS_CMN_CTRL_CSI_EN		BIT(0)
++#define CSIS_INT_MSK0			0x0010
++#define CSIS_INT_SRC0			0x0014
++#define  CSIS_INT0_ERRORS		0x000fff1f
++#define CSIS_INT_MSK1			0x0018
++#define CSIS_INT_SRC1			0x001c
++#define CSIS_ISP_CONFIG_CH0		0x0040
++#define  CSIS_ISP_CONFIG_PIXEL_MODE	GENMASK(13, 12)
++#define  CSIS_ISP_CONFIG_PARALLEL	BIT(11)
++#define  CSIS_ISP_CONFIG_DATAFORMAT	GENMASK(7, 2)
++#define  CSIS_ISP_CONFIG_VC		GENMASK(1, 0)
++#define CSIS_ISP_RESOL_CH0		0x0044
++#define  CSIS_ISP_RESOL_V		GENMASK(31, 16)
++#define  CSIS_ISP_RESOL_H		GENMASK(15, 0)
++#define CSIS_FRM_CNT_CH0		0x0100
++#define CSIS_PHY_STATUS			0x0700
++#define CSIS_PHY_CMN_CTRL		0x0704
++#define  CSIS_PHY_HSSETTLE		GENMASK(31, 24)
++#define  CSIS_PHY_S_CLKSETTLECTL	GENMASK(23, 16)
++#define  CSIS_PHY_S_BYTE_CLK_EN		BIT(7)
++#define  CSIS_PHY_ENABLE_DAT		GENMASK(4, 1)
++#define  CSIS_PHY_ENABLE_CLK		BIT(0)
++
++/* DMA of virtual channel 0 */
++#define CSIS_DMA0_CTRL			0x1000
++#define  CSIS_DMA_CTRL_UPDT_FRAMEPTR	GENMASK(4, 2)
++#define  CSIS_DMA_CTRL_UPDT_PTR_EN	BIT(1)
++/* "DMA_N_DISABLE" in the Samsung map, but on 7885 1 means enabled */
++#define  CSIS_DMA_CTRL_ENABLE		BIT(0)
++#define CSIS_DMA0_FMT			0x1004
++#define  CSIS_DMA_FMT_1D		BIT(5)
++#define  CSIS_DMA_FMT_PACKET		BIT(4)
++#define  CSIS_DMA_FMT_PACK12		BIT(3)
++#define  CSIS_DMA_FMT_DATAFORMAT	GENMASK(1, 0)
++#define  CSIS_DMA_FMT_RAW10		0
++#define CSIS_DMA0_ADDR(n)		(0x1010 + 4 * (n))
++#define CSIS_DMA_ADDR_SLOTS		8
++#define CSIS_DMA0_ACT_CTRL		0x1030
++#define  CSIS_DMA_ACT_ENABLE		BIT(0)
++#define CSIS_DMA0_RESOL			0x1040
++#define CSIS_DMA_DATA_CTRL		0x1400
++#define  CSIS_DMA_INPUT_PRL		BIT(0)
++#define CSIS_DMA_INT_MASK		0x1404
++#define CSIS_DMA_INT_SRC		0x1408
++#define  CSIS_DMA_INT_OTF_OVERLAP0	BIT(20)
++#define  CSIS_DMA_INT_ABORT_DONE	BIT(16)
++#define  CSIS_DMA_INT_ERROR		BIT(12)
++#define  CSIS_DMA_INT_FRM_END0		BIT(8)
++#define  CSIS_DMA_INT_FRM_START0	BIT(4)
++#define CSIS_DMA_CMN_CTRL		0x1414
++#define  CSIS_DMA_ABORT_REQ		BIT(0)
++#define CSIS_DMA_ERR_CODE		0x1418
++#define CSIS_OTF_FORMAT			0x141c
++
++/* CSIS-DMA: shared by all four receivers */
++#define CSIS_DMA_COMMON_ARB_PRI		0x0000
++#define  CSIS_DMA_ARB_PRI_0		GENMASK(1, 0)
++#define CSIS_DMA_COMMON_CTRL		0x0008
++#define  CSIS_DMA_IP_PROCESSING		BIT(1)
++#define CSIS_DMA_COMMON_SRAM_SPLIT	0x000c
++#define  CSIS_DMA_SRAM1_SPLIT		GENMASK(25, 16)
++#define  CSIS_DMA_SRAM0_SPLIT		GENMASK(9, 0)
++#define CSIS_DMA_COMMON_MATRIX		0x0010
++/* 10 KiB of SRAM0 for CSIS0 and CSIS1, in 16 byte units */
++#define CSIS_DMA_SRAM_UNITS		640
++#define CSIS_DMA_SRAM_MIN		4
++
++#define CSIS_PHY_ISO_BYPASS		BIT(0)
++
++#define CSIS_DEFAULT_HS_SETTLE		14
++#define CSIS_MAX_LANES			4
++#define CSIS_MIN_WIDTH			64
++#define CSIS_MIN_HEIGHT			16
++#define CSIS_MAX_SIZE			8192
++#define CSIS_STOP_TIMEOUT_US		200000
++
++struct csis_format {
++	u32 code;
++	u32 fourcc;
++	u8 data_type;
++};
++
++/* RAW10 in 16 bit little-endian words: what the DMA writes without PACK12 */
++static const struct csis_format csis_formats[] = {
++	{ MEDIA_BUS_FMT_SGRBG10_1X10, V4L2_PIX_FMT_SGRBG10, 0x2b },
++	{ MEDIA_BUS_FMT_SRGGB10_1X10, V4L2_PIX_FMT_SRGGB10, 0x2b },
++	{ MEDIA_BUS_FMT_SBGGR10_1X10, V4L2_PIX_FMT_SBGGR10, 0x2b },
++	{ MEDIA_BUS_FMT_SGBRG10_1X10, V4L2_PIX_FMT_SGBRG10, 0x2b },
++};
++
++/*
++ * Debug: set PACK12 to see what the packed layout looks like. The buffers
++ * keep the 16 bit size, so a smaller packed frame cannot overrun them.
++ */
++static bool pack;
++module_param(pack, bool, 0644);
++MODULE_PARM_DESC(pack, "debug: let the DMA pack RAW10 (buffers stay 16 bit)");
++
++struct csis_buffer {
++	struct vb2_v4l2_buffer vb;
++	struct list_head list;
++	dma_addr_t addr;
++};
++
++struct csis {
++	struct device *dev;
++	void __iomem *regs;
++	void __iomem *dma_regs;
++	int irq;
++	int id;
++
++	struct regmap *pmu;
++	u32 phy_iso_reg;
++	struct regmap *sysreg;
++	u32 phy_reset_reg;
++	u32 phy_reset_bit;
++
++	u32 hs_settle;
++	unsigned int lanes;
++
++	struct media_device mdev;
++	struct v4l2_device v4l2_dev;
++	struct v4l2_async_notifier notifier;
++	struct v4l2_subdev *sensor;
++	u32 sensor_pad;
++
++	struct video_device vdev;
++	struct media_pad vdev_pad;
++	struct media_pipeline pipe;
++	struct vb2_queue queue;
++	struct mutex lock;		/* video device and queue */
++
++	struct v4l2_pix_format pix;
++	const struct csis_format *fmt;
++
++	spinlock_t slock;		/* the buffers below, IRQ */
++	struct list_head pending;
++	struct csis_buffer *active;	/* DMA is writing this frame */
++	struct csis_buffer *next;	/* programmed for the next frame */
++	u32 sequence;
++	u64 timestamp;
++
++	void *scratch;			/* frames nobody asked for */
++	dma_addr_t scratch_addr;
++	size_t scratch_size;
++};
++
++static inline void csis_write(struct csis *csis, u32 reg, u32 val)
++{
++	writel(val, csis->regs + reg);
++}
++
++static inline u32 csis_read(struct csis *csis, u32 reg)
++{
++	return readl(csis->regs + reg);
++}
++
++static void csis_update(struct csis *csis, u32 reg, u32 mask, u32 val)
++{
++	csis_write(csis, reg, (csis_read(csis, reg) & ~mask) | (val & mask));
++}
++
++static const struct csis_format *csis_find_format(u32 fourcc, u32 code)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(csis_formats); i++) {
++		if (fourcc && csis_formats[i].fourcc == fourcc)
++			return &csis_formats[i];
++		if (code && csis_formats[i].code == code)
++			return &csis_formats[i];
++	}
++
++	return NULL;
++}
++
++static const struct csis_format *csis_try_format(struct v4l2_pix_format *pix)
++{
++	const struct csis_format *fmt;
++
++	fmt = csis_find_format(pix->pixelformat, 0);
++	if (!fmt)
++		fmt = &csis_formats[0];
++
++	pix->pixelformat = fmt->fourcc;
++	pix->width = clamp(ALIGN(pix->width, 4), CSIS_MIN_WIDTH, CSIS_MAX_SIZE);
++	pix->height = clamp(pix->height, CSIS_MIN_HEIGHT, CSIS_MAX_SIZE);
++	pix->field = V4L2_FIELD_NONE;
++	/*
++	 * Two bytes a pixel, with no padding seen at 1632 pixels; 16 byte
++	 * alignment kept, as the Samsung kernel aligns its lines so.
++	 */
++	pix->bytesperline = ALIGN(pix->width * 2, 16);
++	pix->sizeimage = pix->bytesperline * pix->height;
++	pix->colorspace = V4L2_COLORSPACE_RAW;
++	pix->ycbcr_enc = V4L2_YCBCR_ENC_601;
++	pix->quantization = V4L2_QUANTIZATION_FULL_RANGE;
++	pix->xfer_func = V4L2_XFER_FUNC_NONE;
++
++	return fmt;
++}
++
++/* ---- hardware ----------------------------------------------------------- */
++
++static void csis_phy_power(struct csis *csis, bool on)
++{
++	u32 bit = BIT(csis->phy_reset_bit);
++
++	if (on) {
++		regmap_update_bits(csis->pmu, csis->phy_iso_reg,
++				   CSIS_PHY_ISO_BYPASS, CSIS_PHY_ISO_BYPASS);
++		regmap_update_bits(csis->sysreg, csis->phy_reset_reg, bit, 0);
++		regmap_update_bits(csis->sysreg, csis->phy_reset_reg, bit, bit);
++	} else {
++		regmap_update_bits(csis->sysreg, csis->phy_reset_reg, bit, 0);
++		regmap_update_bits(csis->pmu, csis->phy_iso_reg,
++				   CSIS_PHY_ISO_BYPASS, 0);
++	}
++}
++
++static int csis_sw_reset(struct csis *csis)
++{
++	u32 val;
++	int ret;
++
++	csis_update(csis, CSIS_CMN_CTRL, CSIS_CMN_CTRL_SW_RESET,
++		    CSIS_CMN_CTRL_SW_RESET);
++	ret = readl_poll_timeout_atomic(csis->regs + CSIS_CMN_CTRL, val,
++					!(val & CSIS_CMN_CTRL_SW_RESET),
++					10, 1000);
++	if (ret)
++		dev_err(csis->dev, "software reset timed out\n");
++
++	csis_write(csis, CSIS_DMA0_CTRL, 0);
++
++	return ret;
++}
++
++static void csis_set_dma_addr(struct csis *csis, dma_addr_t addr)
++{
++	unsigned int i;
++
++	/*
++	 * The DMA walks through 8 address slots on its own; with the same
++	 * address in all of them it does not matter which one it takes.
++	 */
++	for (i = 0; i < CSIS_DMA_ADDR_SLOTS; i++)
++		csis_write(csis, CSIS_DMA0_ADDR(i), lower_32_bits(addr));
++}
++
++static void csis_dma_common_setup(struct csis *csis)
++{
++	u32 split, pri, val;
++
++	/* One receiver at a time gets SRAM0: CSIS0 the low part, CSIS1 the rest */
++	if (csis->id == 0) {
++		split = CSIS_DMA_SRAM_UNITS;
++		pri = 1;
++	} else {
++		split = CSIS_DMA_SRAM_MIN;
++		pri = 2;
++	}
++
++	val = readl(csis->dma_regs + CSIS_DMA_COMMON_CTRL);
++	writel(val | CSIS_DMA_IP_PROCESSING,
++	       csis->dma_regs + CSIS_DMA_COMMON_CTRL);
++
++	val = readl(csis->dma_regs + CSIS_DMA_COMMON_ARB_PRI);
++	val &= ~CSIS_DMA_ARB_PRI_0;
++	val |= FIELD_PREP(CSIS_DMA_ARB_PRI_0, pri);
++	writel(val, csis->dma_regs + CSIS_DMA_COMMON_ARB_PRI);
++
++	writel(FIELD_PREP(CSIS_DMA_SRAM1_SPLIT, CSIS_DMA_SRAM_UNITS / 2) |
++	       FIELD_PREP(CSIS_DMA_SRAM0_SPLIT, split),
++	       csis->dma_regs + CSIS_DMA_COMMON_SRAM_SPLIT);
++	writel(0, csis->dma_regs + CSIS_DMA_COMMON_MATRIX);
++}
++
++static int csis_hw_start(struct csis *csis, dma_addr_t first)
++{
++	const struct v4l2_pix_format *pix = &csis->pix;
++	int ret;
++
++	csis_phy_power(csis, true);
++
++	ret = csis_sw_reset(csis);
++	if (ret)
++		goto phy_off;
++
++	csis_write(csis, CSIS_PHY_CMN_CTRL,
++		   FIELD_PREP(CSIS_PHY_HSSETTLE, csis->hs_settle) |
++		   FIELD_PREP(CSIS_PHY_S_CLKSETTLECTL, 1) |
++		   CSIS_PHY_S_BYTE_CLK_EN |
++		   FIELD_PREP(CSIS_PHY_ENABLE_DAT, GENMASK(csis->lanes - 1, 0)));
++
++	csis_update(csis, CSIS_CMN_CTRL,
++		    CSIS_CMN_CTRL_LANE_NUMBER | CSIS_CMN_CTRL_DESKEW_EN |
++		    CSIS_CMN_CTRL_INTERLEAVE | CSIS_CMN_CTRL_PHY_SEL_CPHY,
++		    FIELD_PREP(CSIS_CMN_CTRL_LANE_NUMBER, csis->lanes - 1));
++
++	/* Virtual channel 0 only, two pixels per clock */
++	csis_write(csis, CSIS_ISP_CONFIG_CH0,
++		   FIELD_PREP(CSIS_ISP_CONFIG_PIXEL_MODE, 1) |
++		   FIELD_PREP(CSIS_ISP_CONFIG_DATAFORMAT, csis->fmt->data_type) |
++		   FIELD_PREP(CSIS_ISP_CONFIG_VC, 0));
++	csis_write(csis, CSIS_ISP_RESOL_CH0,
++		   FIELD_PREP(CSIS_ISP_RESOL_V, pix->height) |
++		   FIELD_PREP(CSIS_ISP_RESOL_H, pix->width));
++	csis_write(csis, CSIS_OTF_FORMAT, 0);	/* RAW10 */
++
++	/* RAW10 to memory, line by line */
++	csis_write(csis, CSIS_DMA0_FMT,
++		   (pack ? CSIS_DMA_FMT_PACK12 : 0) |
++		   FIELD_PREP(CSIS_DMA_FMT_DATAFORMAT, CSIS_DMA_FMT_RAW10));
++	csis_write(csis, CSIS_DMA0_RESOL, pix->width);
++	csis_write(csis, CSIS_DMA_DATA_CTRL, CSIS_DMA_INPUT_PRL);
++	csis_set_dma_addr(csis, first);
++
++	csis_write(csis, CSIS_INT_MSK0, CSIS_INT0_ERRORS);
++	csis_write(csis, CSIS_INT_MSK1, 0);
++	csis_write(csis, CSIS_DMA_INT_MASK,
++		   CSIS_DMA_INT_FRM_START0 | CSIS_DMA_INT_FRM_END0 |
++		   CSIS_DMA_INT_ERROR | CSIS_DMA_INT_OTF_OVERLAP0);
++
++	csis_write(csis, CSIS_DMA0_CTRL,
++		   CSIS_DMA_CTRL_ENABLE | CSIS_DMA_CTRL_UPDT_PTR_EN |
++		   FIELD_PREP(CSIS_DMA_CTRL_UPDT_FRAMEPTR, 0));
++
++	csis_dma_common_setup(csis);
++
++	csis_update(csis, CSIS_CMN_CTRL, CSIS_CMN_CTRL_UPDATE_SHADOW,
++		    CSIS_CMN_CTRL_UPDATE_SHADOW);
++	csis_update(csis, CSIS_PHY_CMN_CTRL, CSIS_PHY_ENABLE_CLK,
++		    CSIS_PHY_ENABLE_CLK);
++	csis_update(csis, CSIS_CMN_CTRL, CSIS_CMN_CTRL_CSI_EN,
++		    CSIS_CMN_CTRL_CSI_EN);
++
++	return 0;
++
++phy_off:
++	csis_phy_power(csis, false);
++
++	return ret;
++}
++
++/* Called while the sensor still streams: the DMA stops at a frame boundary */
++static void csis_dma_stop(struct csis *csis)
++{
++	u32 val;
++	int ret;
++
++	csis_write(csis, CSIS_DMA0_CTRL, 0);
++	ret = readl_poll_timeout(csis->regs + CSIS_DMA0_ACT_CTRL, val,
++				 !(val & CSIS_DMA_ACT_ENABLE),
++				 1000, CSIS_STOP_TIMEOUT_US);
++	if (!ret)
++		return;
++
++	dev_warn(csis->dev, "DMA did not stop, aborting\n");
++	csis_write(csis, CSIS_DMA_CMN_CTRL, CSIS_DMA_ABORT_REQ);
++	readl_poll_timeout(csis->regs + CSIS_DMA_INT_SRC, val,
++			   val & CSIS_DMA_INT_ABORT_DONE, 1000,
++			   CSIS_STOP_TIMEOUT_US);
++	csis_write(csis, CSIS_DMA_CMN_CTRL, 0);
++}
++
++static void csis_hw_stop(struct csis *csis)
++{
++	csis_write(csis, CSIS_INT_MSK0, 0);
++	csis_write(csis, CSIS_DMA_INT_MASK, 0);
++	csis_update(csis, CSIS_PHY_CMN_CTRL,
++		    CSIS_PHY_ENABLE_CLK | CSIS_PHY_ENABLE_DAT, 0);
++	csis_update(csis, CSIS_CMN_CTRL, CSIS_CMN_CTRL_CSI_EN, 0);
++	csis_sw_reset(csis);
++	csis_phy_power(csis, false);
++}
++
++static struct csis_buffer *csis_take_pending(struct csis *csis)
++{
++	struct csis_buffer *buf;
++
++	buf = list_first_entry_or_null(&csis->pending, struct csis_buffer,
++				       list);
++	if (buf)
++		list_del(&buf->list);
++
++	return buf;
++}
++
++static irqreturn_t csis_irq(int irq, void *data)
++{
++	struct csis *csis = data;
++	u32 src0, src1, dma;
++
++	src0 = csis_read(csis, CSIS_INT_SRC0);
++	src1 = csis_read(csis, CSIS_INT_SRC1);
++	dma = csis_read(csis, CSIS_DMA_INT_SRC);
++	csis_write(csis, CSIS_INT_SRC0, src0);
++	csis_write(csis, CSIS_INT_SRC1, src1);
++	csis_write(csis, CSIS_DMA_INT_SRC, dma);
++
++	if (src0 & CSIS_INT0_ERRORS)
++		dev_err_ratelimited(csis->dev, "receive error 0x%08x\n", src0);
++	if (dma & (CSIS_DMA_INT_ERROR | CSIS_DMA_INT_OTF_OVERLAP0))
++		dev_err_ratelimited(csis->dev, "DMA error 0x%08x, code 0x%08x\n",
++				    dma, csis_read(csis, CSIS_DMA_ERR_CODE));
++
++	spin_lock(&csis->slock);
++
++	/* The end of one frame first: the start of the next may be pending */
++	if ((dma & CSIS_DMA_INT_FRM_END0) && csis->active) {
++		struct csis_buffer *buf = csis->active;
++
++		buf->vb.vb2_buf.timestamp = csis->timestamp;
++		buf->vb.sequence = csis->sequence;
++		buf->vb.field = V4L2_FIELD_NONE;
++		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
++		csis->active = NULL;
++	}
++
++	if (dma & CSIS_DMA_INT_FRM_START0) {
++		/* A frame whose end was not seen */
++		if (csis->active) {
++			vb2_buffer_done(&csis->active->vb.vb2_buf,
++					VB2_BUF_STATE_ERROR);
++			csis->active = NULL;
++		}
++
++		/* The DMA has taken the address programmed for this frame */
++		csis->active = csis->next;
++		csis->timestamp = ktime_get_ns();
++		csis->sequence++;
++
++		csis->next = csis_take_pending(csis);
++		csis_set_dma_addr(csis, csis->next ? csis->next->addr :
++						     csis->scratch_addr);
++	}
++
++	spin_unlock(&csis->slock);
++
++	return IRQ_HANDLED;
++}
++
++/* ---- videobuf2 ---------------------------------------------------------- */
++
++static int csis_queue_setup(struct vb2_queue *q, unsigned int *nbuffers,
++			    unsigned int *nplanes, unsigned int sizes[],
++			    struct device *alloc_devs[])
++{
++	struct csis *csis = vb2_get_drv_priv(q);
++
++	if (*nplanes)
++		return sizes[0] < csis->pix.sizeimage ? -EINVAL : 0;
++
++	*nplanes = 1;
++	sizes[0] = csis->pix.sizeimage;
++
++	return 0;
++}
++
++static int csis_buf_prepare(struct vb2_buffer *vb)
++{
++	struct csis *csis = vb2_get_drv_priv(vb->vb2_queue);
++	struct csis_buffer *buf = container_of(to_vb2_v4l2_buffer(vb),
++					       struct csis_buffer, vb);
++
++	if (vb2_plane_size(vb, 0) < csis->pix.sizeimage)
++		return -EINVAL;
++
++	vb2_set_plane_payload(vb, 0, csis->pix.sizeimage);
++	buf->addr = vb2_dma_contig_plane_dma_addr(vb, 0);
++
++	return 0;
++}
++
++static void csis_buf_queue(struct vb2_buffer *vb)
++{
++	struct csis *csis = vb2_get_drv_priv(vb->vb2_queue);
++	struct csis_buffer *buf = container_of(to_vb2_v4l2_buffer(vb),
++					       struct csis_buffer, vb);
++	unsigned long flags;
++
++	spin_lock_irqsave(&csis->slock, flags);
++	list_add_tail(&buf->list, &csis->pending);
++	spin_unlock_irqrestore(&csis->slock, flags);
++}
++
++static void csis_return_buffers(struct csis *csis, enum vb2_buffer_state state)
++{
++	struct csis_buffer *buf, *tmp;
++	unsigned long flags;
++
++	spin_lock_irqsave(&csis->slock, flags);
++
++	if (csis->active)
++		vb2_buffer_done(&csis->active->vb.vb2_buf, state);
++	if (csis->next)
++		vb2_buffer_done(&csis->next->vb.vb2_buf, state);
++	csis->active = NULL;
++	csis->next = NULL;
++
++	list_for_each_entry_safe(buf, tmp, &csis->pending, list) {
++		list_del(&buf->list);
++		vb2_buffer_done(&buf->vb.vb2_buf, state);
++	}
++
++	spin_unlock_irqrestore(&csis->slock, flags);
++}
++
++static int csis_start_streaming(struct vb2_queue *q, unsigned int count)
++{
++	struct csis *csis = vb2_get_drv_priv(q);
++	unsigned long flags;
++	int ret;
++
++	ret = video_device_pipeline_start(&csis->vdev, &csis->pipe);
++	if (ret)
++		goto return_buffers;
++
++	csis->scratch_size = csis->pix.sizeimage;
++	csis->scratch = dma_alloc_coherent(csis->dev, csis->scratch_size,
++					   &csis->scratch_addr, GFP_KERNEL);
++	if (!csis->scratch) {
++		ret = -ENOMEM;
++		goto pipeline_stop;
++	}
++
++	spin_lock_irqsave(&csis->slock, flags);
++	csis->sequence = (u32)-1;
++	csis->active = NULL;
++	csis->next = csis_take_pending(csis);
++	spin_unlock_irqrestore(&csis->slock, flags);
++
++	ret = csis_hw_start(csis, csis->next ? csis->next->addr :
++					       csis->scratch_addr);
++	if (ret)
++		goto free_scratch;
++
++	ret = v4l2_subdev_enable_streams(csis->sensor, csis->sensor_pad,
++					 BIT_ULL(0));
++	if (ret) {
++		dev_err(csis->dev, "sensor did not start: %d\n", ret);
++		goto hw_stop;
++	}
++
++	return 0;
++
++hw_stop:
++	csis_hw_stop(csis);
++free_scratch:
++	dma_free_coherent(csis->dev, csis->scratch_size, csis->scratch,
++			  csis->scratch_addr);
++	csis->scratch = NULL;
++pipeline_stop:
++	video_device_pipeline_stop(&csis->vdev);
++return_buffers:
++	csis_return_buffers(csis, VB2_BUF_STATE_QUEUED);
++
++	return ret;
++}
++
++static void csis_stop_streaming(struct vb2_queue *q)
++{
++	struct csis *csis = vb2_get_drv_priv(q);
++
++	csis_dma_stop(csis);
++	v4l2_subdev_disable_streams(csis->sensor, csis->sensor_pad,
++				    BIT_ULL(0));
++	csis_hw_stop(csis);
++
++	csis_return_buffers(csis, VB2_BUF_STATE_ERROR);
++
++	dma_free_coherent(csis->dev, csis->scratch_size, csis->scratch,
++			  csis->scratch_addr);
++	csis->scratch = NULL;
++
++	video_device_pipeline_stop(&csis->vdev);
++}
++
++static const struct vb2_ops csis_vb2_ops = {
++	.queue_setup = csis_queue_setup,
++	.buf_prepare = csis_buf_prepare,
++	.buf_queue = csis_buf_queue,
++	.start_streaming = csis_start_streaming,
++	.stop_streaming = csis_stop_streaming,
++};
++
++/* ---- video device ------------------------------------------------------- */
++
++static int csis_querycap(struct file *file, void *fh,
++			 struct v4l2_capability *cap)
++{
++	struct csis *csis = video_drvdata(file);
++
++	strscpy(cap->driver, CSIS_DRV_NAME, sizeof(cap->driver));
++	snprintf(cap->card, sizeof(cap->card), "Exynos 7885 CSIS%d", csis->id);
++
++	return 0;
++}
++
++static int csis_enum_fmt(struct file *file, void *fh, struct v4l2_fmtdesc *f)
++{
++	const struct csis_format *fmt;
++
++	if (f->mbus_code) {
++		fmt = csis_find_format(0, f->mbus_code);
++		if (!fmt || f->index)
++			return -EINVAL;
++	} else {
++		if (f->index >= ARRAY_SIZE(csis_formats))
++			return -EINVAL;
++		fmt = &csis_formats[f->index];
++	}
++
++	f->pixelformat = fmt->fourcc;
++
++	return 0;
++}
++
++static int csis_enum_framesizes(struct file *file, void *fh,
++				struct v4l2_frmsizeenum *fsize)
++{
++	if (fsize->index || !csis_find_format(fsize->pixel_format, 0))
++		return -EINVAL;
++
++	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
++	fsize->stepwise.min_width = CSIS_MIN_WIDTH;
++	fsize->stepwise.max_width = CSIS_MAX_SIZE;
++	fsize->stepwise.step_width = 4;
++	fsize->stepwise.min_height = CSIS_MIN_HEIGHT;
++	fsize->stepwise.max_height = CSIS_MAX_SIZE;
++	fsize->stepwise.step_height = 1;
++
++	return 0;
++}
++
++static int csis_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
++{
++	struct csis *csis = video_drvdata(file);
++
++	f->fmt.pix = csis->pix;
++
++	return 0;
++}
++
++static int csis_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
++{
++	csis_try_format(&f->fmt.pix);
++
++	return 0;
++}
++
++static int csis_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
++{
++	struct csis *csis = video_drvdata(file);
++
++	if (vb2_is_busy(&csis->queue))
++		return -EBUSY;
++
++	csis->fmt = csis_try_format(&f->fmt.pix);
++	csis->pix = f->fmt.pix;
++
++	return 0;
++}
++
++static const struct v4l2_ioctl_ops csis_ioctl_ops = {
++	.vidioc_querycap = csis_querycap,
++	.vidioc_enum_fmt_vid_cap = csis_enum_fmt,
++	.vidioc_enum_framesizes = csis_enum_framesizes,
++	.vidioc_g_fmt_vid_cap = csis_g_fmt,
++	.vidioc_try_fmt_vid_cap = csis_try_fmt,
++	.vidioc_s_fmt_vid_cap = csis_s_fmt,
++	.vidioc_reqbufs = vb2_ioctl_reqbufs,
++	.vidioc_create_bufs = vb2_ioctl_create_bufs,
++	.vidioc_prepare_buf = vb2_ioctl_prepare_buf,
++	.vidioc_querybuf = vb2_ioctl_querybuf,
++	.vidioc_qbuf = vb2_ioctl_qbuf,
++	.vidioc_dqbuf = vb2_ioctl_dqbuf,
++	.vidioc_expbuf = vb2_ioctl_expbuf,
++	.vidioc_streamon = vb2_ioctl_streamon,
++	.vidioc_streamoff = vb2_ioctl_streamoff,
++};
++
++static const struct v4l2_file_operations csis_fops = {
++	.owner = THIS_MODULE,
++	.open = v4l2_fh_open,
++	.release = vb2_fop_release,
++	.unlocked_ioctl = video_ioctl2,
++	.mmap = vb2_fop_mmap,
++	.poll = vb2_fop_poll,
++};
++
++/* The sensor's active format must match what the DMA writes */
++static int csis_link_validate(struct media_link *link)
++{
++	struct video_device *vdev =
++		media_entity_to_video_device(link->sink->entity);
++	struct csis *csis = video_get_drvdata(vdev);
++	struct v4l2_subdev *sd =
++		media_entity_to_v4l2_subdev(link->source->entity);
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
++		.pad = link->source->index,
++	};
++	int ret;
++
++	ret = v4l2_subdev_call_state_active(sd, pad, get_fmt, &fmt);
++	if (ret)
++		return ret;
++
++	if (fmt.format.width != csis->pix.width ||
++	    fmt.format.height != csis->pix.height ||
++	    fmt.format.code != csis->fmt->code) {
++		dev_dbg(csis->dev, "sensor %ux%u 0x%04x, video %ux%u 0x%04x\n",
++			fmt.format.width, fmt.format.height, fmt.format.code,
++			csis->pix.width, csis->pix.height, csis->fmt->code);
++		return -EPIPE;
++	}
++
++	return 0;
++}
++
++static const struct media_entity_operations csis_entity_ops = {
++	.link_validate = csis_link_validate,
++};
++
++/* ---- the sensor --------------------------------------------------------- */
++
++static int csis_notify_bound(struct v4l2_async_notifier *notifier,
++			     struct v4l2_subdev *sd,
++			     struct v4l2_async_connection *asc)
++{
++	struct csis *csis = container_of(notifier, struct csis, notifier);
++	int pad;
++
++	pad = media_entity_get_fwnode_pad(&sd->entity, asc->match.fwnode,
++					  MEDIA_PAD_FL_SOURCE);
++	if (pad < 0)
++		return pad;
++
++	csis->sensor = sd;
++	csis->sensor_pad = pad;
++
++	return media_create_pad_link(&sd->entity, pad, &csis->vdev.entity, 0,
++				     MEDIA_LNK_FL_ENABLED |
++				     MEDIA_LNK_FL_IMMUTABLE);
++}
++
++static int csis_notify_complete(struct v4l2_async_notifier *notifier)
++{
++	struct csis *csis = container_of(notifier, struct csis, notifier);
++
++	return v4l2_device_register_subdev_nodes(&csis->v4l2_dev);
++}
++
++static const struct v4l2_async_notifier_operations csis_notify_ops = {
++	.bound = csis_notify_bound,
++	.complete = csis_notify_complete,
++};
++
++static int csis_parse_dt(struct csis *csis)
++{
++	struct device_node *np = csis->dev->of_node;
++	struct v4l2_fwnode_endpoint vep = {
++		.bus_type = V4L2_MBUS_CSI2_DPHY,
++	};
++	struct v4l2_async_connection *asc;
++	struct fwnode_handle *ep;
++	unsigned int args[2];
++	int ret;
++
++	csis->id = of_alias_get_id(np, "csis");
++	if (csis->id < 0)
++		return dev_err_probe(csis->dev, csis->id, "no csis alias\n");
++
++	csis->pmu = syscon_regmap_lookup_by_phandle_args(np,
++				"samsung,phy-isolation", 1, args);
++	if (IS_ERR(csis->pmu))
++		return dev_err_probe(csis->dev, PTR_ERR(csis->pmu),
++				     "no PHY isolation register\n");
++	csis->phy_iso_reg = args[0];
++
++	csis->sysreg = syscon_regmap_lookup_by_phandle_args(np,
++				"samsung,phy-reset", 2, args);
++	if (IS_ERR(csis->sysreg))
++		return dev_err_probe(csis->dev, PTR_ERR(csis->sysreg),
++				     "no PHY reset register\n");
++	csis->phy_reset_reg = args[0];
++	csis->phy_reset_bit = args[1];
++
++	csis->hs_settle = CSIS_DEFAULT_HS_SETTLE;
++	of_property_read_u32(np, "samsung,csis-hs-settle", &csis->hs_settle);
++
++	ep = fwnode_graph_get_endpoint_by_id(dev_fwnode(csis->dev), 0, 0, 0);
++	if (!ep)
++		return dev_err_probe(csis->dev, -ENODEV, "no endpoint\n");
++
++	ret = v4l2_fwnode_endpoint_parse(ep, &vep);
++	if (ret) {
++		fwnode_handle_put(ep);
++		return dev_err_probe(csis->dev, ret, "bad endpoint\n");
++	}
++
++	csis->lanes = vep.bus.mipi_csi2.num_data_lanes;
++	if (!csis->lanes || csis->lanes > CSIS_MAX_LANES) {
++		fwnode_handle_put(ep);
++		return dev_err_probe(csis->dev, -EINVAL, "%u data lanes\n",
++				     csis->lanes);
++	}
++
++	asc = v4l2_async_nf_add_fwnode_remote(&csis->notifier, ep,
++					      struct v4l2_async_connection);
++	fwnode_handle_put(ep);
++
++	return PTR_ERR_OR_ZERO(asc);
++}
++
++static int csis_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct video_device *vdev;
++	struct resource *res;
++	struct csis *csis;
++	struct vb2_queue *q;
++	int ret;
++
++	csis = devm_kzalloc(dev, sizeof(*csis), GFP_KERNEL);
++	if (!csis)
++		return -ENOMEM;
++
++	csis->dev = dev;
++	mutex_init(&csis->lock);
++	spin_lock_init(&csis->slock);
++	INIT_LIST_HEAD(&csis->pending);
++
++	csis->regs = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(csis->regs))
++		return PTR_ERR(csis->regs);
++
++	/* CSIS-DMA is shared by the receivers: no exclusive request */
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
++	if (!res)
++		return -EINVAL;
++	csis->dma_regs = devm_ioremap(dev, res->start, resource_size(res));
++	if (!csis->dma_regs)
++		return -ENOMEM;
++
++	csis->irq = platform_get_irq(pdev, 0);
++	if (csis->irq < 0)
++		return csis->irq;
++
++	ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		return ret;
++
++	csis->mdev.dev = dev;
++	strscpy(csis->mdev.model, "Exynos 7885 CSIS", sizeof(csis->mdev.model));
++	media_device_init(&csis->mdev);
++
++	csis->v4l2_dev.mdev = &csis->mdev;
++	ret = v4l2_device_register(dev, &csis->v4l2_dev);
++	if (ret)
++		goto media_cleanup;
++
++	v4l2_async_nf_init(&csis->notifier, &csis->v4l2_dev);
++	csis->notifier.ops = &csis_notify_ops;
++
++	ret = csis_parse_dt(csis);
++	if (ret)
++		goto nf_cleanup;
++
++	/* Default: the binned mode of an 8 MP sensor */
++	csis->pix.width = 1632;
++	csis->pix.height = 1224;
++	csis->fmt = csis_try_format(&csis->pix);
++
++	ret = devm_request_irq(dev, csis->irq, csis_irq, 0, dev_name(dev),
++			       csis);
++	if (ret)
++		goto nf_cleanup;
++
++	q = &csis->queue;
++	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++	q->io_modes = VB2_MMAP | VB2_DMABUF;
++	q->drv_priv = csis;
++	q->buf_struct_size = sizeof(struct csis_buffer);
++	q->ops = &csis_vb2_ops;
++	q->mem_ops = &vb2_dma_contig_memops;
++	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
++	q->lock = &csis->lock;
++	q->min_queued_buffers = 1;
++	q->dev = dev;
++	ret = vb2_queue_init(q);
++	if (ret)
++		goto nf_cleanup;
++
++	vdev = &csis->vdev;
++	snprintf(vdev->name, sizeof(vdev->name), "csis%d", csis->id);
++	vdev->fops = &csis_fops;
++	vdev->ioctl_ops = &csis_ioctl_ops;
++	vdev->v4l2_dev = &csis->v4l2_dev;
++	vdev->queue = q;
++	vdev->lock = &csis->lock;
++	vdev->release = video_device_release_empty;
++	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING |
++			    V4L2_CAP_IO_MC;
++	vdev->entity.ops = &csis_entity_ops;
++	video_set_drvdata(vdev, csis);
++
++	csis->vdev_pad.flags = MEDIA_PAD_FL_SINK | MEDIA_PAD_FL_MUST_CONNECT;
++	ret = media_entity_pads_init(&vdev->entity, 1, &csis->vdev_pad);
++	if (ret)
++		goto nf_cleanup;
++
++	ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
++	if (ret)
++		goto entity_cleanup;
++
++	ret = v4l2_async_nf_register(&csis->notifier);
++	if (ret)
++		goto unregister_video;
++
++	ret = media_device_register(&csis->mdev);
++	if (ret)
++		goto nf_unregister;
++
++	platform_set_drvdata(pdev, csis);
++
++	dev_info(dev, "CSIS%d version 0x%08x, %u lanes, settle %u\n",
++		 csis->id, csis_read(csis, CSIS_VERSION), csis->lanes,
++		 csis->hs_settle);
++
++	return 0;
++
++nf_unregister:
++	v4l2_async_nf_unregister(&csis->notifier);
++unregister_video:
++	video_unregister_device(vdev);
++entity_cleanup:
++	media_entity_cleanup(&vdev->entity);
++nf_cleanup:
++	v4l2_async_nf_cleanup(&csis->notifier);
++	v4l2_device_unregister(&csis->v4l2_dev);
++media_cleanup:
++	media_device_cleanup(&csis->mdev);
++
++	return ret;
++}
++
++static void csis_remove(struct platform_device *pdev)
++{
++	struct csis *csis = platform_get_drvdata(pdev);
++
++	media_device_unregister(&csis->mdev);
++	v4l2_async_nf_unregister(&csis->notifier);
++	v4l2_async_nf_cleanup(&csis->notifier);
++	video_unregister_device(&csis->vdev);
++	media_entity_cleanup(&csis->vdev.entity);
++	v4l2_device_unregister(&csis->v4l2_dev);
++	media_device_cleanup(&csis->mdev);
++}
++
++static const struct of_device_id csis_of_match[] = {
++	{ .compatible = "samsung,exynos7885-csis" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, csis_of_match);
++
++static struct platform_driver csis_driver = {
++	.probe = csis_probe,
++	.remove = csis_remove,
++	.driver = {
++		.name = CSIS_DRV_NAME,
++		.of_match_table = csis_of_match,
++	},
++};
++module_platform_driver(csis_driver);
++
++MODULE_DESCRIPTION("Exynos 7885 MIPI CSI-2 receiver with DMA");
++MODULE_LICENSE("GPL");
+-- 
+2.53.0
+

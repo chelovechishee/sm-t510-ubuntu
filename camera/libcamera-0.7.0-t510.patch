@@ -1,0 +1,333 @@
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -257,6 +257,7 @@
+ 
+ static const SimplePipelineInfo supportedDevices[] = {
+ 	{ "dcmipp", {}, false },
++	{ "exynos7885-csis", {}, true },
+ 	{ "imx7-csi", { { "pxp", 1 } }, true },
+ 	{ "intel-ipu6", {}, true },
+ 	{ "intel-ipu7", {}, true },
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -789,6 +789,30 @@
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("ov13858", CameraSensorHelperOv13858)
+ 
++class CameraSensorHelperS5k4ha : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5k4ha()
++	{
++		/* Measured: 64 at 10 bits. Gain code 32 is 1x. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5k4ha", CameraSensorHelperS5k4ha)
++
++class CameraSensorHelperS5k5e9 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5k5e9()
++	{
++		/* Assumed as on the S5K4HA: 64 at 10 bits, gain code 32 is 1x. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5k5e9", CameraSensorHelperS5k5e9)
++
+ class CameraSensorHelperVd55g1 : public CameraSensorHelper
+ {
+ public:
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -503,6 +503,38 @@
+ 			},
+ 			.sensorDelays = { },
+ 		} },
++		{ "s5k4ha", {
++			.unitCellSize = { 1120, 1120 },
++			.testPatternModes = {
++				{ controls::draft::TestPatternModeOff, 0 },
++				{ controls::draft::TestPatternModeSolidColor, 1 },
++				{ controls::draft::TestPatternModeColorBars, 2 },
++				{ controls::draft::TestPatternModeColorBarsFadeToGray, 3 },
++				{ controls::draft::TestPatternModePn9, 4 },
++			},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
++		{ "s5k5e9", {
++			.unitCellSize = { 1120, 1120 },
++			.testPatternModes = {
++				{ controls::draft::TestPatternModeOff, 0 },
++				{ controls::draft::TestPatternModeSolidColor, 1 },
++				{ controls::draft::TestPatternModeColorBars, 2 },
++				{ controls::draft::TestPatternModeColorBarsFadeToGray, 3 },
++				{ controls::draft::TestPatternModePn9, 4 },
++			},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "vd55g1", {
+ 			.unitCellSize = { 2160, 2160 },
+ 			.testPatternModes = {
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -32,6 +32,10 @@
+ 	 */
+ 	RGB<uint64_t> sum_;
+ 	/**
++	 * \brief Number of the sampled pixels in sum_: clipped ones are not
++	 */
++	uint64_t sumPixels;
++	/**
+ 	 * \brief Number of bins in the yHistogram
+ 	 */
+ 	static constexpr unsigned int kYHistogramSize = 64;
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -172,12 +172,25 @@
+                                           \
+ 	uint64_t sumR = 0;                \
+ 	uint64_t sumG = 0;                \
+-	uint64_t sumB = 0;
++	uint64_t sumB = 0;                \
++	uint64_t sumN = 0;
++
++/*
++ * The sums are kept in 16 bit units whatever the sample depth (div is 1, 4
++ * and 16 for 8, 10 and 12 bits), so the AWB can take the black level off
++ * them exactly. Blocks with a clipped channel are left out of the sums:
++ * green clips first and would pull the white balance to green.
++ */
++static constexpr unsigned int kClipLimit = 250; /* in 8 bit units */
+ 
+ #define SWSTATS_ACCUMULATE_LINE_STATS(div) \
+-	sumR += r;                         \
+-	sumG += g;                         \
+-	sumB += b;                         \
++	if (r < kClipLimit * (div) && g < kClipLimit * (div) && \
++	    b < kClipLimit * (div)) {      \
++		sumR += r * (256 / (div)); \
++		sumG += g * (256 / (div)); \
++		sumB += b * (256 / (div)); \
++		sumN++;                    \
++	}                                  \
+                                            \
+ 	yVal = r * kRedYMul;               \
+ 	yVal += g * kGreenYMul;            \
+@@ -187,7 +200,8 @@
+ #define SWSTATS_FINISH_LINE_STATS() \
+ 	stats_.sum_.r() += sumR;    \
+ 	stats_.sum_.g() += sumG;    \
+-	stats_.sum_.b() += sumB;
++	stats_.sum_.b() += sumB;    \
++	stats_.sumPixels += sumN;
+ 
+ void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[])
+ {
+@@ -333,6 +347,7 @@
+ 		LOG(SwStatsCpu, Error) << "Calling startFrame() without setWindow()";
+ 
+ 	stats_.sum_ = RGB<uint64_t>({ 0, 0, 0 });
++	stats_.sumPixels = 0;
+ 	stats_.yHistogram.fill(0);
+ }
+ 
+--- a/src/ipa/simple/algorithms/awb.cpp
++++ b/src/ipa/simple/algorithms/awb.cpp
+@@ -58,7 +58,6 @@
+ 		  const SwIspStats *stats,
+ 		  ControlList &metadata)
+ {
+-	const SwIspStats::Histogram &histogram = stats->yHistogram;
+ 	const uint8_t blackLevel = context.activeState.blc.level;
+ 
+ 	const float mdGains[] = {
+@@ -73,11 +72,12 @@
+ 	/*
+ 	 * Black level must be subtracted to get the correct AWB ratios, they
+ 	 * would be off if they were computed from the whole brightness range
+-	 * rather than from the sensor range.
++	 * rather than from the sensor range. The sums are in 16 bit units, the
++	 * black level in 8 bit ones, and only unclipped pixels are counted.
+ 	 */
+-	const uint64_t nPixels = std::accumulate(
+-		histogram.begin(), histogram.end(), uint64_t(0));
+-	const uint64_t offset = blackLevel * nPixels;
++	if (!stats->sumPixels)
++		return;
++	const uint64_t offset = uint64_t(blackLevel) * 256 * stats->sumPixels;
+ 	const uint64_t minValid = 1;
+ 	/*
+ 	 * Make sure the sums are at least minValid, while preventing unsigned
+--- a/src/libcamera/shaders/bayer_unpacked.frag
++++ b/src/libcamera/shaders/bayer_unpacked.frag
+@@ -25,6 +25,10 @@
+ varying vec4            yCoord;
+ varying vec4            xCoord;
+ uniform mat3            ccm;
++uniform vec2            tex_size;
++uniform vec2            tex_step;
++uniform vec2            tex_bayer_first_red;
++uniform float           stride_factor;
+ uniform vec3            blacklevel;
+ uniform float           gamma;
+ uniform float           contrastExp;
+@@ -41,6 +45,21 @@
+ void main(void) {
+     vec3 rgb;
+ 
++    /*
++     * The ISP may scale (3264 to 3248 for a photo, 1632 to 1280 for a
++     * preview): then the interpolated position drifts across the sensor
++     * pixels, and every couple of hundred pixels the sampler and floor()
++     * pick neighbouring ones, which swaps the colours of a whole line.
++     * Snap to one sensor pixel for both.
++     */
++    vec2 texel = floor(center.zw);
++    vec2 snapped = (texel - tex_bayer_first_red + 0.5) / tex_size;
++    vec2 ctr = vec2(snapped.x * stride_factor, snapped.y);
++    vec4 xc = ctr.x + vec4(-2.0 * tex_step.x, -tex_step.x,
++                           tex_step.x, 2.0 * tex_step.x);
++    vec4 yc = ctr.y + vec4(-2.0 * tex_step.y, -tex_step.y,
++                           tex_step.y, 2.0 * tex_step.y);
++
+     #if defined(RAW10P)
+     #define pixel(p) p.r / 4.0 + p.g * 64.0
+     #define fetch(x, y) pixel(texture2D(tex_y, vec2(x, y)))
+@@ -51,17 +70,17 @@
+     #define fetch(x, y) texture2D(tex_y, vec2(x, y)).r
+     #endif
+ 
+-    float C = fetch(center.x, center.y); // ( 0, 0)
++    float C = fetch(ctr.x, ctr.y); // ( 0, 0)
+     const vec4 kC = vec4( 4.0,  6.0,  5.0,  5.0) / 8.0;
+ 
+     // Determine which of four types of pixels we are on.
+-    vec2 alternate = mod(floor(center.zw), 2.0);
++    vec2 alternate = mod(texel, 2.0);
+ 
+     vec4 Dvec = vec4(
+-        fetch(xCoord[1], yCoord[1]),  // (-1,-1)
+-        fetch(xCoord[1], yCoord[2]),  // (-1, 1)
+-        fetch(xCoord[2], yCoord[1]),  // ( 1,-1)
+-        fetch(xCoord[2], yCoord[2])); // ( 1, 1)
++        fetch(xc[1], yc[1]),  // (-1,-1)
++        fetch(xc[1], yc[2]),  // (-1, 1)
++        fetch(xc[2], yc[1]),  // ( 1,-1)
++        fetch(xc[2], yc[2])); // ( 1, 1)
+ 
+     vec4 PATTERN = (kC.xyz * C).xyzz;
+ 
+@@ -72,16 +91,16 @@
+     Dvec.x  += Dvec.y;
+ 
+     vec4 value = vec4(
+-        fetch(center.x, yCoord[0]),   // ( 0,-2)
+-        fetch(center.x, yCoord[1]),   // ( 0,-1)
+-        fetch(xCoord[0], center.y),   // (-2, 0)
+-        fetch(xCoord[1], center.y));  // (-1, 0)
++        fetch(ctr.x, yc[0]),   // ( 0,-2)
++        fetch(ctr.x, yc[1]),   // ( 0,-1)
++        fetch(xc[0], ctr.y),   // (-2, 0)
++        fetch(xc[1], ctr.y));  // (-1, 0)
+ 
+     vec4 temp = vec4(
+-        fetch(center.x, yCoord[3]),   // ( 0, 2)
+-        fetch(center.x, yCoord[2]),   // ( 0, 1)
+-        fetch(xCoord[3], center.y),   // ( 2, 0)
+-        fetch(xCoord[2], center.y));  // ( 1, 0)
++        fetch(ctr.x, yc[3]),   // ( 0, 2)
++        fetch(ctr.x, yc[2]),   // ( 0, 1)
++        fetch(xc[3], ctr.y),   // ( 2, 0)
++        fetch(xc[2], ctr.y));  // ( 1, 0)
+ 
+     // Even the simplest compilers should be able to constant-fold these to
+     // avoid the division.
+@@ -175,6 +194,14 @@
+     rgb.b = (rin * ccm[2][0]) + (gin * ccm[2][1]) + (bin * ccm[2][2]);
+ 
+     /*
++     * Where the sensor clipped, the gains and the CCM in one matrix would
++     * tint the highlight (magenta); fade such pixels to white instead.
++     */
++    float peak = max(rin, max(gin, bin));
++    float clipLevel = 1.0 - blacklevel.g;
++    rgb = mix(rgb, vec3(1.0), smoothstep(0.9 * clipLevel, clipLevel, peak));
++
++    /*
+      * Contrast
+      */
+     rgb = clamp(rgb, 0.0, 1.0);
+--- a/src/ipa/simple/data/meson.build
++++ b/src/ipa/simple/data/meson.build
+@@ -1,6 +1,8 @@
+ # SPDX-License-Identifier: CC0-1.0
+ 
+ conf_files = files([
++    's5k4ha.yaml',
++    's5k5e9.yaml',
+     'uncalibrated.yaml',
+ ])
+ 
+--- /dev/null
++++ b/src/ipa/simple/data/s5k4ha.yaml
+@@ -0,0 +1,22 @@
++# SPDX-License-Identifier: CC0-1.0
++%YAML 1.1
++---
++# S5K4HA, the rear camera of the Galaxy Tab A 10.1 (2019), SM-T510.
++# Picked by eye on a room scene, not calibrated against a chart: a mild
++# colour matrix for saturation.
++# The sensor's black level is 64 at 10 bits; a higher one (against the glare
++# of a lens with no cover glass) tinted dark scenes.
++version: 1
++algorithms:
++  - BlackLevel:
++      blackLevel: 4096
++  - Awb:
++  - Ccm:
++      ccms:
++        - ct: 5000
++          ccm: [ 1.6, -0.4, -0.2,
++                -0.3,  1.6, -0.3,
++                -0.1, -0.6,  1.7 ]
++  - Adjust:
++  - Agc:
++...
+--- /dev/null
++++ b/src/ipa/simple/data/s5k5e9.yaml
+@@ -0,0 +1,21 @@
++# SPDX-License-Identifier: CC0-1.0
++%YAML 1.1
++---
++# S5K5E9, the front camera of the Galaxy Tab A 10.1 (2019), SM-T510.
++# Picked by eye on a room scene, not calibrated against a chart: a mild
++# colour matrix for saturation.
++# Black level 64 at 10 bits, as on the S5K4HA.
++version: 1
++algorithms:
++  - BlackLevel:
++      blackLevel: 4096
++  - Awb:
++  - Ccm:
++      ccms:
++        - ct: 5000
++          ccm: [ 1.6, -0.4, -0.2,
++                -0.3,  1.6, -0.3,
++                -0.1, -0.6,  1.7 ]
++  - Adjust:
++  - Agc:
++...

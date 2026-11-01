@@ -10,6 +10,48 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.12.0 — cameras (build #94)
+
+- Both cameras work: the rear one (8 MP, S5K4HA) and the front one (5 MP,
+  S5K5E9). Pictures come out of the sensors raw and are developed by
+  libcamera's software ISP on the GPU; Samsung's camera ISP and its closed
+  library are not used.
+- A camera program, Camera (`t510-camera`), in the menu and on the dock:
+  a smooth preview, photos at full size (3248×2436 and 2576×1932) and
+  videos with sound (960×1280, WebM; H.264 in MP4 when
+  gstreamer1.0-plugins-ugly is installed), all in Pictures/Camera.
+  Existing users get the dock button at their next login, once.
+- Other programs reach the cameras through PipeWire and libcamera (tried
+  with GNOME Snapshot); they see two cameras, turned upright.
+- The rear camera has no autofocus: its lens stays at one position, set
+  for room distances and beyond.
+- libcamera is our build now, `0.7.0-1ubuntu2+t510.5`, kept above
+  Ubuntu's: it knows the receiver and the two sensors and fixes three
+  faults of the software ISP (a green tint on 10 bit sensors, magenta
+  highlights, lines of swapped colours in scaled pictures).
+- Folders open in the file manager (Thunar) again, not in the Disk Usage
+  Analyzer.
+- In the kernel: the camera clocks, I2C buses and receivers (CSIS) of the
+  SoC, an own driver for the receivers and their DMA, drivers for both
+  sensors, power for the rear focus motor, and 256 MB of contiguous
+  memory (CMA) for full size photos.
+
+Builds:
+
+- #85 — the camera clocks and I2C buses; the rear sensor answers.
+- #86 — the rear sensor driver complete (modes, exposure, gain).
+- #87 — the receiver and its DMA: the first frames, the sensor's colour
+  bars at 30 frames a second; the DMA wrote two bytes a pixel where one
+  and a quarter were expected, past the end of the buffers.
+- #88 — two bytes a pixel; the first real picture.
+- #89 — buffers for libcamera's software ISP (dma-buf heaps, udmabuf).
+- #90 — the front camera.
+- #91 — both cameras turned upright, the focus motor on its bus; it timed
+  out when the sensor was off.
+- #92 — the lens fixed at the sharpest position, powered with the sensor.
+- #93 — the focus motor's bus supply: no more timeouts.
+- #94 — 256 MB of CMA: photos at full size.
+
 ## 0.11.0 — microphone (build #84)
 
 - The built-in microphone works: "Built-in Microphone" in the sound

@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 38/46] power: supply: s2m-charger: unmask the MUIC interrupt
+Subject: [PATCH 38/52] power: supply: s2m-charger: unmask the MUIC interrupt
  output
 
 S-Boot leaves INT_MASK set in MUIC CTRL1, as the vendor MUIC driver

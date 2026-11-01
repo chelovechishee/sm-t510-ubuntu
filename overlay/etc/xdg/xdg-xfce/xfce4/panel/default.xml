@@ -46,6 +46,7 @@
         <value type="int" value="18"/>
         <value type="int" value="19"/>
         <value type="int" value="20"/>
+        <value type="int" value="23"/>
         <value type="int" value="21"/>
         <value type="int" value="22"/>
       </property>
@@ -92,6 +93,11 @@
     <property name="plugin-20" type="string" value="launcher">
       <property name="items" type="array">
         <value type="string" value="xfce4-appfinder.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-23" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="/usr/share/applications/t510-camera.desktop"/>
       </property>
     </property>
     <property name="plugin-21" type="string" value="separator"/>

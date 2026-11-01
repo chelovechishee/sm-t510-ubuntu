@@ -1,0 +1,4 @@
+# Folders open in Thunar: the GNOME Disk Usage Analyzer (baobab) comes with
+# Ubuntu's desktop tools and otherwise takes them.
+[Default Applications]
+inode/directory=thunar.desktop

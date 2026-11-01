@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 07/46] arm64: dts: gta3xlwifi: S2MU005 fuel gauge, secure
+Subject: [PATCH 07/52] arm64: dts: gta3xlwifi: S2MU005 fuel gauge, secure
  memory reservation
 
 Co-Authored-By: Claude <noreply@anthropic.com>

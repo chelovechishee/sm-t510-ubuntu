@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 12/46] cpufreq on Exynos 7885 through ACPM: mailbox, ACPM
+Subject: [PATCH 12/52] cpufreq on Exynos 7885 through ACPM: mailbox, ACPM
  plugins, ACPM clocks, read-only TMU, OPP/thermal DT; keep S-Boot ECT
 
 Co-Authored-By: Claude <noreply@anthropic.com>

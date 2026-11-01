@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 35/46] arm64: dts: gta3xlwifi: S2MU005 wakes the system on a
+Subject: [PATCH 35/52] arm64: dts: gta3xlwifi: S2MU005 wakes the system on a
  cable change
 
 The charger sets the input current from the BC1.2 result when VBUS comes

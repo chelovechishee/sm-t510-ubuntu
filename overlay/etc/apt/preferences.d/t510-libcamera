@@ -1,0 +1,5 @@
+# Our build of libcamera (the cameras of the SM-T510 and fixes of its
+# software ISP) stays, also when Ubuntu publishes a newer one of its own
+Package: libcamera0.7 libcamera-ipa
+Pin: origin chelovechishee.github.io
+Pin-Priority: 1001

@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 50/52] media: i2c: dw9807-vcm: optional supplies and an
+ initial focus
+
+The DW9808 of the S5K4HA module has the DW9807's registers. Here the VCM
+and its I2C pull-ups have regulators of their own ("vdd", "vio"), which
+the driver now switches with runtime PM, and with no autofocus in user
+space the lens should rest at a useful position:
+"dongwoon,initial-focus". A focus set while the VCM is off is written at
+the next resume.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/media/i2c/dw9807-vcm.c | 101 ++++++++++++++++++++++++++++++---
+ 1 file changed, 93 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/media/i2c/dw9807-vcm.c b/drivers/media/i2c/dw9807-vcm.c
+index 4148009e0..2a608b449 100644
+--- a/drivers/media/i2c/dw9807-vcm.c
++++ b/drivers/media/i2c/dw9807-vcm.c
+@@ -7,6 +7,7 @@
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
+ #include <media/v4l2-ctrls.h>
+ #include <media/v4l2-device.h>
+ 
+@@ -41,9 +42,14 @@
+ struct dw9807_device {
+ 	struct v4l2_ctrl_handler ctrls_vcm;
+ 	struct v4l2_subdev sd;
++	struct regulator *vdd;		/* optional: the VCM */
++	struct regulator *vio;		/* optional: I2C I/O, pull-ups */
+ 	u16 current_val;
+ };
+ 
++/* The DW9808 needs 5 ms after its supplies come up */
++#define DW9807_POWER_ON_DELAY_US	5000
++
+ static inline struct dw9807_device *sd_to_dw9807_vcm(
+ 					struct v4l2_subdev *subdev)
+ {
+@@ -117,8 +123,18 @@ static int dw9807_set_ctrl(struct v4l2_ctrl *ctrl)
+ 	if (ctrl->id == V4L2_CID_FOCUS_ABSOLUTE) {
+ 		struct i2c_client *client = v4l2_get_subdevdata(&dev_vcm->sd);
+ 
++		int ret;
++
+ 		dev_vcm->current_val = ctrl->val;
+-		return dw9807_set_dac(client, ctrl->val);
++
++		/* Without power the position is written at the next resume */
++		if (!pm_runtime_get_if_active(&client->dev))
++			return 0;
++
++		ret = dw9807_set_dac(client, ctrl->val);
++		pm_runtime_put(&client->dev);
++
++		return ret;
+ 	}
+ 
+ 	return -EINVAL;
+@@ -159,11 +175,18 @@ static int dw9807_init_controls(struct dw9807_device *dev_vcm)
+ 	struct v4l2_ctrl_handler *hdl = &dev_vcm->ctrls_vcm;
+ 	const struct v4l2_ctrl_ops *ops = &dw9807_vcm_ctrl_ops;
+ 	struct i2c_client *client = v4l2_get_subdevdata(&dev_vcm->sd);
++	u32 initial = 0;
++
++	/* A focus position for boards with no autofocus in user space */
++	device_property_read_u32(&client->dev, "dongwoon,initial-focus",
++				 &initial);
++	dev_vcm->current_val = min_t(u32, initial, DW9807_MAX_FOCUS_POS);
+ 
+ 	v4l2_ctrl_handler_init(hdl, 1);
+ 
+ 	v4l2_ctrl_new_std(hdl, ops, V4L2_CID_FOCUS_ABSOLUTE,
+-			  0, DW9807_MAX_FOCUS_POS, DW9807_FOCUS_STEPS, 0);
++			  0, DW9807_MAX_FOCUS_POS, DW9807_FOCUS_STEPS,
++			  dev_vcm->current_val);
+ 
+ 	dev_vcm->sd.ctrl_handler = hdl;
+ 	if (hdl->error) {
+@@ -175,6 +198,54 @@ static int dw9807_init_controls(struct dw9807_device *dev_vcm)
+ 	return 0;
+ }
+ 
++static struct regulator *dw9807_get_supply(struct device *dev,
++					   const char *name)
++{
++	struct regulator *reg = devm_regulator_get_optional(dev, name);
++
++	if (!IS_ERR(reg))
++		return reg;
++	if (PTR_ERR(reg) == -ENODEV)
++		return NULL;
++
++	return ERR_PTR(dev_err_probe(dev, PTR_ERR(reg),
++				     "failed to get %s supply\n", name));
++}
++
++static int dw9807_supplies_on(struct dw9807_device *dw9807_dev)
++{
++	int ret;
++
++	if (dw9807_dev->vio) {
++		ret = regulator_enable(dw9807_dev->vio);
++		if (ret)
++			return ret;
++	}
++
++	if (dw9807_dev->vdd) {
++		ret = regulator_enable(dw9807_dev->vdd);
++		if (ret) {
++			if (dw9807_dev->vio)
++				regulator_disable(dw9807_dev->vio);
++			return ret;
++		}
++	}
++
++	if (dw9807_dev->vdd || dw9807_dev->vio)
++		usleep_range(DW9807_POWER_ON_DELAY_US,
++			     DW9807_POWER_ON_DELAY_US + 100);
++
++	return 0;
++}
++
++static void dw9807_supplies_off(struct dw9807_device *dw9807_dev)
++{
++	if (dw9807_dev->vdd)
++		regulator_disable(dw9807_dev->vdd);
++	if (dw9807_dev->vio)
++		regulator_disable(dw9807_dev->vio);
++}
++
+ static int dw9807_probe(struct i2c_client *client)
+ {
+ 	struct dw9807_device *dw9807_dev;
+@@ -185,6 +256,13 @@ static int dw9807_probe(struct i2c_client *client)
+ 	if (dw9807_dev == NULL)
+ 		return -ENOMEM;
+ 
++	dw9807_dev->vdd = dw9807_get_supply(&client->dev, "vdd");
++	if (IS_ERR(dw9807_dev->vdd))
++		return PTR_ERR(dw9807_dev->vdd);
++	dw9807_dev->vio = dw9807_get_supply(&client->dev, "vio");
++	if (IS_ERR(dw9807_dev->vio))
++		return PTR_ERR(dw9807_dev->vio);
++
+ 	v4l2_i2c_subdev_init(&dw9807_dev->sd, client, &dw9807_ops);
+ 	dw9807_dev->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+ 	dw9807_dev->sd.internal_ops = &dw9807_int_ops;
+@@ -203,7 +281,9 @@ static int dw9807_probe(struct i2c_client *client)
+ 	if (rval < 0)
+ 		goto err_cleanup;
+ 
+-	pm_runtime_set_active(&client->dev);
++	/* With its own supply the VCM starts off, until the subdev is opened */
++	if (!dw9807_dev->vdd && !dw9807_dev->vio)
++		pm_runtime_set_active(&client->dev);
+ 	pm_runtime_enable(&client->dev);
+ 	pm_runtime_idle(&client->dev);
+ 
+@@ -249,12 +329,12 @@ static int __maybe_unused dw9807_vcm_suspend(struct device *dev)
+ 
+ 	/* Power down */
+ 	ret = i2c_master_send(client, tx_data, sizeof(tx_data));
+-	if (ret < 0) {
++	if (ret < 0)
+ 		dev_err(&client->dev, "I2C write CTL fail ret = %d\n", ret);
+-		return ret;
+-	}
+ 
+-	return 0;
++	dw9807_supplies_off(dw9807_dev);
++
++	return ret < 0 ? ret : 0;
+ }
+ 
+ /*
+@@ -271,10 +351,15 @@ static int  __maybe_unused dw9807_vcm_resume(struct device *dev)
+ 	const char tx_data[2] = { DW9807_CTL_ADDR, 0x00 };
+ 	int ret, val;
+ 
++	ret = dw9807_supplies_on(dw9807_dev);
++	if (ret)
++		return ret;
++
+ 	/* Power on */
+ 	ret = i2c_master_send(client, tx_data, sizeof(tx_data));
+ 	if (ret < 0) {
+ 		dev_err(&client->dev, "I2C write CTL fail ret = %d\n", ret);
++		dw9807_supplies_off(dw9807_dev);
+ 		return ret;
+ 	}
+ 
+@@ -300,7 +385,7 @@ static const struct of_device_id dw9807_of_table[] = {
+ MODULE_DEVICE_TABLE(of, dw9807_of_table);
+ 
+ static const struct dev_pm_ops dw9807_pm_ops = {
+-	SET_SYSTEM_SLEEP_PM_OPS(dw9807_vcm_suspend, dw9807_vcm_resume)
++	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+ 	SET_RUNTIME_PM_OPS(dw9807_vcm_suspend, dw9807_vcm_resume, NULL)
+ };
+ 
+-- 
+2.53.0
+

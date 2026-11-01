@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 45/46] ASoC: samsung: gta3xl: capture and the COD3035X codec
+Subject: [PATCH 45/52] ASoC: samsung: gta3xl: capture and the COD3035X codec
 
 A WDMA1 capture front end (the card's PCM 1) and a UAIF0 back end to the
 COD3035X codec next to the speaker path, with the built-in (MIC1) and

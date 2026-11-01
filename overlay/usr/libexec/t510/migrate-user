@@ -88,4 +88,37 @@ if [ ! -e "$CFG/t510/migrated-0.11.0" ]; then
 	) &
 fi
 
+# 0.12.0: the cameras work, and t510-camera gets a button on the dock (the
+# panel with the directory menu), after its last launcher
+if [ ! -e "$CFG/t510/migrated-0.12.0" ]; then
+	props=$(xfconf-query -c xfce4-panel -l -v 2>/dev/null)
+	if ! printf '%s\n' "$props" | grep -q t510-camera.desktop &&
+		! grep -qs '^Exec=t510-camera' "$CFG"/xfce4/panel/launcher-*/*.desktop; then
+		dir=$(printf '%s\n' "$props" | awk '$2 == "directorymenu" { print $1 }' | head -n1)
+		dir=${dir##*-}
+		for ids in $(printf '%s\n' "$props" | awk '$1 ~ /^\/panels\/panel-[0-9]+\/plugin-ids$/ { print $1 }'); do
+			old=$(xfconf-query -c xfce4-panel -p "$ids" | grep -E '^[0-9]+$')
+			[ -n "$dir" ] && printf '%s\n' "$old" | grep -qx "$dir" || continue
+			new=$(($(printf '%s\n' "$props" | sed -n 's|^/plugins/plugin-\([0-9]*\) .*|\1|p' | sort -n | tail -n1) + 1))
+			last=
+			for i in $old; do
+				[ "$(xfconf-query -c xfce4-panel -p "/plugins/plugin-$i" 2>/dev/null)" = launcher ] && last=$i
+			done
+			args=
+			[ -n "$last" ] || args="-t int -s $new"
+			for i in $old; do
+				args="$args -t int -s $i"
+				[ "$i" = "$last" ] && args="$args -t int -s $new"
+			done
+			xfconf-query -c xfce4-panel -p "/plugins/plugin-$new" -n -t string -s launcher
+			xfconf-query -c xfce4-panel -p "/plugins/plugin-$new/items" -n --force-array \
+				-t string -s /usr/share/applications/t510-camera.desktop
+			xfconf-query -c xfce4-panel -p "$ids" --force-array $args
+			restart=1
+			break
+		done
+	fi
+	mark migrated-0.12.0
+fi
+
 [ "$restart" = 0 ] || xfce4-panel -r

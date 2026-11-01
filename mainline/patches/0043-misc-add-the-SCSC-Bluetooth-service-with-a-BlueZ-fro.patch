@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 43/46] misc: add the SCSC Bluetooth service with a BlueZ front
+Subject: [PATCH 43/52] misc: add the SCSC Bluetooth service with a BlueZ front
  end
 
 Bluetooth of the Samsung SCSC (Maxwell) WLBT subsystem: the BT service

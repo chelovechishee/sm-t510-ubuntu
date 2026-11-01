@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 40/46] usb: typec: add Samsung S2MM005 CC controller driver
+Subject: [PATCH 40/52] usb: typec: add Samsung S2MM005 CC controller driver
 
 The S2MM005 runs its own firmware for the CC lines and USB PD and
 reports the result in a status block read over I2C with 16-bit

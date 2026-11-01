@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Camera
+Name[ru]=Камера
+GenericName=Camera
+Comment=Take photos and videos with the tablet's cameras
+Comment[ru]=Фото и видео с камер планшета
+Icon=camera-photo
+Exec=t510-camera
+Terminal=false
+StartupNotify=true
+Categories=AudioVideo;Video;Recorder;Graphics;Photography;
+Keywords=camera;photo;video;webcam;selfie;

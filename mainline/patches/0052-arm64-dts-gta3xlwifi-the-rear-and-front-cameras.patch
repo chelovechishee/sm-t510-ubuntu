@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 52/52] arm64: dts: gta3xlwifi: the rear and front cameras
+
+The S5K4HA on CSIS1 with its DW9808 focus motor (fixed at the position
+found sharpest, as nothing drives autofocus), the S5K5E9 on CSIS0, their
+GPIO switched supplies and 26 MHz clocks. Both are mounted turned by 90
+degrees.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../boot/dts/exynos/exynos7904-gta3xlwifi.dts | 164 ++++++++++++++++++
+ 1 file changed, 164 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+index 8f5b6c845..6f2de6a15 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dts
+@@ -139,6 +139,62 @@ tsp_dvdd: regulator-tsp-dvdd {
+ 		regulator-boot-on;
+ 	};
+ 
++	/* rear camera rails: LDOs switched by GPIOs; the I/O rail feeds the front camera too */
++	cam_vddio: regulator-cam-vddio {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_vddio";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		gpio = <&gpg3 0 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
++	cam_avdd: regulator-cam-avdd {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_avdd";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		gpio = <&gpg2 3 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
++	cam_dvdd: regulator-cam-dvdd {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_dvdd";
++		regulator-min-microvolt = <1200000>;
++		regulator-max-microvolt = <1200000>;
++		gpio = <&gpp6 4 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
++	cam_afvdd: regulator-cam-afvdd {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_afvdd";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		gpio = <&gpg2 2 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
++	/* front camera rails; the I/O rail is cam_vddio */
++	vtcam_avdd: regulator-vtcam-avdd {
++		compatible = "regulator-fixed";
++		regulator-name = "vtcam_avdd";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		gpio = <&gpg2 5 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
++	vtcam_dvdd: regulator-vtcam-dvdd {
++		compatible = "regulator-fixed";
++		regulator-name = "vtcam_dvdd";
++		regulator-min-microvolt = <1200000>;
++		regulator-max-microvolt = <1200000>;
++		gpio = <&gpg2 4 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
+ 	/* panel brightness through the DSIM left running by S-Boot */
+ 	backlight: backlight@14870000 {
+ 		compatible = "samsung,gta3xlwifi-backlight";
+@@ -417,6 +473,114 @@ accelerometer@1d {
+ 	};
+ };
+ 
++/* front camera receiver */
++&csis0 {
++	samsung,csis-hs-settle = <19>;
++	status = "okay";
++
++	port {
++		csis0_in: endpoint {
++			remote-endpoint = <&front_camera_out>;
++			data-lanes = <1 2>;
++		};
++	};
++};
++
++&hsi2c_0 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	/* front camera, 5 MP */
++	front_camera: camera@2d {
++		compatible = "samsung,s5k5e9";
++		reg = <0x2d>;
++		clocks = <&cmu_top CLK_DOUT_CIS_CLK1>;
++		assigned-clocks = <&cmu_top CLK_MOUT_CIS_CLK1>,
++				  <&cmu_top CLK_DOUT_CIS_CLK1>;
++		assigned-clock-parents = <&oscclk>, <0>;
++		assigned-clock-rates = <0>, <26000000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cis_clk1>;
++		reset-gpios = <&gpg3 5 GPIO_ACTIVE_LOW>;
++		vdda-supply = <&vtcam_avdd>;
++		vddd-supply = <&vtcam_dvdd>;
++		vddio-supply = <&cam_vddio>;
++		orientation = <0>;	/* front */
++		rotation = <90>;
++
++		port {
++			front_camera_out: endpoint {
++				remote-endpoint = <&csis0_in>;
++				data-lanes = <1 2>;
++				link-frequencies = /bits/ 64 <468000000>;
++			};
++		};
++	};
++};
++
++/* the rear camera's focus motor */
++&hsi2c_2 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	/* DW9808: the registers of a DW9807 */
++	rear_lens: lens@c {
++		compatible = "dongwoon,dw9807-vcm";
++		reg = <0x0c>;
++		vdd-supply = <&cam_afvdd>;
++		/* the bus pull-ups: without it the VCM times out */
++		vio-supply = <&cam_vddio>;
++		/* measured sharpest at 2-3 m; there is no autofocus yet */
++		dongwoon,initial-focus = <300>;
++	};
++};
++
++/* rear camera receiver */
++&csis1 {
++	status = "okay";
++
++	port {
++		csis1_in: endpoint {
++			remote-endpoint = <&rear_camera_out>;
++			data-lanes = <1 2 3 4>;
++		};
++	};
++};
++
++&hsi2c_1 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	/* rear camera, 8 MP */
++	rear_camera: camera@2d {
++		compatible = "samsung,s5k4ha";
++		reg = <0x2d>;
++		clocks = <&cmu_top CLK_DOUT_CIS_CLK0>;
++		assigned-clocks = <&cmu_top CLK_MOUT_CIS_CLK0>,
++				  <&cmu_top CLK_DOUT_CIS_CLK0>;
++		assigned-clock-parents = <&oscclk>, <0>;
++		assigned-clock-rates = <0>, <26000000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cis_clk0>;
++		reset-gpios = <&gpg3 4 GPIO_ACTIVE_LOW>;
++		vdda-supply = <&cam_avdd>;
++		vddd-supply = <&cam_dvdd>;
++		vddio-supply = <&cam_vddio>;
++		afvdd-supply = <&cam_afvdd>;
++		orientation = <1>;	/* back */
++		rotation = <90>;
++		lens-focus = <&rear_lens>;
++
++		port {
++			rear_camera_out: endpoint {
++				remote-endpoint = <&csis1_in>;
++				data-lanes = <1 2 3 4>;
++				link-frequencies = /bits/ 64 <335500000>;
++			};
++		};
++	};
++};
++
+ &i2c_3 {
+ 	status = "okay";
+ 
+-- 
+2.53.0
+

@@ -1,0 +1,1914 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 49/52] media: i2c: add the Samsung S5K4HA and S5K5E9 sensors
+
+The rear (S5K4HA, 8 MP, 4 lanes) and front (S5K5E9, 5 MP, 2 lanes)
+cameras of the Galaxy Tab A 10.1 (2019), modelled on the s5k3m5 driver:
+a full size and a 2x2 binned RAW10 mode each, exposure, analogue gain
+(read from the sensor's own limits), blanking, flips and test patterns.
+The register settings come from the downstream fimc-is set files B.
+
+The S5K4HA keeps its focus lens (the lens-focus device) powered with it:
+the lens's I2C bus only works while the sensor's I/O rail is up.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ drivers/media/i2c/Kconfig  |  14 +
+ drivers/media/i2c/Makefile |   2 +
+ drivers/media/i2c/s5k4ha.c | 946 +++++++++++++++++++++++++++++++++++++
+ drivers/media/i2c/s5k5e9.c | 892 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 1854 insertions(+)
+ create mode 100644 drivers/media/i2c/s5k4ha.c
+ create mode 100644 drivers/media/i2c/s5k5e9.c
+
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index 5c52007f9..62565903c 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -804,6 +804,20 @@ config VIDEO_S5K3M5
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called s5k3m5.
+ 
++config VIDEO_S5K4HA
++	tristate "Samsung S5K4HA sensor support"
++	select V4L2_CCI_I2C
++	help
++	  This is a V4L2 sensor driver for Samsung S5K4HA 8MP raw
++	  camera sensor.
++
++config VIDEO_S5K5E9
++	tristate "Samsung S5K5E9 sensor support"
++	select V4L2_CCI_I2C
++	help
++	  This is a V4L2 sensor driver for Samsung S5K5E9 5MP raw
++	  camera sensor.
++
+ config VIDEO_S5K5BAF
+ 	tristate "Samsung S5K5BAF sensor support"
+ 	help
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index d04bd5724..f4602ac19 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -130,6 +130,8 @@ obj-$(CONFIG_VIDEO_RDACM21) += rdacm21.o
+ obj-$(CONFIG_VIDEO_RJ54N1) += rj54n1cb0c.o
+ obj-$(CONFIG_VIDEO_S5C73M3) += s5c73m3/
+ obj-$(CONFIG_VIDEO_S5K3M5) += s5k3m5.o
++obj-$(CONFIG_VIDEO_S5K4HA) += s5k4ha.o
++obj-$(CONFIG_VIDEO_S5K5E9) += s5k5e9.o
+ obj-$(CONFIG_VIDEO_S5K5BAF) += s5k5baf.o
+ obj-$(CONFIG_VIDEO_S5K6A3) += s5k6a3.o
+ obj-$(CONFIG_VIDEO_S5KJN1) += s5kjn1.o
+diff --git a/drivers/media/i2c/s5k4ha.c b/drivers/media/i2c/s5k4ha.c
+new file mode 100644
+index 000000000..ac03a1985
+--- /dev/null
++++ b/drivers/media/i2c/s5k4ha.c
+@@ -0,0 +1,946 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung S5K4HA 8 MP raw image sensor
++ *
++ * The register settings come from the Samsung kernel of the Galaxy Tab A
++ * 10.1 (2019), fimc-is-cis-4ha, 4 lane set file B. Both modes run the same
++ * PLL: 26 MHz in, 671 Mbit/s per lane, video timing pixel clock 280.8 MHz,
++ * 3688 pixel clocks per line.
++ */
++
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/device/bus.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <linux/units.h>
++#include <media/v4l2-cci.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
++
++#define S5K4HA_MCLK_FREQ		(26 * HZ_PER_MHZ)
++#define S5K4HA_LINK_FREQ		335500000ULL	/* 671 Mbit/s, DDR */
++#define S5K4HA_PIXEL_RATE		280800000ULL
++#define S5K4HA_DATA_LANES		4
++
++#define S5K4HA_REG_CHIP_ID		CCI_REG16(0x0000)
++#define S5K4HA_CHIP_ID			0x48ab
++#define S5K4HA_REG_REVISION		CCI_REG8(0x0002)
++
++#define S5K4HA_REG_AGAIN_MIN		CCI_REG16(0x0084)
++#define S5K4HA_REG_AGAIN_MAX		CCI_REG16(0x0086)
++
++#define S5K4HA_REG_MODE_SELECT		CCI_REG8(0x0100)
++#define S5K4HA_MODE_STREAMING		0x01
++
++#define S5K4HA_REG_ORIENTATION		CCI_REG8(0x0101)
++#define S5K4HA_HFLIP			BIT(0)
++#define S5K4HA_VFLIP			BIT(1)
++
++/* coarse integration time in lines */
++#define S5K4HA_REG_EXPOSURE		CCI_REG16(0x0202)
++#define S5K4HA_EXPOSURE_MIN		1
++#define S5K4HA_EXPOSURE_MARGIN		4
++#define S5K4HA_EXPOSURE_DEFAULT		1024
++
++/* analogue gain code: 32 = 1x */
++#define S5K4HA_REG_AGAIN		CCI_REG16(0x0204)
++#define S5K4HA_AGAIN_UNITY		0x20
++
++#define S5K4HA_REG_VTS			CCI_REG16(0x0340)
++#define S5K4HA_VTS_MAX			0xffff
++#define S5K4HA_HTS			3688
++
++#define S5K4HA_REG_TEST_PATTERN		CCI_REG16(0x0600)
++
++/*
++ * The output window starts at (8, 8); an 8 pixel margin on every side is
++ * assumed for the pixel array.
++ */
++#define S5K4HA_NATIVE_WIDTH		3280
++#define S5K4HA_NATIVE_HEIGHT		2464
++#define S5K4HA_ACTIVE_LEFT		8
++#define S5K4HA_ACTIVE_TOP		8
++#define S5K4HA_ACTIVE_WIDTH		3264
++#define S5K4HA_ACTIVE_HEIGHT		2448
++
++#define to_s5k4ha(_sd)			container_of(_sd, struct s5k4ha, sd)
++
++static const s64 s5k4ha_link_freq_menu[] = {
++	S5K4HA_LINK_FREQ,
++};
++
++/* The colour order at no flip is GR/BG; flips shift it */
++static const u32 s5k4ha_mbus_formats[] = {
++	MEDIA_BUS_FMT_SGRBG10_1X10,	MEDIA_BUS_FMT_SRGGB10_1X10,
++	MEDIA_BUS_FMT_SBGGR10_1X10,	MEDIA_BUS_FMT_SGBRG10_1X10,
++};
++
++static const char * const s5k4ha_test_pattern_menu[] = {
++	"Disabled",
++	"Solid colour",
++	"Colour bars",
++	"Fade to grey colour bars",
++	"PN9",
++};
++
++static const char * const s5k4ha_supply_names[] = {
++	"vdda",		/* analog, 2.8 V */
++	"vddd",		/* digital core */
++	"vddio",	/* I/O, 1.8 V */
++	"afvdd",	/* autofocus motor, 2.8 V */
++};
++
++#define S5K4HA_NUM_SUPPLIES	ARRAY_SIZE(s5k4ha_supply_names)
++
++/* Written once after power on, after the sensor firmware has started */
++static const struct cci_reg_sequence s5k4ha_global_regs[] = {
++	{ CCI_REG8(0x0100), 0x00 },
++	{ CCI_REG8(0x0a02), 0x7f },
++	{ CCI_REG8(0x3b45), 0x01 },
++	{ CCI_REG8(0x3264), 0x01 },
++	{ CCI_REG8(0x3290), 0x10 },
++	{ CCI_REG8(0x0b05), 0x01 },
++	{ CCI_REG8(0x3069), 0xc7 },
++	{ CCI_REG8(0x3074), 0x06 },
++	{ CCI_REG8(0x3075), 0x32 },
++	{ CCI_REG8(0x3068), 0xf7 },
++	{ CCI_REG8(0x30c6), 0x01 },
++	{ CCI_REG8(0x301f), 0x20 },
++	{ CCI_REG8(0x306b), 0x9a },
++	{ CCI_REG8(0x3091), 0x1f },
++	{ CCI_REG8(0x306e), 0x71 },
++	{ CCI_REG8(0x306f), 0x28 },
++	{ CCI_REG8(0x306d), 0x08 },
++	{ CCI_REG8(0x3084), 0x16 },
++	{ CCI_REG8(0x3070), 0x0f },
++	{ CCI_REG8(0x306a), 0x79 },
++	{ CCI_REG8(0x30b0), 0xff },
++	{ CCI_REG8(0x30c2), 0x05 },
++	{ CCI_REG8(0x30c4), 0x06 },
++	{ CCI_REG8(0x3081), 0x07 },
++	{ CCI_REG8(0x307b), 0x85 },
++	{ CCI_REG8(0x307a), 0x0a },
++	{ CCI_REG8(0x3079), 0x0a },
++	{ CCI_REG8(0x308a), 0x20 },
++	{ CCI_REG8(0x308b), 0x08 },
++	{ CCI_REG8(0x308c), 0x0b },
++	{ CCI_REG8(0x392f), 0x01 },
++	{ CCI_REG8(0x3930), 0x00 },
++	{ CCI_REG8(0x3924), 0x7f },
++	{ CCI_REG8(0x3925), 0xfd },
++	{ CCI_REG8(0x3c08), 0xff },
++	{ CCI_REG8(0x3c09), 0xff },
++	{ CCI_REG8(0x3c31), 0xff },
++	{ CCI_REG8(0x3c32), 0xff },
++};
++
++/*
++ * Common to both modes: PLL, line length, readout window, link rate,
++ * RAW10 on 4 lanes. Frame length, exposure, gain and flips come from the
++ * controls.
++ */
++static const struct cci_reg_sequence s5k4ha_common_regs[] = {
++	{ CCI_REG16(0x0136), 0x1a00 },	/* external clock 26.00 MHz */
++	{ CCI_REG8(0x0301), 0x04 },	/* vt_pix_clk_div */
++	{ CCI_REG8(0x0305), 0x05 },	/* pre_pll_clk_div */
++	{ CCI_REG16(0x0306), 0x006c },	/* pll_multiplier */
++	{ CCI_REG8(0x3c1f), 0x00 },
++	{ CCI_REG8(0x030d), 0x05 },	/* secnd_pre_pll_clk_div */
++	{ CCI_REG16(0x030e), 0x0081 },	/* secnd_pll_multiplier */
++	{ CCI_REG8(0x3c17), 0x00 },
++	{ CCI_REG16(0x0342), S5K4HA_HTS },
++	{ CCI_REG16(0x0344), 0x0008 },	/* x_addr_start */
++	{ CCI_REG16(0x0346), 0x0008 },	/* y_addr_start */
++	{ CCI_REG16(0x0348), 0x0cc7 },	/* x_addr_end */
++	{ CCI_REG16(0x034a), 0x0997 },	/* y_addr_end */
++	{ CCI_REG8(0x0381), 0x01 },	/* x_even_inc */
++	{ CCI_REG8(0x0383), 0x01 },	/* x_odd_inc */
++	{ CCI_REG8(0x0385), 0x01 },	/* y_even_inc */
++	{ CCI_REG16(0x0200), 0x0dd8 },	/* fine integration time */
++	{ CCI_REG16(0x0820), 0x029f },	/* requested link rate 671 Mbit/s */
++	{ CCI_REG16(0x0822), 0x0000 },
++	{ CCI_REG16(0x0112), 0x0a0a },	/* RAW10 */
++	{ CCI_REG8(0x0114), 0x03 },	/* 4 lanes */
++	{ CCI_REG8(0x3929), 0x3f },
++	{ CCI_REG8(0x3941), 0x0f },
++	{ CCI_REG8(0x3942), 0x3d },
++};
++
++static const struct cci_reg_sequence s5k4ha_3264x2448_regs[] = {
++	{ CCI_REG16(0x034c), 3264 },	/* x_output_size */
++	{ CCI_REG16(0x034e), 2448 },	/* y_output_size */
++	{ CCI_REG8(0x0387), 0x01 },	/* y_odd_inc */
++	{ CCI_REG8(0x0900), 0x00 },	/* binning off */
++	{ CCI_REG8(0x0901), 0x00 },
++};
++
++static const struct cci_reg_sequence s5k4ha_1632x1224_regs[] = {
++	{ CCI_REG16(0x034c), 1632 },
++	{ CCI_REG16(0x034e), 1224 },
++	{ CCI_REG8(0x0387), 0x03 },
++	{ CCI_REG8(0x0900), 0x01 },	/* 2x2 binning */
++	{ CCI_REG8(0x0901), 0x22 },
++};
++
++struct s5k4ha_reg_list {
++	const struct cci_reg_sequence *regs;
++	unsigned int num_regs;
++};
++
++struct s5k4ha_mode {
++	u32 width;
++	u32 height;
++	u32 vts;			/* default frame length: 30 fps */
++	u32 vts_min;			/* shortest frame length */
++	const struct s5k4ha_reg_list reg_list;
++};
++
++static const struct s5k4ha_mode s5k4ha_supported_modes[] = {
++	{
++		.width = 3264,
++		.height = 2448,
++		.vts = 2538,
++		.vts_min = 2538,
++		.reg_list = {
++			.regs = s5k4ha_3264x2448_regs,
++			.num_regs = ARRAY_SIZE(s5k4ha_3264x2448_regs),
++		},
++	},
++	{
++		.width = 1632,
++		.height = 1224,
++		.vts = 2538,
++		.vts_min = 1269,	/* 60 fps in the Samsung set file */
++		.reg_list = {
++			.regs = s5k4ha_1632x1224_regs,
++			.num_regs = ARRAY_SIZE(s5k4ha_1632x1224_regs),
++		},
++	},
++};
++
++struct s5k4ha {
++	struct device *dev;
++	struct regmap *regmap;
++	struct clk *mclk;
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data supplies[S5K4HA_NUM_SUPPLIES];
++
++	/*
++	 * The focus motor's I2C bus only works while the sensor is powered,
++	 * so the lens is kept powered (and at its position) along with it.
++	 */
++	struct fwnode_handle *lens_fwnode;
++	struct device *lens;
++	bool lens_held;
++
++	struct v4l2_subdev sd;
++	struct media_pad pad;
++
++	struct v4l2_ctrl_handler ctrl_handler;
++	struct v4l2_ctrl *link_freq;
++	struct v4l2_ctrl *pixel_rate;
++	struct v4l2_ctrl *hblank;
++	struct v4l2_ctrl *vblank;
++	struct v4l2_ctrl *exposure;
++	struct v4l2_ctrl *vflip;
++	struct v4l2_ctrl *hflip;
++
++	u16 again_min;
++	u16 again_max;
++
++	const struct s5k4ha_mode *mode;
++};
++
++static int s5k4ha_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct s5k4ha *s5k4ha = container_of(ctrl->handler, struct s5k4ha,
++					     ctrl_handler);
++	const struct s5k4ha_mode *mode = s5k4ha->mode;
++	s64 exposure_max;
++	int ret;
++
++	switch (ctrl->id) {
++	case V4L2_CID_HFLIP:
++	case V4L2_CID_VFLIP:
++		/* The orientation is written when streaming starts */
++		return 0;
++	case V4L2_CID_VBLANK:
++		/* The longest exposure follows the frame length */
++		exposure_max = mode->height + ctrl->val - S5K4HA_EXPOSURE_MARGIN;
++		__v4l2_ctrl_modify_range(s5k4ha->exposure,
++					 s5k4ha->exposure->minimum,
++					 exposure_max,
++					 s5k4ha->exposure->step,
++					 s5k4ha->exposure->default_value);
++		break;
++	}
++
++	/* The controls are written when the sensor is powered for streaming */
++	if (!pm_runtime_get_if_active(s5k4ha->dev))
++		return 0;
++
++	switch (ctrl->id) {
++	case V4L2_CID_ANALOGUE_GAIN:
++		ret = cci_write(s5k4ha->regmap, S5K4HA_REG_AGAIN,
++				ctrl->val, NULL);
++		break;
++	case V4L2_CID_EXPOSURE:
++		ret = cci_write(s5k4ha->regmap, S5K4HA_REG_EXPOSURE,
++				ctrl->val, NULL);
++		break;
++	case V4L2_CID_VBLANK:
++		ret = cci_write(s5k4ha->regmap, S5K4HA_REG_VTS,
++				ctrl->val + mode->height, NULL);
++		break;
++	case V4L2_CID_TEST_PATTERN:
++		ret = cci_write(s5k4ha->regmap, S5K4HA_REG_TEST_PATTERN,
++				ctrl->val, NULL);
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++
++	pm_runtime_put(s5k4ha->dev);
++
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops s5k4ha_ctrl_ops = {
++	.s_ctrl = s5k4ha_set_ctrl,
++};
++
++static int s5k4ha_init_controls(struct s5k4ha *s5k4ha)
++{
++	struct v4l2_ctrl_handler *ctrl_hdlr = &s5k4ha->ctrl_handler;
++	const struct s5k4ha_mode *mode = s5k4ha->mode;
++	struct v4l2_fwnode_device_properties props;
++	s64 hblank, vblank, exposure_max;
++	int ret;
++
++	v4l2_ctrl_handler_init(ctrl_hdlr, 11);
++
++	s5k4ha->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr, &s5k4ha_ctrl_ops,
++					V4L2_CID_LINK_FREQ,
++					ARRAY_SIZE(s5k4ha_link_freq_menu) - 1,
++					0, s5k4ha_link_freq_menu);
++	if (s5k4ha->link_freq)
++		s5k4ha->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	s5k4ha->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4ha_ctrl_ops,
++					       V4L2_CID_PIXEL_RATE,
++					       S5K4HA_PIXEL_RATE,
++					       S5K4HA_PIXEL_RATE, 1,
++					       S5K4HA_PIXEL_RATE);
++
++	hblank = S5K4HA_HTS - mode->width;
++	s5k4ha->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4ha_ctrl_ops,
++					   V4L2_CID_HBLANK, hblank,
++					   hblank, 1, hblank);
++	if (s5k4ha->hblank)
++		s5k4ha->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	vblank = mode->vts - mode->height;
++	s5k4ha->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4ha_ctrl_ops,
++					   V4L2_CID_VBLANK,
++					   mode->vts_min - mode->height,
++					   S5K4HA_VTS_MAX - mode->height, 1,
++					   vblank);
++
++	v4l2_ctrl_new_std(ctrl_hdlr, &s5k4ha_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
++			  s5k4ha->again_min, s5k4ha->again_max, 1,
++			  S5K4HA_AGAIN_UNITY);
++
++	exposure_max = mode->vts - S5K4HA_EXPOSURE_MARGIN;
++	s5k4ha->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4ha_ctrl_ops,
++					     V4L2_CID_EXPOSURE,
++					     S5K4HA_EXPOSURE_MIN,
++					     exposure_max, 1,
++					     S5K4HA_EXPOSURE_DEFAULT);
++
++	v4l2_ctrl_new_std_menu_items(ctrl_hdlr, &s5k4ha_ctrl_ops,
++				     V4L2_CID_TEST_PATTERN,
++				     ARRAY_SIZE(s5k4ha_test_pattern_menu) - 1,
++				     0, 0, s5k4ha_test_pattern_menu);
++
++	s5k4ha->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4ha_ctrl_ops,
++					  V4L2_CID_HFLIP, 0, 1, 1, 0);
++	if (s5k4ha->hflip)
++		s5k4ha->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
++	s5k4ha->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5k4ha_ctrl_ops,
++					  V4L2_CID_VFLIP, 0, 1, 1, 0);
++	if (s5k4ha->vflip)
++		s5k4ha->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
++	ret = v4l2_fwnode_device_parse(s5k4ha->dev, &props);
++	if (ret)
++		goto error_free_hdlr;
++
++	ret = v4l2_ctrl_new_fwnode_properties(ctrl_hdlr, &s5k4ha_ctrl_ops,
++					      &props);
++	if (ret)
++		goto error_free_hdlr;
++
++	if (ctrl_hdlr->error) {
++		ret = ctrl_hdlr->error;
++		goto error_free_hdlr;
++	}
++
++	s5k4ha->sd.ctrl_handler = ctrl_hdlr;
++
++	return 0;
++
++error_free_hdlr:
++	v4l2_ctrl_handler_free(ctrl_hdlr);
++
++	return ret;
++}
++
++static int s5k4ha_enable_streams(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state, u32 pad,
++				 u64 streams_mask)
++{
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++	const struct s5k4ha_reg_list *reg_list = &s5k4ha->mode->reg_list;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(s5k4ha->dev);
++	if (ret)
++		return ret;
++
++	/* Start the sensor firmware, as the stock kernel does */
++	cci_write(s5k4ha->regmap, CCI_REG16(0xfcfc), 0x4000, &ret);
++	cci_write(s5k4ha->regmap, CCI_REG16(0x6010), 0x0001, &ret);
++	if (ret)
++		goto error;
++
++	usleep_range(3 * USEC_PER_MSEC, 4 * USEC_PER_MSEC);
++
++	cci_multi_reg_write(s5k4ha->regmap, s5k4ha_global_regs,
++			    ARRAY_SIZE(s5k4ha_global_regs), &ret);
++	cci_multi_reg_write(s5k4ha->regmap, s5k4ha_common_regs,
++			    ARRAY_SIZE(s5k4ha_common_regs), &ret);
++	cci_multi_reg_write(s5k4ha->regmap, reg_list->regs,
++			    reg_list->num_regs, &ret);
++	if (ret)
++		goto error;
++
++	ret = __v4l2_ctrl_handler_setup(s5k4ha->sd.ctrl_handler);
++
++	cci_write(s5k4ha->regmap, S5K4HA_REG_ORIENTATION,
++		  (s5k4ha->vflip->val ? S5K4HA_VFLIP : 0) |
++		  (s5k4ha->hflip->val ? S5K4HA_HFLIP : 0), &ret);
++	cci_write(s5k4ha->regmap, S5K4HA_REG_MODE_SELECT,
++		  S5K4HA_MODE_STREAMING, &ret);
++	if (ret)
++		goto error;
++
++	/* No flips while the colour order is in use */
++	__v4l2_ctrl_grab(s5k4ha->vflip, true);
++	__v4l2_ctrl_grab(s5k4ha->hflip, true);
++
++	return 0;
++
++error:
++	dev_err(s5k4ha->dev, "failed to start streaming: %d\n", ret);
++	pm_runtime_put_autosuspend(s5k4ha->dev);
++
++	return ret;
++}
++
++static int s5k4ha_disable_streams(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *state, u32 pad,
++				  u64 streams_mask)
++{
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++	int ret;
++
++	ret = cci_write(s5k4ha->regmap, S5K4HA_REG_MODE_SELECT, 0, NULL);
++	if (ret)
++		dev_err(s5k4ha->dev, "failed to stop streaming: %d\n", ret);
++
++	__v4l2_ctrl_grab(s5k4ha->vflip, false);
++	__v4l2_ctrl_grab(s5k4ha->hflip, false);
++
++	pm_runtime_put_autosuspend(s5k4ha->dev);
++
++	return ret;
++}
++
++static u32 s5k4ha_get_format_code(struct s5k4ha *s5k4ha)
++{
++	unsigned int i;
++
++	i = (s5k4ha->vflip->val ? 2 : 0) | (s5k4ha->hflip->val ? 1 : 0);
++
++	return s5k4ha_mbus_formats[i];
++}
++
++static void s5k4ha_update_pad_format(struct s5k4ha *s5k4ha,
++				     const struct s5k4ha_mode *mode,
++				     struct v4l2_mbus_framefmt *fmt)
++{
++	fmt->code = s5k4ha_get_format_code(s5k4ha);
++	fmt->width = mode->width;
++	fmt->height = mode->height;
++	fmt->field = V4L2_FIELD_NONE;
++	fmt->colorspace = V4L2_COLORSPACE_RAW;
++	fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
++	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
++	fmt->xfer_func = V4L2_XFER_FUNC_NONE;
++}
++
++static int s5k4ha_set_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++	s64 hblank, vblank, exposure_max;
++	const struct s5k4ha_mode *mode;
++
++	mode = v4l2_find_nearest_size(s5k4ha_supported_modes,
++				      ARRAY_SIZE(s5k4ha_supported_modes),
++				      width, height,
++				      fmt->format.width, fmt->format.height);
++
++	s5k4ha_update_pad_format(s5k4ha, mode, &fmt->format);
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY || s5k4ha->mode == mode)
++		goto set_format;
++
++	/* A new mode: new limits, 30 fps and the default exposure */
++	hblank = S5K4HA_HTS - mode->width;
++	__v4l2_ctrl_modify_range(s5k4ha->hblank, hblank, hblank, 1, hblank);
++
++	vblank = mode->vts - mode->height;
++	__v4l2_ctrl_modify_range(s5k4ha->vblank, mode->vts_min - mode->height,
++				 S5K4HA_VTS_MAX - mode->height, 1, vblank);
++	__v4l2_ctrl_s_ctrl(s5k4ha->vblank, vblank);
++
++	exposure_max = mode->vts - S5K4HA_EXPOSURE_MARGIN;
++	__v4l2_ctrl_modify_range(s5k4ha->exposure, S5K4HA_EXPOSURE_MIN,
++				 exposure_max, 1, S5K4HA_EXPOSURE_DEFAULT);
++	__v4l2_ctrl_s_ctrl(s5k4ha->exposure, S5K4HA_EXPOSURE_DEFAULT);
++
++	if (s5k4ha->sd.ctrl_handler->error)
++		return s5k4ha->sd.ctrl_handler->error;
++
++	s5k4ha->mode = mode;
++
++set_format:
++	*v4l2_subdev_state_get_format(state, 0) = fmt->format;
++
++	return 0;
++}
++
++static int s5k4ha_enum_mbus_code(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_mbus_code_enum *code)
++{
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++
++	if (code->index > 0)
++		return -EINVAL;
++
++	code->code = s5k4ha_get_format_code(s5k4ha);
++
++	return 0;
++}
++
++static int s5k4ha_enum_frame_size(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *sd_state,
++				  struct v4l2_subdev_frame_size_enum *fse)
++{
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++
++	if (fse->index >= ARRAY_SIZE(s5k4ha_supported_modes))
++		return -EINVAL;
++
++	if (fse->code != s5k4ha_get_format_code(s5k4ha))
++		return -EINVAL;
++
++	fse->min_width = s5k4ha_supported_modes[fse->index].width;
++	fse->max_width = fse->min_width;
++	fse->min_height = s5k4ha_supported_modes[fse->index].height;
++	fse->max_height = fse->min_height;
++
++	return 0;
++}
++
++static int s5k4ha_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *sd_state,
++				struct v4l2_subdev_selection *sel)
++{
++	switch (sel->target) {
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = S5K4HA_NATIVE_WIDTH;
++		sel->r.height = S5K4HA_NATIVE_HEIGHT;
++		return 0;
++	/* Both modes read the whole active area; the binned one halves it */
++	case V4L2_SEL_TGT_CROP:
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++		sel->r.left = S5K4HA_ACTIVE_LEFT;
++		sel->r.top = S5K4HA_ACTIVE_TOP;
++		sel->r.width = S5K4HA_ACTIVE_WIDTH;
++		sel->r.height = S5K4HA_ACTIVE_HEIGHT;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int s5k4ha_init_state(struct v4l2_subdev *sd,
++			     struct v4l2_subdev_state *state)
++{
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_TRY,
++		.pad = 0,
++		.format = {
++			.width = s5k4ha->mode->width,
++			.height = s5k4ha->mode->height,
++		},
++	};
++
++	s5k4ha_set_pad_format(sd, state, &fmt);
++
++	return 0;
++}
++
++static const struct v4l2_subdev_video_ops s5k4ha_video_ops = {
++	.s_stream = v4l2_subdev_s_stream_helper,
++};
++
++static const struct v4l2_subdev_pad_ops s5k4ha_pad_ops = {
++	.set_fmt = s5k4ha_set_pad_format,
++	.get_fmt = v4l2_subdev_get_fmt,
++	.get_selection = s5k4ha_get_selection,
++	.enum_mbus_code = s5k4ha_enum_mbus_code,
++	.enum_frame_size = s5k4ha_enum_frame_size,
++	.enable_streams = s5k4ha_enable_streams,
++	.disable_streams = s5k4ha_disable_streams,
++};
++
++static const struct v4l2_subdev_ops s5k4ha_subdev_ops = {
++	.video = &s5k4ha_video_ops,
++	.pad = &s5k4ha_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops s5k4ha_internal_ops = {
++	.init_state = s5k4ha_init_state,
++};
++
++static const struct media_entity_operations s5k4ha_subdev_entity_ops = {
++	.link_validate = v4l2_subdev_link_validate,
++};
++
++static void s5k4ha_lens_get(struct s5k4ha *s5k4ha)
++{
++	if (!s5k4ha->lens_fwnode)
++		return;
++
++	if (!s5k4ha->lens)
++		s5k4ha->lens = bus_find_device_by_fwnode(&i2c_bus_type,
++							 s5k4ha->lens_fwnode);
++	/* Not bound yet: the lens stays where it is */
++	if (!s5k4ha->lens || !s5k4ha->lens->driver)
++		return;
++
++	if (pm_runtime_resume_and_get(s5k4ha->lens))
++		dev_warn(s5k4ha->dev, "failed to power the lens\n");
++	else
++		s5k4ha->lens_held = true;
++}
++
++static void s5k4ha_lens_put(struct s5k4ha *s5k4ha)
++{
++	if (!s5k4ha->lens_held)
++		return;
++
++	pm_runtime_put_sync(s5k4ha->lens);
++	s5k4ha->lens_held = false;
++}
++
++static int s5k4ha_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++	int ret;
++
++	ret = regulator_bulk_enable(S5K4HA_NUM_SUPPLIES, s5k4ha->supplies);
++	if (ret)
++		return ret;
++
++	/* the stock kernel: 2 ms after the I/O rail, 5 ms after the AF rail */
++	usleep_range(7000, 8000);
++
++	ret = clk_prepare_enable(s5k4ha->mclk);
++	if (ret) {
++		regulator_bulk_disable(S5K4HA_NUM_SUPPLIES, s5k4ha->supplies);
++		return ret;
++	}
++	usleep_range(1000, 2000);
++
++	gpiod_set_value_cansleep(s5k4ha->reset_gpio, 0);
++	usleep_range(3000, 4000);
++
++	s5k4ha_lens_get(s5k4ha);
++
++	return 0;
++}
++
++static int s5k4ha_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++
++	s5k4ha_lens_put(s5k4ha);
++	gpiod_set_value_cansleep(s5k4ha->reset_gpio, 1);
++	clk_disable_unprepare(s5k4ha->mclk);
++	regulator_bulk_disable(S5K4HA_NUM_SUPPLIES, s5k4ha->supplies);
++
++	return 0;
++}
++
++static int s5k4ha_identify(struct s5k4ha *s5k4ha)
++{
++	u64 id, rev, again_min, again_max;
++	int ret = 0;
++
++	cci_read(s5k4ha->regmap, S5K4HA_REG_CHIP_ID, &id, &ret);
++	cci_read(s5k4ha->regmap, S5K4HA_REG_REVISION, &rev, &ret);
++	if (ret)
++		return dev_err_probe(s5k4ha->dev, ret, "failed to read chip id\n");
++
++	if (id != S5K4HA_CHIP_ID)
++		return dev_err_probe(s5k4ha->dev, -ENODEV,
++				     "chip id 0x%04llx, not an S5K4HA\n", id);
++
++	/* The gain range the sensor reports about itself */
++	cci_read(s5k4ha->regmap, S5K4HA_REG_AGAIN_MIN, &again_min, &ret);
++	cci_read(s5k4ha->regmap, S5K4HA_REG_AGAIN_MAX, &again_max, &ret);
++	if (ret || again_min < S5K4HA_AGAIN_UNITY || again_max <= again_min) {
++		dev_warn(s5k4ha->dev, "no gain range (%d), using 1x-16x\n", ret);
++		again_min = S5K4HA_AGAIN_UNITY;
++		again_max = 16 * S5K4HA_AGAIN_UNITY;
++	}
++	s5k4ha->again_min = again_min;
++	s5k4ha->again_max = again_max;
++
++	dev_info(s5k4ha->dev, "S5K4HA revision 0x%02llx, gain 0x%llx-0x%llx\n",
++		 rev, again_min, again_max);
++
++	return 0;
++}
++
++static int s5k4ha_check_hwcfg(struct s5k4ha *s5k4ha)
++{
++	struct fwnode_handle *fwnode = dev_fwnode(s5k4ha->dev), *ep;
++	struct v4l2_fwnode_endpoint bus_cfg = {
++		.bus_type = V4L2_MBUS_CSI2_DPHY,
++	};
++	unsigned long freq_bitmap;
++	int ret;
++
++	if (!fwnode)
++		return -ENODEV;
++
++	ep = fwnode_graph_get_next_endpoint(fwnode, NULL);
++	if (!ep)
++		return -EINVAL;
++
++	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
++	fwnode_handle_put(ep);
++	if (ret)
++		return ret;
++
++	if (bus_cfg.bus.mipi_csi2.num_data_lanes != S5K4HA_DATA_LANES) {
++		dev_err(s5k4ha->dev, "%u data lanes, needs %u\n",
++			bus_cfg.bus.mipi_csi2.num_data_lanes,
++			S5K4HA_DATA_LANES);
++		ret = -EINVAL;
++		goto endpoint_free;
++	}
++
++	ret = v4l2_link_freq_to_bitmap(s5k4ha->dev, bus_cfg.link_frequencies,
++				       bus_cfg.nr_of_link_frequencies,
++				       s5k4ha_link_freq_menu,
++				       ARRAY_SIZE(s5k4ha_link_freq_menu),
++				       &freq_bitmap);
++
++endpoint_free:
++	v4l2_fwnode_endpoint_free(&bus_cfg);
++
++	return ret;
++}
++
++static int s5k4ha_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct s5k4ha *s5k4ha;
++	unsigned long freq;
++	unsigned int i;
++	int ret;
++
++	s5k4ha = devm_kzalloc(dev, sizeof(*s5k4ha), GFP_KERNEL);
++	if (!s5k4ha)
++		return -ENOMEM;
++
++	s5k4ha->dev = dev;
++	v4l2_i2c_subdev_init(&s5k4ha->sd, client, &s5k4ha_subdev_ops);
++
++	s5k4ha->regmap = devm_cci_regmap_init_i2c(client, 16);
++	if (IS_ERR(s5k4ha->regmap))
++		return dev_err_probe(dev, PTR_ERR(s5k4ha->regmap),
++				     "failed to init CCI\n");
++
++	s5k4ha->mclk = devm_v4l2_sensor_clk_get(dev, NULL);
++	if (IS_ERR(s5k4ha->mclk))
++		return dev_err_probe(dev, PTR_ERR(s5k4ha->mclk),
++				     "failed to get MCLK\n");
++
++	freq = clk_get_rate(s5k4ha->mclk);
++	if (freq != S5K4HA_MCLK_FREQ)
++		return dev_err_probe(dev, -EINVAL,
++				     "MCLK is %lu Hz, needs 26 MHz\n", freq);
++
++	ret = s5k4ha_check_hwcfg(s5k4ha);
++	if (ret)
++		return dev_err_probe(dev, ret, "bad endpoint in the DT\n");
++
++	s5k4ha->lens_fwnode = fwnode_find_reference(dev_fwnode(dev),
++						    "lens-focus", 0);
++	if (IS_ERR(s5k4ha->lens_fwnode))
++		s5k4ha->lens_fwnode = NULL;
++
++	s5k4ha->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(s5k4ha->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(s5k4ha->reset_gpio),
++				     "failed to get reset GPIO\n");
++
++	for (i = 0; i < S5K4HA_NUM_SUPPLIES; i++)
++		s5k4ha->supplies[i].supply = s5k4ha_supply_names[i];
++
++	ret = devm_regulator_bulk_get(dev, S5K4HA_NUM_SUPPLIES,
++				      s5k4ha->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get supplies\n");
++
++	ret = s5k4ha_power_on(dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to power on\n");
++
++	ret = s5k4ha_identify(s5k4ha);
++	if (ret)
++		goto power_off;
++
++	s5k4ha->mode = &s5k4ha_supported_modes[0];
++	ret = s5k4ha_init_controls(s5k4ha);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init controls\n");
++		goto power_off;
++	}
++
++	s5k4ha->sd.state_lock = s5k4ha->ctrl_handler.lock;
++	s5k4ha->sd.internal_ops = &s5k4ha_internal_ops;
++	s5k4ha->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	s5k4ha->sd.entity.ops = &s5k4ha_subdev_entity_ops;
++	s5k4ha->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	s5k4ha->pad.flags = MEDIA_PAD_FL_SOURCE;
++
++	ret = media_entity_pads_init(&s5k4ha->sd.entity, 1, &s5k4ha->pad);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init media entity pads\n");
++		goto v4l2_ctrl_handler_free;
++	}
++
++	ret = v4l2_subdev_init_finalize(&s5k4ha->sd);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init the subdev state\n");
++		goto media_entity_cleanup;
++	}
++
++	pm_runtime_set_active(dev);
++	pm_runtime_enable(dev);
++
++	ret = v4l2_async_register_subdev_sensor(&s5k4ha->sd);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to register V4L2 subdev\n");
++		goto subdev_cleanup;
++	}
++
++	pm_runtime_set_autosuspend_delay(dev, 1000);
++	pm_runtime_use_autosuspend(dev);
++	pm_runtime_idle(dev);
++
++	return 0;
++
++subdev_cleanup:
++	v4l2_subdev_cleanup(&s5k4ha->sd);
++	pm_runtime_disable(dev);
++	pm_runtime_set_suspended(dev);
++
++media_entity_cleanup:
++	media_entity_cleanup(&s5k4ha->sd.entity);
++
++v4l2_ctrl_handler_free:
++	v4l2_ctrl_handler_free(s5k4ha->sd.ctrl_handler);
++
++power_off:
++	s5k4ha_power_off(dev);
++
++	return ret;
++}
++
++static void s5k4ha_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct s5k4ha *s5k4ha = to_s5k4ha(sd);
++
++	v4l2_async_unregister_subdev(sd);
++	v4l2_subdev_cleanup(sd);
++	media_entity_cleanup(&sd->entity);
++	v4l2_ctrl_handler_free(sd->ctrl_handler);
++	pm_runtime_disable(s5k4ha->dev);
++
++	if (!pm_runtime_status_suspended(s5k4ha->dev)) {
++		s5k4ha_power_off(s5k4ha->dev);
++		pm_runtime_set_suspended(s5k4ha->dev);
++	}
++
++	put_device(s5k4ha->lens);
++	fwnode_handle_put(s5k4ha->lens_fwnode);
++}
++
++static const struct dev_pm_ops s5k4ha_pm_ops = {
++	SET_RUNTIME_PM_OPS(s5k4ha_power_off, s5k4ha_power_on, NULL)
++};
++
++static const struct of_device_id s5k4ha_of_match[] = {
++	{ .compatible = "samsung,s5k4ha" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, s5k4ha_of_match);
++
++static struct i2c_driver s5k4ha_i2c_driver = {
++	.driver = {
++		.name = "s5k4ha",
++		.pm = &s5k4ha_pm_ops,
++		.of_match_table = s5k4ha_of_match,
++	},
++	.probe = s5k4ha_probe,
++	.remove = s5k4ha_remove,
++};
++module_i2c_driver(s5k4ha_i2c_driver);
++
++MODULE_DESCRIPTION("Samsung S5K4HA image sensor driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/media/i2c/s5k5e9.c b/drivers/media/i2c/s5k5e9.c
+new file mode 100644
+index 000000000..64a87d4a5
+--- /dev/null
++++ b/drivers/media/i2c/s5k5e9.c
+@@ -0,0 +1,892 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung S5K5E9 5 MP raw image sensor
++ *
++ * The register settings come from the Samsung kernel of the Galaxy Tab A
++ * 10.1 (2019), fimc-is-cis-5e9, set file B. Both modes run the same PLL:
++ * 26 MHz in, 936 Mbit/s per lane on 2 lanes, video timing pixel clock
++ * 188.93 MHz, 3112 pixel clocks per line.
++ */
++
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <linux/units.h>
++#include <media/v4l2-cci.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
++
++#define S5K5E9_MCLK_FREQ		(26 * HZ_PER_MHZ)
++#define S5K5E9_LINK_FREQ		468000000ULL	/* 936 Mbit/s, DDR */
++/* 26 MHz / 5 * 109 / 6, two pixels a clock */
++#define S5K5E9_PIXEL_RATE		188933333ULL
++#define S5K5E9_DATA_LANES		2
++
++#define S5K5E9_REG_CHIP_ID		CCI_REG16(0x0000)
++#define S5K5E9_CHIP_ID			0x559b
++#define S5K5E9_REG_REVISION		CCI_REG8(0x0002)
++
++#define S5K5E9_REG_AGAIN_MIN		CCI_REG16(0x0084)
++#define S5K5E9_REG_AGAIN_MAX		CCI_REG16(0x0086)
++
++#define S5K5E9_REG_MODE_SELECT		CCI_REG8(0x0100)
++#define S5K5E9_MODE_STREAMING		0x01
++
++#define S5K5E9_REG_ORIENTATION		CCI_REG8(0x0101)
++#define S5K5E9_HFLIP			BIT(0)
++#define S5K5E9_VFLIP			BIT(1)
++
++/* coarse integration time in lines */
++#define S5K5E9_REG_EXPOSURE		CCI_REG16(0x0202)
++#define S5K5E9_EXPOSURE_MIN		2
++#define S5K5E9_EXPOSURE_MARGIN		5
++#define S5K5E9_EXPOSURE_DEFAULT		1024
++
++/* analogue gain code: 32 = 1x */
++#define S5K5E9_REG_AGAIN		CCI_REG16(0x0204)
++#define S5K5E9_AGAIN_UNITY		0x20
++
++#define S5K5E9_REG_VTS			CCI_REG16(0x0340)
++#define S5K5E9_VTS_MAX			0xffff
++#define S5K5E9_HTS			3112
++
++#define S5K5E9_REG_TEST_PATTERN		CCI_REG16(0x0600)
++
++/*
++ * The output window starts at (8, 8); an 8 pixel margin on every side is
++ * assumed for the pixel array.
++ */
++#define S5K5E9_NATIVE_WIDTH		2608
++#define S5K5E9_NATIVE_HEIGHT		1960
++#define S5K5E9_ACTIVE_LEFT		8
++#define S5K5E9_ACTIVE_TOP		8
++#define S5K5E9_ACTIVE_WIDTH		2592
++#define S5K5E9_ACTIVE_HEIGHT		1944
++
++#define to_s5k5e9(_sd)			container_of(_sd, struct s5k5e9, sd)
++
++static const s64 s5k5e9_link_freq_menu[] = {
++	S5K5E9_LINK_FREQ,
++};
++
++/* The colour order at no flip is GR/BG; flips shift it */
++static const u32 s5k5e9_mbus_formats[] = {
++	MEDIA_BUS_FMT_SGRBG10_1X10,	MEDIA_BUS_FMT_SRGGB10_1X10,
++	MEDIA_BUS_FMT_SBGGR10_1X10,	MEDIA_BUS_FMT_SGBRG10_1X10,
++};
++
++static const char * const s5k5e9_test_pattern_menu[] = {
++	"Disabled",
++	"Solid colour",
++	"Colour bars",
++	"Fade to grey colour bars",
++	"PN9",
++};
++
++static const char * const s5k5e9_supply_names[] = {
++	"vdda",		/* analog, 2.8 V */
++	"vddd",		/* digital core */
++	"vddio",	/* I/O, 1.8 V */
++};
++
++#define S5K5E9_NUM_SUPPLIES	ARRAY_SIZE(s5k5e9_supply_names)
++
++/* Written once after power on, after the sensor firmware has started */
++static const struct cci_reg_sequence s5k5e9_global_regs[] = {
++	{ CCI_REG8(0x0100), 0x00 },
++	{ CCI_REG8(0x0a02), 0x3f },
++	{ CCI_REG8(0x3b45), 0x01 },
++	{ CCI_REG8(0x3290), 0x10 },
++	{ CCI_REG8(0x0b05), 0x01 },
++	{ CCI_REG8(0x3069), 0x87 },
++	{ CCI_REG8(0x3074), 0x06 },
++	{ CCI_REG8(0x3075), 0x2f },
++	{ CCI_REG8(0x301f), 0x20 },
++	{ CCI_REG8(0x306b), 0x9a },
++	{ CCI_REG8(0x3091), 0x16 },
++	{ CCI_REG8(0x306e), 0x71 },
++	{ CCI_REG8(0x306f), 0x28 },
++	{ CCI_REG8(0x306d), 0x08 },
++	{ CCI_REG8(0x3084), 0x16 },
++	{ CCI_REG8(0x3070), 0x0f },
++	{ CCI_REG8(0x306a), 0x79 },
++	{ CCI_REG8(0x30b0), 0xff },
++	{ CCI_REG8(0x30c2), 0x05 },
++	{ CCI_REG8(0x30c4), 0x06 },
++	{ CCI_REG8(0x3012), 0x4e },
++	{ CCI_REG8(0x3080), 0x08 },
++	{ CCI_REG8(0x3083), 0x14 },
++	{ CCI_REG8(0x3200), 0x01 },
++	{ CCI_REG8(0x3081), 0x07 },
++	{ CCI_REG8(0x307b), 0x85 },
++	{ CCI_REG8(0x307a), 0x0a },
++	{ CCI_REG8(0x3079), 0x0a },
++	{ CCI_REG8(0x308a), 0x20 },
++	{ CCI_REG8(0x308b), 0x08 },
++	{ CCI_REG8(0x308c), 0x0b },
++	{ CCI_REG8(0x392f), 0x01 },
++	{ CCI_REG8(0x3930), 0x00 },
++	{ CCI_REG8(0x3924), 0x7f },
++	{ CCI_REG8(0x3925), 0xfd },
++	{ CCI_REG8(0x3c08), 0xff },
++	{ CCI_REG8(0x3c09), 0xff },
++	{ CCI_REG8(0x3c31), 0xff },
++	{ CCI_REG8(0x3c32), 0xff },
++};
++
++/*
++ * Common to both modes: PLL, line length, readout window, link rate,
++ * RAW10 on 4 lanes. Frame length, exposure, gain and flips come from the
++ * controls.
++ */
++static const struct cci_reg_sequence s5k5e9_common_regs[] = {
++	{ CCI_REG16(0x0136), 0x1a00 },	/* external clock 26.00 MHz */
++	{ CCI_REG8(0x0301), 0x06 },	/* vt_pix_clk_div */
++	{ CCI_REG8(0x0305), 0x05 },	/* pre_pll_clk_div */
++	{ CCI_REG16(0x0306), 0x006d },	/* pll_multiplier */
++	{ CCI_REG8(0x3c1f), 0x00 },
++	{ CCI_REG8(0x030d), 0x05 },	/* secnd_pre_pll_clk_div */
++	{ CCI_REG16(0x030e), 0x00b4 },	/* secnd_pll_multiplier */
++	{ CCI_REG8(0x3c17), 0x00 },
++	{ CCI_REG16(0x0342), S5K5E9_HTS },
++	{ CCI_REG16(0x0344), 0x0008 },	/* x_addr_start */
++	{ CCI_REG16(0x0346), 0x0008 },	/* y_addr_start */
++	{ CCI_REG16(0x0348), 0x0a27 },	/* x_addr_end */
++	{ CCI_REG16(0x034a), 0x079f },	/* y_addr_end */
++	{ CCI_REG8(0x0381), 0x01 },	/* x_even_inc */
++	{ CCI_REG8(0x0383), 0x01 },	/* x_odd_inc */
++	{ CCI_REG8(0x0385), 0x01 },	/* y_even_inc */
++	{ CCI_REG16(0x0200), 0x0b9c },	/* fine integration time */
++	{ CCI_REG16(0x0820), 0x03a8 },	/* requested link rate 936 Mbit/s */
++	{ CCI_REG16(0x0822), 0x0000 },
++	{ CCI_REG16(0x0112), 0x0a0a },	/* RAW10 */
++	{ CCI_REG8(0x0114), 0x01 },	/* 2 lanes */
++	{ CCI_REG8(0x3929), 0x0f },
++	{ CCI_REG8(0x30b8), 0x2a },
++	{ CCI_REG8(0x30ba), 0x2e },
++	{ CCI_REG8(0x0216), 0x00 },	/* no WDR */
++};
++
++static const struct cci_reg_sequence s5k5e9_2592x1944_regs[] = {
++	{ CCI_REG16(0x034c), 2592 },	/* x_output_size */
++	{ CCI_REG16(0x034e), 1944 },	/* y_output_size */
++	{ CCI_REG8(0x0387), 0x01 },	/* y_odd_inc */
++	{ CCI_REG8(0x0900), 0x00 },	/* binning off */
++	{ CCI_REG8(0x0901), 0x00 },
++};
++
++static const struct cci_reg_sequence s5k5e9_1296x972_regs[] = {
++	{ CCI_REG16(0x034c), 1296 },
++	{ CCI_REG16(0x034e), 972 },
++	{ CCI_REG8(0x0387), 0x03 },
++	{ CCI_REG8(0x0900), 0x01 },	/* 2x2 binning */
++	{ CCI_REG8(0x0901), 0x22 },
++};
++
++struct s5k5e9_reg_list {
++	const struct cci_reg_sequence *regs;
++	unsigned int num_regs;
++};
++
++struct s5k5e9_mode {
++	u32 width;
++	u32 height;
++	u32 vts;			/* default frame length: 30 fps */
++	u32 vts_min;			/* shortest frame length */
++	const struct s5k5e9_reg_list reg_list;
++};
++
++static const struct s5k5e9_mode s5k5e9_supported_modes[] = {
++	{
++		.width = 2592,
++		.height = 1944,
++		.vts = 2030,
++		.vts_min = 2030,
++		.reg_list = {
++			.regs = s5k5e9_2592x1944_regs,
++			.num_regs = ARRAY_SIZE(s5k5e9_2592x1944_regs),
++		},
++	},
++	{
++		.width = 1296,
++		.height = 972,
++		.vts = 2030,
++		.vts_min = 1018,	/* 60 fps in the Samsung set file */
++		.reg_list = {
++			.regs = s5k5e9_1296x972_regs,
++			.num_regs = ARRAY_SIZE(s5k5e9_1296x972_regs),
++		},
++	},
++};
++
++struct s5k5e9 {
++	struct device *dev;
++	struct regmap *regmap;
++	struct clk *mclk;
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data supplies[S5K5E9_NUM_SUPPLIES];
++
++	struct v4l2_subdev sd;
++	struct media_pad pad;
++
++	struct v4l2_ctrl_handler ctrl_handler;
++	struct v4l2_ctrl *link_freq;
++	struct v4l2_ctrl *pixel_rate;
++	struct v4l2_ctrl *hblank;
++	struct v4l2_ctrl *vblank;
++	struct v4l2_ctrl *exposure;
++	struct v4l2_ctrl *vflip;
++	struct v4l2_ctrl *hflip;
++
++	u16 again_min;
++	u16 again_max;
++
++	const struct s5k5e9_mode *mode;
++};
++
++static int s5k5e9_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct s5k5e9 *s5k5e9 = container_of(ctrl->handler, struct s5k5e9,
++					     ctrl_handler);
++	const struct s5k5e9_mode *mode = s5k5e9->mode;
++	s64 exposure_max;
++	int ret;
++
++	switch (ctrl->id) {
++	case V4L2_CID_HFLIP:
++	case V4L2_CID_VFLIP:
++		/* The orientation is written when streaming starts */
++		return 0;
++	case V4L2_CID_VBLANK:
++		/* The longest exposure follows the frame length */
++		exposure_max = mode->height + ctrl->val - S5K5E9_EXPOSURE_MARGIN;
++		__v4l2_ctrl_modify_range(s5k5e9->exposure,
++					 s5k5e9->exposure->minimum,
++					 exposure_max,
++					 s5k5e9->exposure->step,
++					 s5k5e9->exposure->default_value);
++		break;
++	}
++
++	/* The controls are written when the sensor is powered for streaming */
++	if (!pm_runtime_get_if_active(s5k5e9->dev))
++		return 0;
++
++	switch (ctrl->id) {
++	case V4L2_CID_ANALOGUE_GAIN:
++		ret = cci_write(s5k5e9->regmap, S5K5E9_REG_AGAIN,
++				ctrl->val, NULL);
++		break;
++	case V4L2_CID_EXPOSURE:
++		ret = cci_write(s5k5e9->regmap, S5K5E9_REG_EXPOSURE,
++				ctrl->val, NULL);
++		break;
++	case V4L2_CID_VBLANK:
++		ret = cci_write(s5k5e9->regmap, S5K5E9_REG_VTS,
++				ctrl->val + mode->height, NULL);
++		break;
++	case V4L2_CID_TEST_PATTERN:
++		ret = cci_write(s5k5e9->regmap, S5K5E9_REG_TEST_PATTERN,
++				ctrl->val, NULL);
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++
++	pm_runtime_put(s5k5e9->dev);
++
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops s5k5e9_ctrl_ops = {
++	.s_ctrl = s5k5e9_set_ctrl,
++};
++
++static int s5k5e9_init_controls(struct s5k5e9 *s5k5e9)
++{
++	struct v4l2_ctrl_handler *ctrl_hdlr = &s5k5e9->ctrl_handler;
++	const struct s5k5e9_mode *mode = s5k5e9->mode;
++	struct v4l2_fwnode_device_properties props;
++	s64 hblank, vblank, exposure_max;
++	int ret;
++
++	v4l2_ctrl_handler_init(ctrl_hdlr, 11);
++
++	s5k5e9->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr, &s5k5e9_ctrl_ops,
++					V4L2_CID_LINK_FREQ,
++					ARRAY_SIZE(s5k5e9_link_freq_menu) - 1,
++					0, s5k5e9_link_freq_menu);
++	if (s5k5e9->link_freq)
++		s5k5e9->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	s5k5e9->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &s5k5e9_ctrl_ops,
++					       V4L2_CID_PIXEL_RATE,
++					       S5K5E9_PIXEL_RATE,
++					       S5K5E9_PIXEL_RATE, 1,
++					       S5K5E9_PIXEL_RATE);
++
++	hblank = S5K5E9_HTS - mode->width;
++	s5k5e9->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5k5e9_ctrl_ops,
++					   V4L2_CID_HBLANK, hblank,
++					   hblank, 1, hblank);
++	if (s5k5e9->hblank)
++		s5k5e9->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	vblank = mode->vts - mode->height;
++	s5k5e9->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5k5e9_ctrl_ops,
++					   V4L2_CID_VBLANK,
++					   mode->vts_min - mode->height,
++					   S5K5E9_VTS_MAX - mode->height, 1,
++					   vblank);
++
++	v4l2_ctrl_new_std(ctrl_hdlr, &s5k5e9_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
++			  s5k5e9->again_min, s5k5e9->again_max, 1,
++			  S5K5E9_AGAIN_UNITY);
++
++	exposure_max = mode->vts - S5K5E9_EXPOSURE_MARGIN;
++	s5k5e9->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &s5k5e9_ctrl_ops,
++					     V4L2_CID_EXPOSURE,
++					     S5K5E9_EXPOSURE_MIN,
++					     exposure_max, 1,
++					     S5K5E9_EXPOSURE_DEFAULT);
++
++	v4l2_ctrl_new_std_menu_items(ctrl_hdlr, &s5k5e9_ctrl_ops,
++				     V4L2_CID_TEST_PATTERN,
++				     ARRAY_SIZE(s5k5e9_test_pattern_menu) - 1,
++				     0, 0, s5k5e9_test_pattern_menu);
++
++	s5k5e9->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5k5e9_ctrl_ops,
++					  V4L2_CID_HFLIP, 0, 1, 1, 0);
++	if (s5k5e9->hflip)
++		s5k5e9->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
++	s5k5e9->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5k5e9_ctrl_ops,
++					  V4L2_CID_VFLIP, 0, 1, 1, 0);
++	if (s5k5e9->vflip)
++		s5k5e9->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
++	ret = v4l2_fwnode_device_parse(s5k5e9->dev, &props);
++	if (ret)
++		goto error_free_hdlr;
++
++	ret = v4l2_ctrl_new_fwnode_properties(ctrl_hdlr, &s5k5e9_ctrl_ops,
++					      &props);
++	if (ret)
++		goto error_free_hdlr;
++
++	if (ctrl_hdlr->error) {
++		ret = ctrl_hdlr->error;
++		goto error_free_hdlr;
++	}
++
++	s5k5e9->sd.ctrl_handler = ctrl_hdlr;
++
++	return 0;
++
++error_free_hdlr:
++	v4l2_ctrl_handler_free(ctrl_hdlr);
++
++	return ret;
++}
++
++static int s5k5e9_enable_streams(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state, u32 pad,
++				 u64 streams_mask)
++{
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++	const struct s5k5e9_reg_list *reg_list = &s5k5e9->mode->reg_list;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(s5k5e9->dev);
++	if (ret)
++		return ret;
++
++	cci_multi_reg_write(s5k5e9->regmap, s5k5e9_global_regs,
++			    ARRAY_SIZE(s5k5e9_global_regs), &ret);
++	cci_multi_reg_write(s5k5e9->regmap, s5k5e9_common_regs,
++			    ARRAY_SIZE(s5k5e9_common_regs), &ret);
++	cci_multi_reg_write(s5k5e9->regmap, reg_list->regs,
++			    reg_list->num_regs, &ret);
++	if (ret)
++		goto error;
++
++	ret = __v4l2_ctrl_handler_setup(s5k5e9->sd.ctrl_handler);
++
++	cci_write(s5k5e9->regmap, S5K5E9_REG_ORIENTATION,
++		  (s5k5e9->vflip->val ? S5K5E9_VFLIP : 0) |
++		  (s5k5e9->hflip->val ? S5K5E9_HFLIP : 0), &ret);
++	cci_write(s5k5e9->regmap, S5K5E9_REG_MODE_SELECT,
++		  S5K5E9_MODE_STREAMING, &ret);
++	if (ret)
++		goto error;
++
++	/* No flips while the colour order is in use */
++	__v4l2_ctrl_grab(s5k5e9->vflip, true);
++	__v4l2_ctrl_grab(s5k5e9->hflip, true);
++
++	return 0;
++
++error:
++	dev_err(s5k5e9->dev, "failed to start streaming: %d\n", ret);
++	pm_runtime_put_autosuspend(s5k5e9->dev);
++
++	return ret;
++}
++
++static int s5k5e9_disable_streams(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *state, u32 pad,
++				  u64 streams_mask)
++{
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++	int ret;
++
++	ret = cci_write(s5k5e9->regmap, S5K5E9_REG_MODE_SELECT, 0, NULL);
++	if (ret)
++		dev_err(s5k5e9->dev, "failed to stop streaming: %d\n", ret);
++
++	__v4l2_ctrl_grab(s5k5e9->vflip, false);
++	__v4l2_ctrl_grab(s5k5e9->hflip, false);
++
++	pm_runtime_put_autosuspend(s5k5e9->dev);
++
++	return ret;
++}
++
++static u32 s5k5e9_get_format_code(struct s5k5e9 *s5k5e9)
++{
++	unsigned int i;
++
++	i = (s5k5e9->vflip->val ? 2 : 0) | (s5k5e9->hflip->val ? 1 : 0);
++
++	return s5k5e9_mbus_formats[i];
++}
++
++static void s5k5e9_update_pad_format(struct s5k5e9 *s5k5e9,
++				     const struct s5k5e9_mode *mode,
++				     struct v4l2_mbus_framefmt *fmt)
++{
++	fmt->code = s5k5e9_get_format_code(s5k5e9);
++	fmt->width = mode->width;
++	fmt->height = mode->height;
++	fmt->field = V4L2_FIELD_NONE;
++	fmt->colorspace = V4L2_COLORSPACE_RAW;
++	fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
++	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
++	fmt->xfer_func = V4L2_XFER_FUNC_NONE;
++}
++
++static int s5k5e9_set_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++	s64 hblank, vblank, exposure_max;
++	const struct s5k5e9_mode *mode;
++
++	mode = v4l2_find_nearest_size(s5k5e9_supported_modes,
++				      ARRAY_SIZE(s5k5e9_supported_modes),
++				      width, height,
++				      fmt->format.width, fmt->format.height);
++
++	s5k5e9_update_pad_format(s5k5e9, mode, &fmt->format);
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY || s5k5e9->mode == mode)
++		goto set_format;
++
++	/* A new mode: new limits, 30 fps and the default exposure */
++	hblank = S5K5E9_HTS - mode->width;
++	__v4l2_ctrl_modify_range(s5k5e9->hblank, hblank, hblank, 1, hblank);
++
++	vblank = mode->vts - mode->height;
++	__v4l2_ctrl_modify_range(s5k5e9->vblank, mode->vts_min - mode->height,
++				 S5K5E9_VTS_MAX - mode->height, 1, vblank);
++	__v4l2_ctrl_s_ctrl(s5k5e9->vblank, vblank);
++
++	exposure_max = mode->vts - S5K5E9_EXPOSURE_MARGIN;
++	__v4l2_ctrl_modify_range(s5k5e9->exposure, S5K5E9_EXPOSURE_MIN,
++				 exposure_max, 1, S5K5E9_EXPOSURE_DEFAULT);
++	__v4l2_ctrl_s_ctrl(s5k5e9->exposure, S5K5E9_EXPOSURE_DEFAULT);
++
++	if (s5k5e9->sd.ctrl_handler->error)
++		return s5k5e9->sd.ctrl_handler->error;
++
++	s5k5e9->mode = mode;
++
++set_format:
++	*v4l2_subdev_state_get_format(state, 0) = fmt->format;
++
++	return 0;
++}
++
++static int s5k5e9_enum_mbus_code(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_mbus_code_enum *code)
++{
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++
++	if (code->index > 0)
++		return -EINVAL;
++
++	code->code = s5k5e9_get_format_code(s5k5e9);
++
++	return 0;
++}
++
++static int s5k5e9_enum_frame_size(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *sd_state,
++				  struct v4l2_subdev_frame_size_enum *fse)
++{
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++
++	if (fse->index >= ARRAY_SIZE(s5k5e9_supported_modes))
++		return -EINVAL;
++
++	if (fse->code != s5k5e9_get_format_code(s5k5e9))
++		return -EINVAL;
++
++	fse->min_width = s5k5e9_supported_modes[fse->index].width;
++	fse->max_width = fse->min_width;
++	fse->min_height = s5k5e9_supported_modes[fse->index].height;
++	fse->max_height = fse->min_height;
++
++	return 0;
++}
++
++static int s5k5e9_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *sd_state,
++				struct v4l2_subdev_selection *sel)
++{
++	switch (sel->target) {
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = S5K5E9_NATIVE_WIDTH;
++		sel->r.height = S5K5E9_NATIVE_HEIGHT;
++		return 0;
++	/* Both modes read the whole active area; the binned one halves it */
++	case V4L2_SEL_TGT_CROP:
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++		sel->r.left = S5K5E9_ACTIVE_LEFT;
++		sel->r.top = S5K5E9_ACTIVE_TOP;
++		sel->r.width = S5K5E9_ACTIVE_WIDTH;
++		sel->r.height = S5K5E9_ACTIVE_HEIGHT;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int s5k5e9_init_state(struct v4l2_subdev *sd,
++			     struct v4l2_subdev_state *state)
++{
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_TRY,
++		.pad = 0,
++		.format = {
++			.width = s5k5e9->mode->width,
++			.height = s5k5e9->mode->height,
++		},
++	};
++
++	s5k5e9_set_pad_format(sd, state, &fmt);
++
++	return 0;
++}
++
++static const struct v4l2_subdev_video_ops s5k5e9_video_ops = {
++	.s_stream = v4l2_subdev_s_stream_helper,
++};
++
++static const struct v4l2_subdev_pad_ops s5k5e9_pad_ops = {
++	.set_fmt = s5k5e9_set_pad_format,
++	.get_fmt = v4l2_subdev_get_fmt,
++	.get_selection = s5k5e9_get_selection,
++	.enum_mbus_code = s5k5e9_enum_mbus_code,
++	.enum_frame_size = s5k5e9_enum_frame_size,
++	.enable_streams = s5k5e9_enable_streams,
++	.disable_streams = s5k5e9_disable_streams,
++};
++
++static const struct v4l2_subdev_ops s5k5e9_subdev_ops = {
++	.video = &s5k5e9_video_ops,
++	.pad = &s5k5e9_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops s5k5e9_internal_ops = {
++	.init_state = s5k5e9_init_state,
++};
++
++static const struct media_entity_operations s5k5e9_subdev_entity_ops = {
++	.link_validate = v4l2_subdev_link_validate,
++};
++
++static int s5k5e9_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++	int ret;
++
++	ret = regulator_bulk_enable(S5K5E9_NUM_SUPPLIES, s5k5e9->supplies);
++	if (ret)
++		return ret;
++
++	/* the stock kernel waits 0.5 ms after the I/O rail */
++	usleep_range(1000, 2000);
++
++	ret = clk_prepare_enable(s5k5e9->mclk);
++	if (ret) {
++		regulator_bulk_disable(S5K5E9_NUM_SUPPLIES, s5k5e9->supplies);
++		return ret;
++	}
++	gpiod_set_value_cansleep(s5k5e9->reset_gpio, 0);
++	usleep_range(3000, 4000);
++
++	return 0;
++}
++
++static int s5k5e9_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++
++	gpiod_set_value_cansleep(s5k5e9->reset_gpio, 1);
++	clk_disable_unprepare(s5k5e9->mclk);
++	regulator_bulk_disable(S5K5E9_NUM_SUPPLIES, s5k5e9->supplies);
++
++	return 0;
++}
++
++static int s5k5e9_identify(struct s5k5e9 *s5k5e9)
++{
++	u64 id, rev, again_min, again_max;
++	int ret = 0;
++
++	cci_read(s5k5e9->regmap, S5K5E9_REG_CHIP_ID, &id, &ret);
++	cci_read(s5k5e9->regmap, S5K5E9_REG_REVISION, &rev, &ret);
++	if (ret)
++		return dev_err_probe(s5k5e9->dev, ret, "failed to read chip id\n");
++
++	/* 0x559b is what the S5K5E9 is said to report; not checked yet */
++	if (id != S5K5E9_CHIP_ID)
++		dev_warn(s5k5e9->dev, "chip id 0x%04llx, expected 0x%04x\n",
++			 id, S5K5E9_CHIP_ID);
++
++	/* The gain range the sensor reports about itself */
++	cci_read(s5k5e9->regmap, S5K5E9_REG_AGAIN_MIN, &again_min, &ret);
++	cci_read(s5k5e9->regmap, S5K5E9_REG_AGAIN_MAX, &again_max, &ret);
++	if (ret || again_min < S5K5E9_AGAIN_UNITY || again_max <= again_min) {
++		dev_warn(s5k5e9->dev, "no gain range (%d), using 1x-16x\n", ret);
++		again_min = S5K5E9_AGAIN_UNITY;
++		again_max = 16 * S5K5E9_AGAIN_UNITY;
++	}
++	s5k5e9->again_min = again_min;
++	s5k5e9->again_max = again_max;
++
++	dev_info(s5k5e9->dev, "S5K5E9 revision 0x%02llx, gain 0x%llx-0x%llx\n",
++		 rev, again_min, again_max);
++
++	return 0;
++}
++
++static int s5k5e9_check_hwcfg(struct s5k5e9 *s5k5e9)
++{
++	struct fwnode_handle *fwnode = dev_fwnode(s5k5e9->dev), *ep;
++	struct v4l2_fwnode_endpoint bus_cfg = {
++		.bus_type = V4L2_MBUS_CSI2_DPHY,
++	};
++	unsigned long freq_bitmap;
++	int ret;
++
++	if (!fwnode)
++		return -ENODEV;
++
++	ep = fwnode_graph_get_next_endpoint(fwnode, NULL);
++	if (!ep)
++		return -EINVAL;
++
++	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
++	fwnode_handle_put(ep);
++	if (ret)
++		return ret;
++
++	if (bus_cfg.bus.mipi_csi2.num_data_lanes != S5K5E9_DATA_LANES) {
++		dev_err(s5k5e9->dev, "%u data lanes, needs %u\n",
++			bus_cfg.bus.mipi_csi2.num_data_lanes,
++			S5K5E9_DATA_LANES);
++		ret = -EINVAL;
++		goto endpoint_free;
++	}
++
++	ret = v4l2_link_freq_to_bitmap(s5k5e9->dev, bus_cfg.link_frequencies,
++				       bus_cfg.nr_of_link_frequencies,
++				       s5k5e9_link_freq_menu,
++				       ARRAY_SIZE(s5k5e9_link_freq_menu),
++				       &freq_bitmap);
++
++endpoint_free:
++	v4l2_fwnode_endpoint_free(&bus_cfg);
++
++	return ret;
++}
++
++static int s5k5e9_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct s5k5e9 *s5k5e9;
++	unsigned long freq;
++	unsigned int i;
++	int ret;
++
++	s5k5e9 = devm_kzalloc(dev, sizeof(*s5k5e9), GFP_KERNEL);
++	if (!s5k5e9)
++		return -ENOMEM;
++
++	s5k5e9->dev = dev;
++	v4l2_i2c_subdev_init(&s5k5e9->sd, client, &s5k5e9_subdev_ops);
++
++	s5k5e9->regmap = devm_cci_regmap_init_i2c(client, 16);
++	if (IS_ERR(s5k5e9->regmap))
++		return dev_err_probe(dev, PTR_ERR(s5k5e9->regmap),
++				     "failed to init CCI\n");
++
++	s5k5e9->mclk = devm_v4l2_sensor_clk_get(dev, NULL);
++	if (IS_ERR(s5k5e9->mclk))
++		return dev_err_probe(dev, PTR_ERR(s5k5e9->mclk),
++				     "failed to get MCLK\n");
++
++	freq = clk_get_rate(s5k5e9->mclk);
++	if (freq != S5K5E9_MCLK_FREQ)
++		return dev_err_probe(dev, -EINVAL,
++				     "MCLK is %lu Hz, needs 26 MHz\n", freq);
++
++	ret = s5k5e9_check_hwcfg(s5k5e9);
++	if (ret)
++		return dev_err_probe(dev, ret, "bad endpoint in the DT\n");
++
++	s5k5e9->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(s5k5e9->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(s5k5e9->reset_gpio),
++				     "failed to get reset GPIO\n");
++
++	for (i = 0; i < S5K5E9_NUM_SUPPLIES; i++)
++		s5k5e9->supplies[i].supply = s5k5e9_supply_names[i];
++
++	ret = devm_regulator_bulk_get(dev, S5K5E9_NUM_SUPPLIES,
++				      s5k5e9->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get supplies\n");
++
++	ret = s5k5e9_power_on(dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to power on\n");
++
++	ret = s5k5e9_identify(s5k5e9);
++	if (ret)
++		goto power_off;
++
++	s5k5e9->mode = &s5k5e9_supported_modes[0];
++	ret = s5k5e9_init_controls(s5k5e9);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init controls\n");
++		goto power_off;
++	}
++
++	s5k5e9->sd.state_lock = s5k5e9->ctrl_handler.lock;
++	s5k5e9->sd.internal_ops = &s5k5e9_internal_ops;
++	s5k5e9->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	s5k5e9->sd.entity.ops = &s5k5e9_subdev_entity_ops;
++	s5k5e9->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	s5k5e9->pad.flags = MEDIA_PAD_FL_SOURCE;
++
++	ret = media_entity_pads_init(&s5k5e9->sd.entity, 1, &s5k5e9->pad);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init media entity pads\n");
++		goto v4l2_ctrl_handler_free;
++	}
++
++	ret = v4l2_subdev_init_finalize(&s5k5e9->sd);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init the subdev state\n");
++		goto media_entity_cleanup;
++	}
++
++	pm_runtime_set_active(dev);
++	pm_runtime_enable(dev);
++
++	ret = v4l2_async_register_subdev_sensor(&s5k5e9->sd);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to register V4L2 subdev\n");
++		goto subdev_cleanup;
++	}
++
++	pm_runtime_set_autosuspend_delay(dev, 1000);
++	pm_runtime_use_autosuspend(dev);
++	pm_runtime_idle(dev);
++
++	return 0;
++
++subdev_cleanup:
++	v4l2_subdev_cleanup(&s5k5e9->sd);
++	pm_runtime_disable(dev);
++	pm_runtime_set_suspended(dev);
++
++media_entity_cleanup:
++	media_entity_cleanup(&s5k5e9->sd.entity);
++
++v4l2_ctrl_handler_free:
++	v4l2_ctrl_handler_free(s5k5e9->sd.ctrl_handler);
++
++power_off:
++	s5k5e9_power_off(dev);
++
++	return ret;
++}
++
++static void s5k5e9_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct s5k5e9 *s5k5e9 = to_s5k5e9(sd);
++
++	v4l2_async_unregister_subdev(sd);
++	v4l2_subdev_cleanup(sd);
++	media_entity_cleanup(&sd->entity);
++	v4l2_ctrl_handler_free(sd->ctrl_handler);
++	pm_runtime_disable(s5k5e9->dev);
++
++	if (!pm_runtime_status_suspended(s5k5e9->dev)) {
++		s5k5e9_power_off(s5k5e9->dev);
++		pm_runtime_set_suspended(s5k5e9->dev);
++	}
++}
++
++static const struct dev_pm_ops s5k5e9_pm_ops = {
++	SET_RUNTIME_PM_OPS(s5k5e9_power_off, s5k5e9_power_on, NULL)
++};
++
++static const struct of_device_id s5k5e9_of_match[] = {
++	{ .compatible = "samsung,s5k5e9" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, s5k5e9_of_match);
++
++static struct i2c_driver s5k5e9_i2c_driver = {
++	.driver = {
++		.name = "s5k5e9",
++		.pm = &s5k5e9_pm_ops,
++		.of_match_table = s5k5e9_of_match,
++	},
++	.probe = s5k5e9_probe,
++	.remove = s5k5e9_remove,
++};
++module_i2c_driver(s5k5e9_i2c_driver);
++
++MODULE_DESCRIPTION("Samsung S5K5E9 image sensor driver");
++MODULE_LICENSE("GPL");
+-- 
+2.53.0
+

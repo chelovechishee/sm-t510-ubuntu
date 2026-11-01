@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 16/46] arm64: dts: exynos7885: USI2 HSI2C1; gta3xlwifi:
+Subject: [PATCH 16/52] arm64: dts: exynos7885: USI2 HSI2C1; gta3xlwifi:
  LIS2DS12 accelerometer
 
 USI v1 block (exynos8895-usi) selected to HSI2C1 through the PERI sysreg,

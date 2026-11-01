@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 44/46] ASoC: codecs: add the Samsung COD3035X codec
+Subject: [PATCH 44/52] ASoC: codecs: add the Samsung COD3035X codec
 
 The audio codec inside the S2MPU08 PMIC of Exynos 7885/7904 boards: its
 digital block is SPEEDY device 3, its analog block device 7, both I2C
