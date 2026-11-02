@@ -95,6 +95,80 @@
  	 * \brief Number of bins in the yHistogram
  	 */
  	static constexpr unsigned int kYHistogramSize = 64;
+@@ -43,6 +47,12 @@
+ 	 * \brief A histogram of luminance values of all the sampled pixels
+ 	 */
+ 	Histogram yHistogram;
++	/**
++	 * \brief A histogram of luminance values in the metering window
++	 *
++	 * All zero when there is no metering window (SwStatsCpu::setMeterWindow()).
++	 */
++	Histogram yHistogramMeter;
+ };
+ 
+ } /* namespace libcamera */
+--- a/include/libcamera/internal/software_isp/swstats_cpu.h
++++ b/include/libcamera/internal/software_isp/swstats_cpu.h
+@@ -13,6 +13,7 @@
+ 
+ #include <stdint.h>
+ 
++#include <libcamera/base/mutex.h>
+ #include <libcamera/base/signal.h>
+ 
+ #include <libcamera/geometry.h>
+@@ -53,6 +54,7 @@
+ 
+ 	int configure(const StreamConfiguration &inputCfg);
+ 	void setWindow(const Rectangle &window);
++	void setMeterWindow(const Rectangle &window);
+ 	void startFrame(uint32_t frame);
+ 	void finishFrame(uint32_t frame, uint32_t bufferId);
+ 	void processFrame(uint32_t frame, uint32_t bufferId, FrameBuffer *input);
+@@ -67,6 +69,7 @@
+ 			return;
+ 
+ 		(this->*stats0_)(src);
++		processMeterLine(y, src);
+ 	}
+ 
+ 	void processLine2(uint32_t frame, unsigned int y, const uint8_t *src[])
+@@ -100,16 +103,34 @@
+ 
+ 	void processBayerFrame2(MappedFrameBuffer &in);
+ 
++	/* Metering window, unpacked Bayer only */
++	template<typename T, unsigned int div>
++	void meterLine0(const uint8_t *src[]);
++	void processMeterLine(unsigned int y, const uint8_t *src[])
++	{
++		if (meter0_ && y >= static_cast<unsigned int>(meterWindow_.y) &&
++		    y < meterWindow_.y + meterWindow_.height)
++			(this->*meter0_)(src);
++	}
++
+ 	processFrameFn processFrame_;
+ 
+ 	/* Variables set by configure(), used every line */
+ 	statsProcessFn stats0_;
+ 	statsProcessFn stats2_;
++	statsProcessFn meterFn_ = nullptr;
++	/* meterFn_ while a metering window is set for this frame, else null */
++	statsProcessFn meter0_ = nullptr;
+ 	bool swapLines_;
+ 
+ 	unsigned int ySkipMask_;
+ 
+ 	Rectangle window_;
++	Rectangle meterWindow_;
++
++	/* Set from the application's thread, taken at startFrame() */
++	Mutex meterLock_;
++	Rectangle meterNext_ LIBCAMERA_TSA_GUARDED_BY(meterLock_);
+ 
+ 	Size patternSize_;
+ 
 --- a/src/libcamera/software_isp/swstats_cpu.cpp
 +++ b/src/libcamera/software_isp/swstats_cpu.cpp
 @@ -172,12 +172,25 @@
@@ -127,22 +201,280 @@
                                             \
  	yVal = r * kRedYMul;               \
  	yVal += g * kGreenYMul;            \
-@@ -187,7 +200,8 @@
+@@ -187,7 +200,31 @@
  #define SWSTATS_FINISH_LINE_STATS() \
  	stats_.sum_.r() += sumR;    \
  	stats_.sum_.g() += sumG;    \
 -	stats_.sum_.b() += sumB;
 +	stats_.sum_.b() += sumB;    \
 +	stats_.sumPixels += sumN;
++
++/*
++ * The luminance histogram of the metering window alone, from every 2x2
++ * block of it: the window is small.
++ */
++template<typename T, unsigned int div>
++void SwStatsCpu::meterLine0(const uint8_t *src[])
++{
++	const T *src0 = reinterpret_cast<const T *>(src[1]) + meterWindow_.x;
++	const T *src1 = reinterpret_cast<const T *>(src[2]) + meterWindow_.x;
++
++	if (swapLines_)
++		std::swap(src0, src1);
++
++	for (unsigned int x = 0; x < meterWindow_.width; x += 2) {
++		uint64_t b = src0[x];
++		uint64_t g = (src0[x + 1] + src1[x]) / 2;
++		uint64_t r = src1[x + 1];
++		uint64_t yVal = r * kRedYMul + g * kGreenYMul + b * kBlueYMul;
++
++		stats_.yHistogramMeter[yVal * SwIspStats::kYHistogramSize / (256 * 256 * div)]++;
++	}
++}
  
  void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[])
  {
-@@ -333,6 +347,7 @@
+@@ -333,7 +370,22 @@
  		LOG(SwStatsCpu, Error) << "Calling startFrame() without setWindow()";
  
  	stats_.sum_ = RGB<uint64_t>({ 0, 0, 0 });
 +	stats_.sumPixels = 0;
  	stats_.yHistogram.fill(0);
++	stats_.yHistogramMeter.fill(0);
++
++	{
++		MutexLocker locker(meterLock_);
++		meterWindow_ = meterNext_;
++	}
++
++	/* Whole 2x2 blocks inside the statistics window, in its Bayer phase */
++	meterWindow_ = meterWindow_.boundedTo(window_);
++	meterWindow_.x = (meterWindow_.x & ~1) + xShift_;
++	meterWindow_.y &= ~1;
++	meterWindow_.width = (meterWindow_.width > xShift_ ? meterWindow_.width - xShift_ : 0) & ~1;
++	meterWindow_.height &= ~1;
++	meter0_ = meterWindow_.width && meterWindow_.height ? meterFn_ : nullptr;
+ }
+ 
+ /**
+@@ -395,6 +447,7 @@
+ int SwStatsCpu::configure(const StreamConfiguration &inputCfg)
+ {
+ 	stride_ = inputCfg.stride;
++	meterFn_ = nullptr;
+ 
+ 	BayerFormat bayerFormat =
+ 		BayerFormat::fromPixelFormat(inputCfg.pixelFormat);
+@@ -405,12 +458,15 @@
+ 		switch (bayerFormat.bitDepth) {
+ 		case 8:
+ 			stats0_ = &SwStatsCpu::statsBGGR8Line0;
++			meterFn_ = &SwStatsCpu::meterLine0<uint8_t, 1>;
+ 			return 0;
+ 		case 10:
+ 			stats0_ = &SwStatsCpu::statsBGGR10Line0;
++			meterFn_ = &SwStatsCpu::meterLine0<uint16_t, 4>;
+ 			return 0;
+ 		case 12:
+ 			stats0_ = &SwStatsCpu::statsBGGR12Line0;
++			meterFn_ = &SwStatsCpu::meterLine0<uint16_t, 16>;
+ 			return 0;
+ 		}
+ 	}
+@@ -487,6 +543,21 @@
+ 	window_.height &= ~(patternSize_.height - 1);
+ }
+ 
++/**
++ * \brief Set the metering window
++ * \param[in] window The window, in the coordinates of the processed frame
++ *
++ * Statistics frames after this one also get a luminance histogram of
++ * \a window alone (SwIspStats::yHistogramMeter), for the exposure to be
++ * metered there. An empty \a window ends that. Unpacked Bayer formats only.
++ * Unlike the other functions this one may be called from any thread.
++ */
++void SwStatsCpu::setMeterWindow(const Rectangle &window)
++{
++	MutexLocker locker(meterLock_);
++	meterNext_ = window;
++}
++
+ void SwStatsCpu::processBayerFrame2(MappedFrameBuffer &in)
+ {
+ 	const uint8_t *src = in.planes()[0].data();
+@@ -505,6 +576,7 @@
+ 		linePointers[1] = src;
+ 		linePointers[2] = src + stride_;
+ 		(this->*stats0_)(linePointers);
++		processMeterLine(window_.y + y, linePointers);
+ 		src += stride_ * 2;
+ 	}
+ }
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -38,6 +38,7 @@
+ namespace libcamera {
+ 
+ class Debayer;
++class SwStatsCpu;
+ class FrameBuffer;
+ class PixelFormat;
+ class Stream;
+@@ -101,6 +102,11 @@
+ 	DmaBufAllocator dmaHeap_;
+ 	bool ccmEnabled_;
+ 
++	/* The metering window goes to the statistics in input coordinates */
++	SwStatsCpu *stats_;
++	Size sensorSize_;
++	Size inputSize_;
++
+ 	std::unique_ptr<ipa::soft::IPAProxySoft> ipa_;
+ 	std::deque<FrameBuffer *> queuedInputBuffers_;
+ 	std::deque<FrameBuffer *> queuedOutputBuffers_;
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -17,6 +17,7 @@
+ #include <libcamera/base/thread.h>
+ #include <libcamera/base/utils.h>
+ 
++#include <libcamera/control_ids.h>
+ #include <libcamera/controls.h>
+ #include <libcamera/formats.h>
+ #include <libcamera/stream.h>
+@@ -103,6 +104,8 @@
+ 		return;
+ 	}
+ 	stats->statsReady.connect(this, &SoftwareIsp::statsReady);
++	stats_ = stats.get();
++	sensorSize_ = sensor->resolution();
+ 
+ #if HAVE_DEBAYER_EGL
+ 	std::optional<std::string> softISPMode = configuration.envOption("LIBCAMERA_SOFTISP_MODE", { "software_isp", "mode" });
+@@ -268,6 +271,9 @@
+ 	if (ret < 0)
+ 		return ret;
+ 
++	inputSize_ = inputCfg.size;
++	stats_->setMeterWindow({});
++
+ 	return debayer_->configure(inputCfg, outputCfgs, ccmEnabled_);
+ }
+ 
+@@ -298,6 +304,20 @@
+  */
+ void SoftwareIsp::queueRequest(const uint32_t frame, const ControlList &controls)
+ {
++	/*
++	 * The first AfWindows rectangle is where the exposure is metered, in
++	 * the full pixel array of the sensor (a binned mode sees all of it);
++	 * an empty one meters the whole frame again. It stays until changed.
++	 */
++	const auto &windows = controls.get(controls::AfWindows);
++	if (windows && sensorSize_.width && sensorSize_.height) {
++		Rectangle w;
++
++		if (!windows->empty() && (*windows)[0].width && (*windows)[0].height)
++			w = (*windows)[0].scaledBy(inputSize_, sensorSize_);
++		stats_->setMeterWindow(w);
++	}
++
+ 	ipa_->queueRequest(frame, controls);
+ }
+ 
+--- a/src/ipa/simple/algorithms/agc.h
++++ b/src/ipa/simple/algorithms/agc.h
+@@ -19,6 +19,8 @@
+ 	Agc();
+ 	~Agc() = default;
+ 
++	int init(IPAContext &context, const YamlObject &tuningData) override;
++
+ 	void process(IPAContext &context, const uint32_t frame,
+ 		     IPAFrameContext &frameContext,
+ 		     const SwIspStats *stats,
+--- a/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "agc.h"
+ 
++#include <array>
+ #include <stdint.h>
+ 
+ #include <libcamera/base/log.h>
+@@ -37,10 +38,28 @@
+  */
+ static constexpr float kExposureSatisfactory = 0.2;
+ 
++/*
++ * With a metering window (the AfWindows control, the point of interest the
++ * user picked) the window counts for this share of the histogram, the rest
++ * of the frame for the remainder.
++ */
++static constexpr double kMeterWeight = 0.8;
++
+ Agc::Agc()
+ {
+ }
+ 
++int Agc::init(IPAContext &context, [[maybe_unused]] const YamlObject &tuningData)
++{
++	/*
++	 * Taken by the software ISP's statistics (SoftwareIsp::queueRequest()),
++	 * listed here to be a control of the camera
++	 */
++	context.ctrlMap[&controls::AfWindows] =
++		ControlInfo(Rectangle{}, Rectangle(0, 0, 65535, 65535), Rectangle{});
++	return 0;
++}
++
+ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV)
+ {
+ 	/*
+@@ -134,7 +153,20 @@
+ 	 * Calculate Mean Sample Value (MSV) according to formula from:
+ 	 * https://www.araa.asn.au/acra/acra2007/papers/paper84final.pdf
+ 	 */
+-	const auto &histogram = stats->yHistogram;
++	/* The frame's histogram, or the frame's and the window's weighted */
++	std::array<double, SwIspStats::kYHistogramSize> histogram;
++	double frameCount = 0, meterCount = 0;
++
++	for (unsigned int i = 0; i < SwIspStats::kYHistogramSize; i++) {
++		frameCount += stats->yHistogram[i];
++		meterCount += stats->yHistogramMeter[i];
++	}
++	double meterScale = meterCount ? kMeterWeight / (1 - kMeterWeight) *
++					 frameCount / meterCount : 0;
++	for (unsigned int i = 0; i < SwIspStats::kYHistogramSize; i++)
++		histogram[i] = stats->yHistogram[i] +
++			       meterScale * stats->yHistogramMeter[i];
++
+ 	const unsigned int blackLevelHistIdx =
+ 		context.activeState.blc.level / (256 / SwIspStats::kYHistogramSize);
+ 	const unsigned int histogramSize =
+@@ -142,9 +174,9 @@
+ 	const unsigned int yHistValsPerBin = histogramSize / kExposureBinsCount;
+ 	const unsigned int yHistValsPerBinMod =
+ 		histogramSize / (histogramSize % kExposureBinsCount + 1);
+-	int exposureBins[kExposureBinsCount] = {};
+-	unsigned int denom = 0;
+-	unsigned int num = 0;
++	double exposureBins[kExposureBinsCount] = {};
++	double denom = 0;
++	double num = 0;
+ 
+ 	if (yHistValsPerBin == 0) {
+ 		LOG(IPASoftExposure, Debug)
+@@ -163,7 +195,7 @@
+ 		num += exposureBins[i] * (i + 1);
+ 	}
+ 
+-	float exposureMSV = (denom == 0 ? 0 : static_cast<float>(num) / denom);
++	float exposureMSV = (denom == 0 ? 0 : num / denom);
+ 	updateExposure(context, frameContext, exposureMSV);
  }
  
 --- a/src/ipa/simple/algorithms/awb.cpp
