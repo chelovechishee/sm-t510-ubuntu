@@ -4,7 +4,7 @@ Architecture: arm64
 Maintainer: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
 Installed-Size: @SIZE@
 Depends: gstreamer1.0-gl, gstreamer1.0-gtk3, gstreamer1.0-libcamera, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, hunspell-en-us, libc6, libcamera-ipa (>= 0.7.0-1ubuntu2+t510.6), libcamera0.7 (>= 0.7.0-1ubuntu2+t510.6), libgstreamer1.0-0, libgtk-3-0t64, libspa-0.2-libcamera, libx11-6, libxext6, libxfixes3, libxi6, libxtst6, onboard-data, python3, t510-archive-keyring
-Recommends: t510-kernel
+Recommends: libonnxruntime1.23, t510-kernel
 Section: misc
 Priority: optional
 Homepage: https://github.com/chelovechishee/sm-t510-ubuntu

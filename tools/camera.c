@@ -8,7 +8,7 @@
  * microphone. libcamera (its software ISP) and GStreamer do all the work on
  * the pictures; this program only connects them and draws the buttons.
  *
- * Build: cc -O2 -o t510-camera camera.c $(pkg-config --cflags --libs gtk+-3.0 gstreamer-1.0 gstreamer-video-1.0) -lm
+ * Build: cc -O2 -I/usr/include/onnxruntime -o t510-camera camera.c camera-enhance.c $(pkg-config --cflags --libs gtk+-3.0 gstreamer-1.0 gstreamer-video-1.0) -lm
  * (scripts/make-debs.sh builds it into t510-support as /usr/bin/t510-camera)
  */
 
@@ -24,6 +24,8 @@
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "camera-enhance.h"
 
 #define PREVIEW_W	1280
 #define PREVIEW_H	960
@@ -217,6 +219,7 @@ struct app {
 	GtkWidget *status;
 	GtkWidget *shutter;
 	GtkWidget *mode_photo;
+	GtkWidget *enhance;	/* photos get the learned retouch */
 	GtkWidget *switch_cam;
 	GtkWidget *marker;	/* the square around the point of interest */
 	GstElement *pipeline;
@@ -1133,6 +1136,115 @@ static gboolean sensor_exposure(const struct cam *c, int *exp_us, double *gain)
 	return *exp_us > 0;
 }
 
+/*
+ * The retouch of camera-enhance.c, switched on and off with the Enhance
+ * box and remembered across starts. Only photos get it.
+ */
+#define SETTINGS_GROUP	"camera"
+
+static char *settings_file(void)
+{
+	return g_build_filename(g_get_user_config_dir(), "t510-camera",
+				"settings.ini", NULL);
+}
+
+static gboolean setting(const char *key)
+{
+	GKeyFile *kf = g_key_file_new();
+	char *path = settings_file();
+	gboolean on = g_key_file_load_from_file(kf, path, 0, NULL) &&
+		      g_key_file_get_boolean(kf, SETTINGS_GROUP, key, NULL);
+
+	g_key_file_free(kf);
+	g_free(path);
+	return on;
+}
+
+static void set_setting(const char *key, gboolean on)
+{
+	GKeyFile *kf = g_key_file_new();
+	char *path = settings_file();
+	char *dir = g_path_get_dirname(path);
+
+	g_key_file_load_from_file(kf, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
+	g_key_file_set_boolean(kf, SETTINGS_GROUP, key, on);
+	g_mkdir_with_parents(dir, 0755);
+	g_key_file_save_to_file(kf, path, NULL);
+	g_key_file_free(kf);
+	g_free(dir);
+	g_free(path);
+}
+
+static gboolean enhancing(struct app *a)
+{
+	return gtk_widget_get_sensitive(a->enhance) &&
+	       gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(a->enhance));
+}
+
+static void on_enhance(GtkToggleButton *b, gpointer data)
+{
+	set_setting("enhance", gtk_toggle_button_get_active(b));
+}
+
+/* In the streaming thread: retouch the photo before it is encoded */
+static GstPadProbeReturn enhance_probe(GstPad *pad, GstPadProbeInfo *info,
+				       gpointer data)
+{
+	GstBuffer *buf = gst_buffer_make_writable(gst_pad_probe_info_get_buffer(info));
+	GstVideoFrame frame;
+	GstVideoInfo vi;
+	GstCaps *caps = gst_pad_get_current_caps(pad);
+	gboolean ok = caps && gst_video_info_from_caps(&vi, caps);
+
+	GST_PAD_PROBE_INFO_DATA(info) = buf;
+	if (caps)
+		gst_caps_unref(caps);
+	if (!ok || GST_VIDEO_INFO_FORMAT(&vi) != GST_VIDEO_FORMAT_RGB ||
+	    !gst_video_frame_map(&frame, &vi, buf, GST_MAP_READWRITE))
+		return GST_PAD_PROBE_OK;
+
+	if (!enhance_rgb(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0),
+			 GST_VIDEO_FRAME_WIDTH(&frame),
+			 GST_VIDEO_FRAME_HEIGHT(&frame),
+			 GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0)))
+		g_printerr("t510-camera: the photo is saved without enhancement\n");
+	gst_video_frame_unmap(&frame);
+	return GST_PAD_PROBE_OK;
+}
+
+static void enhance_photo(struct app *a)
+{
+	GstElement *enh = gst_bin_get_by_name(GST_BIN(a->pipeline), "enh");
+	GstPad *pad = gst_element_get_static_pad(enh, "sink");
+
+	gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, enhance_probe, a, NULL);
+	gst_object_unref(pad);
+	gst_object_unref(enh);
+}
+
+/* ONNX Runtime and the model load in the background: a second or so */
+static struct app *enhance_app;
+static gboolean enhance_ok;
+
+static gboolean enhance_ready(gpointer data)
+{
+	struct app *a = enhance_app;
+
+	gtk_widget_set_sensitive(a->enhance, enhance_ok);
+	if (!enhance_ok)
+		gtk_widget_set_tooltip_text(a->enhance,
+			"Needs ONNX Runtime (libonnxruntime1.23) and "
+			ENHANCE_MODEL);
+	return G_SOURCE_REMOVE;
+}
+
+static gpointer enhance_load(gpointer data)
+{
+	enhance_ok = enhance_available();
+	g_idle_add(enhance_ready, NULL);
+	return NULL;
+}
+
 static void take_photo(struct app *a)
 {
 	const struct cam *c = &cams[a->cam];
@@ -1166,9 +1278,12 @@ static void take_photo(struct app *a)
 	}
 	g_free(base);
 	desc = g_strdup_printf("%s ! identity name=gate ! videoconvert ! "
-			       "videoflip video-direction=%s ! "
+			       "videoflip video-direction=%s ! %s"
 			       "jpegenc quality=92 ! filesink location=\"%s\"",
-			       src, file_turn(a), a->last_file);
+			       src, file_turn(a),
+			       enhancing(a) ? "video/x-raw,format=RGB ! "
+					      "identity name=enh ! videoconvert ! " : "",
+			       a->last_file);
 
 	a->state = STILL;
 	a->still_count = 0;
@@ -1182,6 +1297,8 @@ static void take_photo(struct app *a)
 				  a, NULL);
 		gst_object_unref(pad);
 		gst_object_unref(gate);
+		if (enhancing(a))
+			enhance_photo(a);
 		a->still_timeout = g_timeout_add_seconds(STILL_TIMEOUT_S,
 							 still_timed_out, a);
 	} else {
@@ -1453,6 +1570,16 @@ static void activate(GtkApplication *gapp, gpointer data)
 		GTK_RADIO_BUTTON(a->mode_photo), "Video");
 	gtk_box_pack_start(GTK_BOX(modes), a->mode_photo, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(modes), mode_video, FALSE, FALSE, 0);
+
+	a->enhance = gtk_check_button_new_with_label("Enhance");
+	gtk_widget_set_tooltip_text(a->enhance,
+		"Retouch photos: colour and tone learned from photographers' "
+		"edits (LUTwithBGrid). Videos are not touched.");
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(a->enhance),
+				     setting("enhance"));
+	gtk_widget_set_sensitive(a->enhance, FALSE);
+	g_signal_connect(a->enhance, "toggled", G_CALLBACK(on_enhance), a);
+	gtk_box_pack_start(GTK_BOX(modes), a->enhance, FALSE, FALSE, 0);
 	gtk_widget_set_valign(modes, GTK_ALIGN_CENTER);
 
 	a->shutter = gtk_button_new();
@@ -1480,6 +1607,8 @@ static void activate(GtkApplication *gapp, gpointer data)
 	/* Rotating the desktop restarts the session, and this program */
 	a->desktop = desktop_turn();
 	start_preview(a);
+	enhance_app = a;
+	g_thread_unref(g_thread_new("enhance-load", enhance_load, NULL));
 }
 
 int main(int argc, char **argv)

@@ -1,0 +1,15 @@
+lutbgrid-fivek.onnx — the photo enhancement of t510-camera ("Enhance")
+
+The predictor of LUTwithBGrid: "Image-adaptive 3D Lookup Tables for
+Real-time Image Enhancement with Bilateral Grids", Wontae Kim and Nam Ik
+Cho, ECCV 2024. https://github.com/WontaeaeKim/LUTwithBGrid (commit
+6bbcfd0ef8f7d9c15c4f959da5b90057bd61f1c6), its weights
+pretrained/FiveK_sRGB.pth (sha256 e2f668515b0b4523a0120ca5ba0dd0a7c840b6fc
+cfe39c41a2e9229e91177d6d), trained on MIT-Adobe FiveK (expert C).
+Licensed under the Apache License 2.0: LICENSE.LUTwithBGrid.
+
+Modified: only the backbone and the LUT and grid generators are exported
+(ONNX opset 17); the slicing, the 1x1 mixing layer (its weights are in the
+model's metadata, mix_weight and mix_bias) and the LUT transform are
+reimplemented in tools/camera-enhance.c of the sm-t510-ubuntu project.
+camera/enhance/export.py there makes this file from the authors' weights.
