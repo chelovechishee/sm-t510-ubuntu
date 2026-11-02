@@ -10,6 +10,26 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.12.1 — tap to focus (build #94)
+
+- Camera: a tap on the preview picks the point of interest. The exposure
+  is metered there, and the rear camera focuses on it (contrast autofocus,
+  about two seconds): a yellow square when it is sharp, red when nothing
+  around the point is sharp enough to focus on (the lens then stays where
+  it was). A plain surface focuses by what is around it. The front camera
+  has a fixed focus and only meters.
+- Camera: the preview, photos and videos follow the desktop's rotation.
+  They were upright only with the desktop upside down; what the screen
+  shows upright is now upright in the files too, whichever way the
+  desktop is turned.
+- The built-in microphone is about twice as loud (the codec's microphone
+  amplifier one step higher, about +6 dB).
+- libcamera `0.7.0-1ubuntu2+t510.6`: the software ISP meters the exposure
+  in a window the program gives (the `AfWindows` control); without one,
+  over the whole picture as before.
+
+The kernel is unchanged (build #94).
+
 ## 0.12.0 — cameras (build #94)
 
 - Both cameras work: the rear one (8 MP, S5K4HA) and the front one (5 MP,

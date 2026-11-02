@@ -55,13 +55,13 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 | Battery | charge level (S2MU005), charging at stock currents by the kernel driver, set again for every cable (asleep too) |
 | USB | USB-C host and device by the S2MM005 controller: flash drives, keyboards, mice, network adapters, sound cards, webcams, phones; the USB network and console to a PC |
 | Bluetooth | Samsung SCSC (ported Samsung service, own BlueZ driver), BlueZ + blueman: pairing, BLE, music from a phone to the speakers (A2DP; tried with an iPhone) |
-| Cameras | rear 8 MP (S5K4HA) and front 5 MP (S5K5E9): own drivers for the receivers (CSIS) and sensors, libcamera's software ISP; the Camera program for photos and videos, other programs through PipeWire |
+| Cameras | rear 8 MP (S5K4HA) and front 5 MP (S5K5E9): own drivers for the receivers (CSIS) and sensors, libcamera's software ISP; rear autofocus on a tap; the Camera program for photos and videos, other programs through PipeWire |
 | Other | microSD, clock (RTC in the PMIC over the SPEEDY bus), network printing |
 
 **Not working yet:** headphones and the headset microphone (the codec has
 their paths, but plugging in is not detected yet), Bluetooth calls (the headset profile: the firmware sends call audio to the
-audio DSP), autofocus (the rear lens stays at one position, set for room
-distances and beyond). Shader derivatives are broken on the G71, so
+audio DSP), continuous autofocus (the rear camera focuses when the
+preview is tapped). Shader derivatives are broken on the G71, so
 GTK4 draws with cairo (`GSK_RENDERER=cairo`).
 
 ## Using the tablet
@@ -91,8 +91,9 @@ camera, folders.
 The Camera program: the button at the bottom takes a photo (or starts and
 stops a video, under Video), the one on the right switches between the
 cameras, the folder on the left opens Pictures/Camera, where photos and
-videos go. A photo takes about a second: the camera restarts at full size
-for it.
+videos go. A tap on the preview meters the exposure there and focuses the
+rear camera on it (a yellow square: sharp; red: nothing to focus on). A
+photo takes about a second: the camera restarts at full size for it.
 
 The power key:
 
