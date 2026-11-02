@@ -92,8 +92,10 @@ The Camera program: the button at the bottom takes a photo (or starts and
 stops a video, under Video), the one on the right switches between the
 cameras, the folder on the left opens Pictures/Camera, where photos and
 videos go. A tap on the preview meters the exposure there and focuses the
-rear camera on it (a yellow square: sharp; red: nothing to focus on). A
-photo takes about a second: the camera restarts at full size for it.
+rear camera on it (a yellow square: sharp; red: nothing to focus on).
+Enhance, under Photo/Video, retouches photos (colour and tone, learned from
+photographers' edits). A photo takes about a second: the camera restarts at
+full size for it.
 
 The power key:
 

@@ -10,6 +10,20 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.12.2 — Enhance for photos (build #94)
+
+- Camera: an Enhance box under Photo/Video. With it on, each photo gets a
+  learned retouch of colour and tone (LUTwithBGrid, Kim and Cho, ECCV
+  2024, trained on photographers' edits of the MIT-Adobe FiveK photos):
+  brighter, cleaner colours, deeper blacks, in about half a second on
+  the tablet. Videos are not touched. The box is remembered.
+- It runs on ONNX Runtime from Ubuntu (`libonnxruntime1.23`, recommended
+  by `t510-support`, so `apt upgrade` brings it); without it the box
+  stays off. The model (1.9 MB, Apache-2.0) is in
+  `/usr/share/t510/models` with its licence and where it comes from.
+
+The kernel is unchanged (build #94).
+
 ## 0.12.1 — tap to focus (build #94)
 
 - Camera: a tap on the preview picks the point of interest. The exposure
