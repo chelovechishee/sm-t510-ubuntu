@@ -92,8 +92,8 @@ find "$S" -name __pycache__ -prune -exec rm -rf {} +
 "$CC" -O2 -shared -fPIC -o "$S/usr/libexec/t510/noblank.so" "$T/tools/noblank.c"
 mkdir -p "$S/usr/bin"
 GTKGST=$(PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
-	pkg-config --cflags --libs gtk+-3.0 gstreamer-1.0) &&
-"$CC" -O2 -o "$S/usr/bin/t510-camera" "$T/tools/camera.c" $GTKGST ||
+	pkg-config --cflags --libs gtk+-3.0 gstreamer-1.0 gstreamer-video-1.0) &&
+"$CC" -O2 -o "$S/usr/bin/t510-camera" "$T/tools/camera.c" $GTKGST -lm ||
 	die "t510-camera does not build: sudo apt install libgtk-3-dev:arm64 libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64"
 aarch64-linux-gnu-strip "$S"/usr/libexec/t510/{fbtool,longpress,nograb.so,noblank.so} "$S/usr/bin/t510-camera"
 chmod 644 "$S"/usr/libexec/t510/{nograb,noblank}.so

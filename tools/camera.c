@@ -8,15 +8,18 @@
  * microphone. libcamera (its software ISP) and GStreamer do all the work on
  * the pictures; this program only connects them and draws the buttons.
  *
- * Build: cc -O2 -o t510-camera camera.c $(pkg-config --cflags --libs gtk+-3.0 gstreamer-1.0)
+ * Build: cc -O2 -o t510-camera camera.c $(pkg-config --cflags --libs gtk+-3.0 gstreamer-1.0 gstreamer-video-1.0) -lm
  * (scripts/make-debs.sh builds it into t510-support as /usr/bin/t510-camera)
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <gst/gst.h>
+#include <gst/video/video.h>
 #include <gtk/gtk.h>
 #include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
+#include <math.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <time.h>
@@ -31,6 +34,43 @@
 #define STILL_SKIP_KNOWN	5
 #define STILL_SKIP_AUTO		12
 #define STILL_TIMEOUT_S	20
+
+/*
+ * A tap on the preview picks the point of interest: the exposure is
+ * metered there (libcamera's software ISP takes the AfWindows control for
+ * it) and the rear lens is focused on it by contrast. Once the exposure
+ * has settled on the new point, the lens sweeps its range from far to near
+ * a step each frame (stopping well past a clear peak), then back over the
+ * peak in finer steps. Frames reach us a few frames after they were
+ * taken: each counts for where the lens was while it was exposed, from
+ * its timestamp (the start of its readout) and the exposure time.
+ */
+#define POI_SIZE	8	/* the window is 1/8 of the frame wide */
+/*
+ * Focus windows around the point, 1/8, 1/4 and 1/2 of the frame wide: the
+ * smallest with a clear peak counts, a larger one where the point itself
+ * is a plain surface.
+ */
+static const int af_windows[] = { 8, 4, 2 };
+#define AF_WINDOWS	G_N_ELEMENTS(af_windows)
+#define MARKER_SIZE	96
+#define AF_SWEEP_STEP	40	/* lens codes a frame */
+#define AF_FINE_SPAN	60	/* the fine sweep: peak +- this */
+#define AF_FINE_STEP	10
+#define AF_LENS_LAG_NS	(5 * 1000000LL)		/* a step settles */
+#define AF_JUMP_NS	(40 * 1000000LL)	/* a jump to a sweep's start */
+#define AF_HOLD_NS	(300 * 1000000LL)	/* and a frame after it, at most */
+#define AF_AE_FRAMES	8	/* exposure x gain the same for that long */
+#define AF_AE_SAME	0.02
+#define AF_AE_WAIT_NS	(1500 * 1000000LL)	/* or that long at most */
+#define AF_PERIOD_DEFAULT_NS	(40 * 1000000LL)
+#define AF_PERIOD_MIN_NS	(15 * 1000000LL)
+#define AF_PERIOD_MAX_NS	(200 * 1000000LL)
+#define AF_MIN_GAIN	1.2	/* sharpest/softest below that: no focus */
+#define AF_FINE_GAIN	1.02
+#define AF_PAST_PEAK	0.6	/* two samples below that share of the best */
+#define AF_MAX_MOVES	64
+#define AF_MAX_SAMPLES	64
 
 /* t510-rotate keeps the desktop's rotation here */
 #define ROTATION_STATE	"/var/lib/t510/rotation"
@@ -87,7 +127,9 @@ static const char *gl_flip_name(enum flip f)
 struct cam {
 	const char *id;		/* libcamera's name of the camera */
 	const char *sensor;	/* its V4L2 subdev name starts so */
+	const char *lens;	/* the focus motor's subdev, if there is one */
 	const char *name;
+	int sensor_w, sensor_h;	/* the pixel array, AfWindows coordinates */
 	int still_w, still_h;	/* the largest the software ISP gives */
 	/*
 	 * Both sensors are mounted turned: on the desktop rotated upside
@@ -102,10 +144,10 @@ struct cam {
 };
 
 static const struct cam cams[] = {
-	{ "/base/soc@0/i2c@138b0000/camera@2d", "s5k4ha", "rear", 3248, 2436,
-	  FLIP_90L, FLIP_90L },
-	{ "/base/soc@0/i2c@138a0000/camera@2d", "s5k5e9", "front", 2576, 1932,
-	  FLIP_UR_LL, FLIP_90L },
+	{ "/base/soc@0/i2c@138b0000/camera@2d", "s5k4ha", "dw9807", "rear",
+	  3264, 2448, 3248, 2436, FLIP_90L, FLIP_90L },
+	{ "/base/soc@0/i2c@138a0000/camera@2d", "s5k5e9", NULL, "front",
+	  2592, 1944, 2576, 1932, FLIP_UR_LL, FLIP_90L },
 };
 
 /*
@@ -141,6 +183,34 @@ static enum flip desktop_turn(void)
 
 enum state { IDLE, PREVIEW, STILL, RECORDING, STOPPING };
 
+enum af_phase { AF_OFF, AF_WAIT_AE, AF_SWEEP, AF_FINE };
+
+/* The streaming thread focuses: everything here is under the lock */
+struct af {
+	GMutex lock;
+	enum af_phase phase;
+	int fd;			/* the lens subdev */
+	GstElement *cam;	/* libcamerasrc: the exposure */
+	int min, max;		/* the lens's range */
+	int start;		/* where it was: kept when nothing is sharp */
+	int cur, target, step;	/* this sweep */
+	double peak;		/* of the coarse sweep */
+	/* the moves of this sweep: from then on (+ lag) the lens was there */
+	gint64 move_t[AF_MAX_MOVES];
+	int move_pos[AF_MAX_MOVES];
+	unsigned int moves;
+	gint64 settled;		/* frames exposed from then on count */
+	double pos[AF_MAX_SAMPLES];
+	double score[AF_MAX_SAMPLES][AF_WINDOWS];
+	unsigned int n;
+	int win;		/* the window the fine sweep goes by */
+	gint64 last_start, period;	/* of the frames */
+	gint64 ae_since;	/* waiting for the exposure */
+	double ae_last;
+	unsigned int ae_same;
+	gboolean debug;
+};
+
 struct app {
 	GtkWidget *window;
 	GtkWidget *view_box;	/* holds the video widget of the pipeline */
@@ -148,11 +218,21 @@ struct app {
 	GtkWidget *shutter;
 	GtkWidget *mode_photo;
 	GtkWidget *switch_cam;
+	GtkWidget *marker;	/* the square around the point of interest */
 	GstElement *pipeline;
 	guint bus_watch;
 	enum state state;
 	unsigned int cam;
 	enum flip desktop;	/* desktop_turn(), read at the start */
+	/*
+	 * The point of interest in the camera's frame, 0..1 (poi_x < 0: none).
+	 * The streaming thread focuses there while measure is set;
+	 * measure_gen tells its reports from those of an earlier focusing.
+	 */
+	double poi_x, poi_y;
+	gint measure;
+	gint measure_gen;
+	struct af af;
 	unsigned int still_count;
 	unsigned int still_skip;
 	gint64 rec_start;
@@ -168,6 +248,8 @@ static void set_status(struct app *a, const char *text)
 	gtk_label_set_text(GTK_LABEL(a->status), text ? text : "");
 	gtk_widget_set_visible(a->status, text && *text);
 }
+
+static void af_stop(struct app *a);
 
 static char *media_dir(void)
 {
@@ -205,6 +287,7 @@ static void clear_view(struct app *a)
 
 static void stop_pipeline(struct app *a)
 {
+	af_stop(a);
 	if (!a->pipeline)
 		return;
 
@@ -302,6 +385,30 @@ static gboolean show_sink(struct app *a, GstElement *sink)
 }
 
 /*
+ * Meter at the point of interest, if there is one: libcamera takes the
+ * first AfWindows rectangle, in the sensor's pixel array, for it. A new
+ * pipeline starts metering the whole frame.
+ */
+static void meter_poi(struct app *a)
+{
+	const struct cam *c = &cams[a->cam];
+	int w = c->sensor_w / POI_SIZE, h = w;
+	int x = CLAMP(a->poi_x * c->sensor_w - w / 2, 0, c->sensor_w - w);
+	int y = CLAMP(a->poi_y * c->sensor_h - h / 2, 0, c->sensor_h - h);
+	GstElement *cam;
+	char *win;
+
+	if (a->poi_x < 0 || !a->pipeline)
+		return;
+
+	cam = gst_bin_get_by_name(GST_BIN(a->pipeline), "cam");
+	win = g_strdup_printf("<<%d,%d,%d,%d>>", x, y, w, h);
+	gst_util_set_object_arg(G_OBJECT(cam), "af-windows", win);
+	g_free(win);
+	gst_object_unref(cam);
+}
+
+/*
  * One pipeline at a time: the preview alone, or the preview and the
  * recorder. A photo uses a pipeline of its own at the full size.
  */
@@ -332,6 +439,7 @@ static gboolean run_pipeline(struct app *a, const char *desc, gboolean view)
 		gst_object_unref(bin);
 	}
 
+	meter_poi(a);
 	bus = gst_element_get_bus(a->pipeline);
 	a->bus_watch = gst_bus_add_watch(bus, on_bus, a);
 	gst_object_unref(bus);
@@ -346,10 +454,11 @@ static gboolean run_pipeline(struct app *a, const char *desc, gboolean view)
 	return TRUE;
 }
 
-static char *source_desc(const struct cam *c, int w, int h)
+static char *source_desc(struct app *a, int w, int h)
 {
-	return g_strdup_printf("libcamerasrc camera-name=\"%s\" ! "
-			       "video/x-raw,width=%d,height=%d", c->id, w, h);
+	return g_strdup_printf("libcamerasrc name=cam camera-name=\"%s\" ! "
+			       "video/x-raw,width=%d,height=%d",
+			       cams[a->cam].id, w, h);
 }
 
 static enum flip preview_turn(struct app *a)
@@ -375,16 +484,572 @@ static char *view_desc(struct app *a)
 			       gl_flip_name(preview_turn(a)));
 }
 
-static void start_preview(struct app *a)
+/* The V4L2 subdev whose name starts with prefix, opened, or -1 */
+static int open_subdev(const char *prefix, int flags)
+{
+	const char *node;
+	GDir *dir;
+	int fd = -1;
+
+	dir = g_dir_open("/sys/class/video4linux", 0, NULL);
+	while (dir && fd < 0 && (node = g_dir_read_name(dir))) {
+		char *path, *name = NULL;
+
+		if (!g_str_has_prefix(node, "v4l-subdev"))
+			continue;
+		path = g_strdup_printf("/sys/class/video4linux/%s/name", node);
+		if (g_file_get_contents(path, &name, NULL, NULL) &&
+		    g_str_has_prefix(name, prefix)) {
+			char *dev = g_strdup_printf("/dev/%s", node);
+
+			fd = open(dev, flags);
+			g_free(dev);
+		}
+		g_free(name);
+		g_free(path);
+	}
+	if (dir)
+		g_dir_close(dir);
+	return fd;
+}
+
+/*
+ * How sharp the frame is around the point of interest: the squared
+ * differences between neighbouring 2x2 blocks (green, or luma; blocks so
+ * that the noise counts less) against the squared brightness, so that the
+ * exposure does not count.
+ */
+static double sharpness(GstVideoFrame *f, double fx, double fy, int div)
+{
+	const GstVideoFormatInfo *fi = f->info.finfo;
+	unsigned int comp = GST_VIDEO_FORMAT_INFO_IS_YUV(fi) ? 0 : 1;
+	const guint8 *data = GST_VIDEO_FRAME_COMP_DATA(f, comp);
+	int stride = GST_VIDEO_FRAME_COMP_STRIDE(f, comp);
+	int ps = GST_VIDEO_FRAME_COMP_PSTRIDE(f, comp);
+	int w = GST_VIDEO_FRAME_COMP_WIDTH(f, comp);
+	int h = GST_VIDEO_FRAME_COMP_HEIGHT(f, comp);
+	int bs = MIN(w / div, h) / 2;	/* blocks per side */
+	int x0 = CLAMP(fx * w - bs, 0, w - 2 * bs);
+	int y0 = CLAMP(fy * h - bs, 0, h - 2 * bs);
+	guint64 grad = 0, sum = 0;
+	double n, mean;
+	int *blk;
+
+	if (GST_VIDEO_FORMAT_INFO_DEPTH(fi, comp) != 8 || bs < 8)
+		return 0;
+	blk = g_new(int, bs * bs);
+
+	for (int by = 0; by < bs; by++) {
+		const guint8 *r0 = data + (y0 + 2 * by) * stride + x0 * ps;
+		const guint8 *r1 = r0 + stride;
+
+		for (int bx = 0; bx < bs; bx++) {
+			int x = 2 * bx * ps;
+			int v = r0[x] + r0[x + ps] + r1[x] + r1[x + ps];
+
+			blk[by * bs + bx] = v;
+			sum += v;
+		}
+	}
+	for (int by = 0; by < bs - 1; by++) {
+		for (int bx = 0; bx < bs - 1; bx++) {
+			int v = blk[by * bs + bx];
+			int dx = blk[by * bs + bx + 1] - v;
+			int dy = blk[(by + 1) * bs + bx] - v;
+
+			grad += dx * dx + dy * dy;
+		}
+	}
+
+	g_free(blk);
+
+	n = (double)bs * bs;
+	mean = sum / n;
+	return mean > 0 ? grad / ((bs - 1) * (bs - 1.0)) / (mean * mean) : 0;
+}
+
+/*
+ * The monotonic time a frame's readout began: libcamerasrc made the
+ * sensor's timestamp a running time with the same clock reading
+ */
+static gint64 frame_start(GstPad *pad, GstBuffer *buf)
+{
+	GstElement *el = gst_pad_get_parent_element(pad);
+	GstClock *clock = el ? gst_element_get_clock(el) : NULL;
+	gint64 start = -1;
+
+	if (clock && GST_BUFFER_PTS_IS_VALID(buf)) {
+		GstClockTime running = gst_clock_get_time(clock) -
+				       gst_element_get_base_time(el);
+
+		start = g_get_monotonic_time() * 1000 -
+			((gint64)running - (gint64)GST_BUFFER_PTS(buf));
+	}
+	if (clock)
+		gst_object_unref(clock);
+	if (el)
+		gst_object_unref(el);
+	return start;
+}
+
+static void set_marker(struct app *a, const char *state)
+{
+	GtkStyleContext *sc = gtk_widget_get_style_context(a->marker);
+
+	gtk_style_context_remove_class(sc, "focused");
+	gtk_style_context_remove_class(sc, "failed");
+	if (state)
+		gtk_style_context_add_class(sc, state);
+}
+
+struct report {
+	struct app *a;
+	gint gen;
+	const char *state;
+};
+
+static gboolean af_report(gpointer data)
+{
+	struct report *r = data;
+
+	if (r->gen == g_atomic_int_get(&r->a->measure_gen))
+		set_marker(r->a, r->state);
+	g_free(r);
+	return G_SOURCE_REMOVE;
+}
+
+/* Called with the lock held; restore: put the lens back where it was */
+static void af_close(struct af *af, gboolean restore)
+{
+	if (af->fd >= 0) {
+		if (restore) {
+			struct v4l2_control ctrl = {
+				.id = V4L2_CID_FOCUS_ABSOLUTE,
+				.value = af->start,
+			};
+
+			ioctl(af->fd, VIDIOC_S_CTRL, &ctrl);
+		}
+		close(af->fd);
+	}
+	af->fd = -1;
+	af->phase = AF_OFF;
+	gst_clear_object(&af->cam);
+}
+
+/* The end, from the streaming thread: the marker tells how it went */
+static void af_finish(struct app *a, const char *state)
+{
+	struct report *r = g_new(struct report, 1);
+
+	g_atomic_int_set(&a->measure, 0);
+	af_close(&a->af, FALSE);
+	r->a = a;
+	r->gen = g_atomic_int_get(&a->measure_gen);
+	r->state = state;
+	g_idle_add(af_report, r);
+}
+
+/* The lens stays where it is, or goes back if it was still searching */
+static void af_stop(struct app *a)
+{
+	g_atomic_int_set(&a->measure, 0);
+	g_atomic_int_inc(&a->measure_gen);
+	g_mutex_lock(&a->af.lock);
+	af_close(&a->af, a->af.phase != AF_OFF);
+	g_mutex_unlock(&a->af.lock);
+}
+
+static void lens_move(struct af *af, int pos, gint64 now)
+{
+	struct v4l2_control ctrl = {
+		.id = V4L2_CID_FOCUS_ABSOLUTE,
+		.value = pos,
+	};
+
+	if (ioctl(af->fd, VIDIOC_S_CTRL, &ctrl))
+		g_printerr("t510-camera: lens: %s\n", g_strerror(errno));
+	if (af->moves < AF_MAX_MOVES) {
+		af->move_t[af->moves] = now;
+		af->move_pos[af->moves++] = pos;
+	}
+	af->cur = pos;
+}
+
+/* A sweep of the lens from one end to the other, a step each frame */
+static void af_sweep(struct af *af, enum af_phase phase, int from, int to,
+		     int step, gint64 now)
+{
+	af->phase = phase;
+	af->moves = 0;
+	af->n = 0;
+	af->target = to;
+	af->step = from < to ? step : -step;
+	lens_move(af, from, now);
+	/* a jump to the start rings for longer than a step */
+	af->settled = now + AF_JUMP_NS;
+}
+
+/*
+ * Where the lens was, on average, while the point of interest was exposed
+ * between b and e; -1 if it had not got to the sweep yet
+ */
+static double af_lens_at(struct af *af, gint64 b, gint64 e)
+{
+	double sum = 0;
+
+	for (int k = 0; k < 8; k++) {
+		gint64 t = b + (e - b) * k / 7;
+		int pos = -1;
+
+		for (unsigned int i = 0; i < af->moves; i++)
+			if (af->move_t[i] + AF_LENS_LAG_NS <= t)
+				pos = af->move_pos[i];
+		if (pos < 0)
+			return -1;
+		sum += pos;
+	}
+	return sum / 8;
+}
+
+/* The sharpest sample in window k, and the softest score */
+static unsigned int af_best(struct af *af, int k, double *lo)
+{
+	unsigned int best = 0;
+
+	*lo = af->score[0][k];
+	for (unsigned int i = 1; i < af->n; i++) {
+		if (af->score[i][k] > af->score[best][k])
+			best = i;
+		*lo = MIN(*lo, af->score[i][k]);
+	}
+	return best;
+}
+
+/* The smallest window with a clear peak so far, or -1 */
+static int af_window(struct af *af)
+{
+	for (unsigned int k = 0; k < AF_WINDOWS; k++) {
+		double lo;
+		unsigned int best = af_best(af, k, &lo);
+
+		if (af->score[best][k] >= AF_MIN_GAIN * lo)
+			return k;
+	}
+	return -1;
+}
+
+/* The top of a parabola through the best sample and its neighbours */
+static double af_peak(struct af *af, int k, unsigned int best)
+{
+	double x0, x1, x2, y0, y1, y2, d, top;
+
+	if (best == 0 || best + 1 >= af->n)
+		return af->pos[best];
+	x0 = af->pos[best - 1]; y0 = af->score[best - 1][k];
+	x1 = af->pos[best];     y1 = af->score[best][k];
+	x2 = af->pos[best + 1]; y2 = af->score[best + 1][k];
+	d = (x0 - x1) * (x0 - x2) * (x1 - x2);
+	if (fabs(d) < 1e-9)
+		return x1;
+	/* y = A x^2 + B x + C */
+	double A = (x2 * (y1 - y0) + x1 * (y0 - y2) + x0 * (y2 - y1)) / d;
+	double B = (x2 * x2 * (y0 - y1) + x1 * x1 * (y2 - y0) +
+		    x0 * x0 * (y1 - y2)) / d;
+
+	if (A >= 0)
+		return x1;
+	top = -B / (2 * A);
+	return CLAMP(top, MIN(x0, x2), MAX(x0, x2));
+}
+
+/* The coarse sweep goes from far to near: well past a clear peak, stop */
+static gboolean af_past_peak(struct af *af)
+{
+	double lo, hi;
+	unsigned int best;
+	int k;
+
+	if (af->n < 4 || (k = af_window(af)) < 0)
+		return FALSE;
+	best = af_best(af, k, &lo);
+	hi = af->score[best][k];
+	return best + 2 < af->n &&
+	       af->score[af->n - 1][k] < AF_PAST_PEAK * hi &&
+	       af->score[af->n - 2][k] < AF_PAST_PEAK * hi;
+}
+
+/* A sweep is over: on to the fine one, or to the focus */
+static void af_sweep_done(struct app *a, gint64 now)
+{
+	struct af *af = &a->af;
+	unsigned int best;
+	double lo, hi, peak;
+	int k;
+
+	/* The coarse sweep picks the window, the fine one goes by it */
+	k = af->phase == AF_SWEEP ? af_window(af) : af->win;
+	/* Nothing stands out even in the largest: too plain, or too dark */
+	if (!af->n || k < 0) {
+		if (af->debug)
+			g_printerr("af: nothing sharp\n");
+		af_close(af, TRUE);
+		af_finish(a, "failed");
+		return;
+	}
+	best = af_best(af, k, &lo);
+	hi = af->score[best][k];
+	peak = af_peak(af, k, best);
+	if (af->debug)
+		g_printerr("af: %s sweep, window 1/%d: best %.0f (%.5f, softest %.5f), peak %.0f\n",
+			   af->phase == AF_SWEEP ? "coarse" : "fine",
+			   af_windows[k], af->pos[best], hi, lo, peak);
+
+	if (af->phase == AF_SWEEP) {
+		af->win = k;
+		af->peak = peak;
+		/* Back over the peak, finer: the other way round */
+		af_sweep(af, AF_FINE,
+			 CLAMP(peak + AF_FINE_SPAN, af->min, af->max),
+			 CLAMP(peak - AF_FINE_SPAN, af->min, af->max),
+			 AF_FINE_STEP, now);
+		return;
+	}
+
+	/* A flat fine sweep (the scene moved?): keep the coarse peak */
+	if (hi < AF_FINE_GAIN * lo)
+		peak = af->peak;
+	lens_move(af, CLAMP(lrint(peak), af->min, af->max), now);
+	if (af->debug)
+		g_printerr("af: focus at %ld\n", lrint(peak));
+	af_finish(a, "focused");
+}
+
+/*
+ * One frame, in the streaming thread with the lock held: first wait for
+ * the exposure to settle on the new point, then sweep.
+ */
+static void af_frame(struct app *a, const double *score, gint64 start)
+{
+	struct af *af = &a->af;
+	gint64 now = g_get_monotonic_time() * 1000;
+	gint64 exposure, b, e;
+	float gain = 0;
+	int us = 0;
+
+	if (start < 0)
+		start = now - 3 * af->period;	/* about how late frames come */
+	else if (af->last_start > 0 && start > af->last_start)
+		af->period = CLAMP(start - af->last_start, AF_PERIOD_MIN_NS,
+				   AF_PERIOD_MAX_NS);
+	af->last_start = start;
+
+	g_object_get(af->cam, "exposure-time", &us, "analogue-gain", &gain,
+		     NULL);
+	exposure = us > 0 ? us * 1000LL : af->period;
+
+	if (af->phase == AF_WAIT_AE) {
+		double v = us * (double)gain;
+
+		if (v > 0 && fabs(v - af->ae_last) <= AF_AE_SAME * af->ae_last)
+			af->ae_same++;
+		else
+			af->ae_same = 0;
+		af->ae_last = v;
+		if (af->ae_same >= AF_AE_FRAMES || now - af->ae_since > AF_AE_WAIT_NS) {
+			if (af->debug)
+				g_printerr("af: exposure %d us x %.2f after %lld ms\n",
+					   us, gain,
+					   (long long)(now - af->ae_since) / 1000000);
+			af_sweep(af, AF_SWEEP, af->min, af->max,
+				 AF_SWEEP_STEP, now);
+		}
+		return;
+	}
+
+	/* The rows of the point of interest are read out that much later */
+	e = start + a->poi_y * af->period;
+	b = e - exposure;
+	if (b >= af->settled && af->n < AF_MAX_SAMPLES) {
+		double pos = af_lens_at(af, b, e);
+
+		if (pos >= 0) {
+			af->pos[af->n] = pos;
+			memcpy(af->score[af->n++], score, sizeof(af->score[0]));
+			if (af->debug)
+				g_printerr("af: %s lens %.0f score %.5f %.5f %.5f\n",
+					   af->phase == AF_SWEEP ? "coarse" : "fine",
+					   pos, score[0], score[1], score[2]);
+		}
+	}
+
+	if (af->phase == AF_SWEEP && af_past_peak(af)) {
+		af_sweep_done(a, now);
+		return;
+	}
+	/* The sweep starts with a jump: hold there until it is measured */
+	if (!af->n && now < af->settled + AF_HOLD_NS)
+		return;
+	if (af->cur != af->target) {
+		int next = af->cur + af->step;
+
+		if ((af->step > 0 && next > af->target) ||
+		    (af->step < 0 && next < af->target))
+			next = af->target;
+		lens_move(af, next, now);
+		return;
+	}
+	/* At the end: done once a frame exposed after the last step came */
+	if (b >= af->move_t[af->moves - 1] + AF_LENS_LAG_NS ||
+	    af->n >= AF_MAX_SAMPLES || af->moves >= AF_MAX_MOVES)
+		af_sweep_done(a, now);
+}
+
+/* In the streaming thread: measure the frame and focus on */
+static GstPadProbeReturn look_probe(GstPad *pad, GstPadProbeInfo *info,
+				    gpointer data)
+{
+	struct app *a = data;
+	GstBuffer *buf = gst_pad_probe_info_get_buffer(info);
+	GstVideoFrame frame;
+	GstVideoInfo vi;
+	GstCaps *caps;
+	double score[AF_WINDOWS];
+	gboolean ok;
+	gint64 start;
+
+	if (!g_atomic_int_get(&a->measure))
+		return GST_PAD_PROBE_OK;
+
+	caps = gst_pad_get_current_caps(pad);
+	if (!caps)
+		return GST_PAD_PROBE_OK;
+	ok = gst_video_info_from_caps(&vi, caps);
+	gst_caps_unref(caps);
+	if (!ok || !gst_video_frame_map(&frame, &vi, buf, GST_MAP_READ))
+		return GST_PAD_PROBE_OK;
+	for (unsigned int k = 0; k < AF_WINDOWS; k++)
+		score[k] = sharpness(&frame, a->poi_x, a->poi_y, af_windows[k]);
+	gst_video_frame_unmap(&frame);
+	start = frame_start(pad, buf);
+
+	g_mutex_lock(&a->af.lock);
+	if (a->af.phase != AF_OFF)
+		af_frame(a, score, start);
+	g_mutex_unlock(&a->af.lock);
+
+	return GST_PAD_PROBE_OK;
+}
+
+static void watch_frames(struct app *a)
+{
+	GstElement *look = gst_bin_get_by_name(GST_BIN(a->pipeline), "look");
+	GstPad *pad = gst_element_get_static_pad(look, "src");
+
+	gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, look_probe, a, NULL);
+	gst_object_unref(pad);
+	gst_object_unref(look);
+}
+
+/* Focus on the point of interest, if the camera has a lens to move */
+static void af_start(struct app *a)
 {
 	const struct cam *c = &cams[a->cam];
-	char *src = source_desc(c, PREVIEW_W, PREVIEW_H);
+	struct af *af = &a->af;
+	struct v4l2_queryctrl q = { .id = V4L2_CID_FOCUS_ABSOLUTE };
+	struct v4l2_control cur = { .id = V4L2_CID_FOCUS_ABSOLUTE };
+	int fd;
+
+	set_marker(a, c->lens ? NULL : "focused");
+	if (!c->lens)
+		return;
+
+	fd = open_subdev(c->lens, O_RDWR);
+	if (fd < 0 || ioctl(fd, VIDIOC_QUERYCTRL, &q) ||
+	    ioctl(fd, VIDIOC_G_CTRL, &cur)) {
+		g_printerr("t510-camera: no lens to focus with\n");
+		if (fd >= 0)
+			close(fd);
+		set_marker(a, "failed");
+		return;
+	}
+
+	g_mutex_lock(&af->lock);
+	af->fd = fd;
+	af->cam = gst_bin_get_by_name(GST_BIN(a->pipeline), "cam");
+	af->debug = g_getenv("T510_CAMERA_DEBUG") != NULL;
+	af->min = q.minimum;
+	af->max = q.maximum;
+	af->start = af->cur = cur.value;
+	af->period = AF_PERIOD_DEFAULT_NS;
+	af->last_start = 0;
+	af->ae_since = g_get_monotonic_time() * 1000;
+	af->ae_last = 0;
+	af->ae_same = 0;
+	af->phase = AF_WAIT_AE;
+	g_mutex_unlock(&af->lock);
+
+	g_atomic_int_set(&a->measure, 1);
+}
+
+/*
+ * A tap on the preview: from the widget back into the camera's frame
+ * through the letterbox and the turn (the inverse of a turn or a flip is
+ * its transpose), then meter and focus there.
+ */
+static gboolean on_view_press(GtkWidget *w, GdkEventButton *ev, gpointer data)
+{
+	struct app *a = data;
+	const int *m = flips[preview_turn(a)].m;
+	gboolean across = m[0] == 0;	/* a quarter turn: width is height */
+	double vw = across ? PREVIEW_H : PREVIEW_W;
+	double vh = across ? PREVIEW_W : PREVIEW_H;
+	double ww = gtk_widget_get_allocated_width(w);
+	double wh = gtk_widget_get_allocated_height(w);
+	double scale = MIN(ww / vw, wh / vh);
+	double u = (ev->x - (ww - vw * scale) / 2) / (vw * scale) - 0.5;
+	double v = (ev->y - (wh - vh * scale) / 2) / (vh * scale) - 0.5;
+
+	if (ev->type != GDK_BUTTON_PRESS || ev->button != 1 || !a->pipeline ||
+	    (a->state != PREVIEW && a->state != RECORDING) ||
+	    fabs(u) > 0.5 || fabs(v) > 0.5)
+		return FALSE;
+
+	af_stop(a);
+	a->poi_x = m[0] * u + m[2] * v + 0.5;
+	a->poi_y = m[1] * u + m[3] * v + 0.5;
+
+	meter_poi(a);
+
+	gtk_widget_set_margin_start(a->marker,
+		CLAMP(ev->x - MARKER_SIZE / 2, 0, ww - MARKER_SIZE));
+	gtk_widget_set_margin_top(a->marker,
+		CLAMP(ev->y - MARKER_SIZE / 2, 0, wh - MARKER_SIZE));
+	gtk_widget_show(a->marker);
+
+	af_start(a);
+	return TRUE;
+}
+
+/* A new camera: back to metering the whole frame, the lens stays */
+static void clear_poi(struct app *a)
+{
+	af_stop(a);
+	a->poi_x = a->poi_y = -1;
+	gtk_widget_hide(a->marker);
+}
+
+static void start_preview(struct app *a)
+{
+	char *src = source_desc(a, PREVIEW_W, PREVIEW_H);
 	char *view = view_desc(a);
-	char *desc = g_strdup_printf("%s ! %s", src, view);
+	char *desc = g_strdup_printf("%s ! identity name=look ! %s", src, view);
 
 	set_status(a, NULL);
-	if (run_pipeline(a, desc, TRUE))
+	if (run_pipeline(a, desc, TRUE)) {
+		watch_frames(a);
 		a->state = PREVIEW;
+	}
 	update_buttons(a);
 
 	g_free(src);
@@ -449,32 +1114,10 @@ static gboolean sensor_exposure(const struct cam *c, int *exp_us, double *gain)
 	struct v4l2_subdev_format fmt = {
 		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
 	};
-	gboolean found = FALSE;
-	const char *node;
-	GDir *dir;
-	int fd = -1;
+	gboolean found;
+	int fd = open_subdev(c->sensor, O_RDONLY);
 
-	dir = g_dir_open("/sys/class/video4linux", 0, NULL);
-	while (dir && !found && (node = g_dir_read_name(dir))) {
-		char *path, *name = NULL;
-
-		if (!g_str_has_prefix(node, "v4l-subdev"))
-			continue;
-		path = g_strdup_printf("/sys/class/video4linux/%s/name", node);
-		if (g_file_get_contents(path, &name, NULL, NULL) &&
-		    g_str_has_prefix(name, c->sensor)) {
-			char *dev = g_strdup_printf("/dev/%s", node);
-
-			fd = open(dev, O_RDONLY);
-			found = fd >= 0;
-			g_free(dev);
-		}
-		g_free(name);
-		g_free(path);
-	}
-	if (dir)
-		g_dir_close(dir);
-	if (!found)
+	if (fd < 0)
 		return FALSE;
 
 	found = ioctl(fd, VIDIOC_G_EXT_CTRLS, &ctrls) == 0 &&
@@ -509,7 +1152,7 @@ static void take_photo(struct app *a)
 	g_free(a->last_file);
 	a->last_file = new_file_name("IMG", "jpg");
 
-	base = source_desc(c, c->still_w, c->still_h);
+	base = source_desc(a, c->still_w, c->still_h);
 	if (a->still_skip == STILL_SKIP_KNOWN) {
 		char *at = strstr(base, " ! ");
 
@@ -589,7 +1232,6 @@ static GstPadProbeReturn restamp(GstPad *pad, GstPadProbeInfo *info,
 
 static void start_recording(struct app *a)
 {
-	const struct cam *c = &cams[a->cam];
 	GstElementFactory *x264 = gst_element_factory_find("x264enc");
 	gboolean h264 = x264 != NULL;
 	char *src, *view, *desc;
@@ -611,9 +1253,9 @@ static void start_recording(struct app *a)
 		audio = "opusenc bitrate=96000";
 	}
 
-	src = source_desc(c, PREVIEW_W, PREVIEW_H);
+	src = source_desc(a, PREVIEW_W, PREVIEW_H);
 	view = view_desc(a);
-	desc = g_strdup_printf("%s ! tee name=t "
+	desc = g_strdup_printf("%s ! identity name=look ! tee name=t "
 			       "t. ! %s "
 			       "t. ! queue leaky=downstream max-size-buffers=1 ! "
 			       "videoconvert name=rconv ! "
@@ -636,6 +1278,7 @@ static void start_recording(struct app *a)
 				  a->pipeline, NULL);
 		gst_object_unref(pad);
 		gst_object_unref(conv);
+		watch_frames(a);
 		a->state = RECORDING;
 		a->rec_start = g_get_monotonic_time();
 		rec_tick(a);
@@ -681,6 +1324,7 @@ static void on_switch(GtkButton *button, gpointer data)
 	char *text;
 
 	a->cam = (a->cam + 1) % G_N_ELEMENTS(cams);
+	clear_poi(a);
 	stop_pipeline(a);
 	start_preview(a);
 	text = g_strdup_printf("%s camera", cams[a->cam].name);
@@ -730,7 +1374,10 @@ static const char css[] =
 	"  padding: 6px 12px; border-radius: 6px; margin: 12px; }"
 	"#shutter { min-width: 72px; min-height: 72px; border-radius: 36px;"
 	"  background: white; border: 4px solid #888; }"
-	"#shutter.recording { background: #d22; border-color: white; }";
+	"#shutter.recording { background: #d22; border-color: white; }"
+	"#marker { border: 2px solid rgba(255,255,255,0.8); border-radius: 4px; }"
+	"#marker.focused { border-color: #ffd400; }"
+	"#marker.failed { border-color: #d22; }";
 
 static GtkWidget *icon_button(const char *icon, const char *tip)
 {
@@ -744,7 +1391,7 @@ static void activate(GtkApplication *gapp, gpointer data)
 {
 	struct app *a = data;
 	GtkCssProvider *prov = gtk_css_provider_new();
-	GtkWidget *overlay, *box, *bar, *gallery, *mode_video, *modes;
+	GtkWidget *overlay, *box, *bar, *gallery, *mode_video, *modes, *taps;
 
 	if (a->window) {
 		gtk_window_present(GTK_WINDOW(a->window));
@@ -767,7 +1414,24 @@ static void activate(GtkApplication *gapp, gpointer data)
 	a->view_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_widget_set_name(a->view_box, "view");
 	gtk_widget_set_vexpand(a->view_box, TRUE);
-	gtk_container_add(GTK_CONTAINER(overlay), a->view_box);
+	/* The video widget has no window of its own: taps come here */
+	taps = gtk_event_box_new();
+	gtk_event_box_set_visible_window(GTK_EVENT_BOX(taps), FALSE);
+	gtk_widget_add_events(taps, GDK_BUTTON_PRESS_MASK);
+	g_signal_connect(taps, "button-press-event",
+			 G_CALLBACK(on_view_press), a);
+	gtk_container_add(GTK_CONTAINER(taps), a->view_box);
+	gtk_container_add(GTK_CONTAINER(overlay), taps);
+
+	a->marker = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+	gtk_widget_set_name(a->marker, "marker");
+	gtk_widget_set_size_request(a->marker, MARKER_SIZE, MARKER_SIZE);
+	gtk_widget_set_halign(a->marker, GTK_ALIGN_START);
+	gtk_widget_set_valign(a->marker, GTK_ALIGN_START);
+	gtk_widget_set_no_show_all(a->marker, TRUE);
+	gtk_overlay_add_overlay(GTK_OVERLAY(overlay), a->marker);
+	gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(overlay), a->marker,
+					     TRUE);
 
 	a->status = gtk_label_new(NULL);
 	gtk_widget_set_name(a->status, "status");
@@ -820,11 +1484,12 @@ static void activate(GtkApplication *gapp, gpointer data)
 
 int main(int argc, char **argv)
 {
-	struct app a = { 0 };
+	struct app a = { .poi_x = -1, .poi_y = -1, .af.fd = -1 };
 	GtkApplication *gapp;
 	int ret;
 
 	gst_init(&argc, &argv);
+	g_mutex_init(&a.af.lock);
 	gapp = gtk_application_new("org.t510.Camera", G_APPLICATION_DEFAULT_FLAGS);
 	g_signal_connect(gapp, "activate", G_CALLBACK(activate), &a);
 	ret = g_application_run(G_APPLICATION(gapp), argc, argv);
