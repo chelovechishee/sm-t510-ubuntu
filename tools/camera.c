@@ -17,6 +17,7 @@
 #include <gtk/gtk.h>
 #include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -31,28 +32,112 @@
 #define STILL_SKIP_AUTO		12
 #define STILL_TIMEOUT_S	20
 
+/* t510-rotate keeps the desktop's rotation here */
+#define ROTATION_STATE	"/var/lib/t510/rotation"
+
+/*
+ * The eight ways videoflip can turn a picture, as matrices on (x, y) with
+ * y pointing down: new = m * old.
+ */
+enum flip { FLIP_NONE, FLIP_90R, FLIP_180, FLIP_90L,
+	    FLIP_HORIZ, FLIP_VERT, FLIP_UL_LR, FLIP_UR_LL };
+
+static const struct {
+	const char *name;
+	int m[4];
+} flips[] = {
+	[FLIP_NONE]	= { "identity",	{  1,  0,  0,  1 } },
+	[FLIP_90R]	= { "90r",	{  0, -1,  1,  0 } },
+	[FLIP_180]	= { "180",	{ -1,  0,  0, -1 } },
+	[FLIP_90L]	= { "90l",	{  0,  1, -1,  0 } },
+	[FLIP_HORIZ]	= { "horiz",	{ -1,  0,  0,  1 } },
+	[FLIP_VERT]	= { "vert",	{  1,  0,  0, -1 } },
+	[FLIP_UL_LR]	= { "ul-lr",	{  0,  1,  1,  0 } },
+	[FLIP_UR_LL]	= { "ur-ll",	{  0, -1, -1,  0 } },
+};
+
+/* first a, then b */
+static enum flip flip_then(enum flip a, enum flip b)
+{
+	const int *x = flips[b].m, *y = flips[a].m;
+	int m[4] = {
+		x[0] * y[0] + x[1] * y[2], x[0] * y[1] + x[1] * y[3],
+		x[2] * y[0] + x[3] * y[2], x[2] * y[1] + x[3] * y[3],
+	};
+
+	for (unsigned int i = 0; i < G_N_ELEMENTS(flips); i++)
+		if (!memcmp(m, flips[i].m, sizeof(m)))
+			return i;
+	return FLIP_NONE;
+}
+
+/*
+ * glvideoflip has the diagonals the other way round than videoflip (GL's
+ * y axis points up); the turns are the same.
+ */
+static const char *gl_flip_name(enum flip f)
+{
+	if (f == FLIP_UL_LR)
+		return flips[FLIP_UR_LL].name;
+	if (f == FLIP_UR_LL)
+		return flips[FLIP_UL_LR].name;
+	return flips[f].name;
+}
+
 struct cam {
 	const char *id;		/* libcamera's name of the camera */
 	const char *sensor;	/* its V4L2 subdev name starts so */
 	const char *name;
 	int still_w, still_h;	/* the largest the software ISP gives */
 	/*
-	 * Both sensors are mounted turned: the pictures need a quarter turn
-	 * counterclockwise (DT rotation = 90). The front preview is mirrored,
-	 * as people expect from a selfie camera; its files are not. In
-	 * glvideoflip the diagonals are the other way round than in
-	 * videoflip (GL's y axis points up): ul-lr is the turn plus mirror.
+	 * Both sensors are mounted turned: on the desktop rotated upside
+	 * down (portrait-inverted, the USB port up) the pictures need a
+	 * quarter turn counterclockwise (DT rotation = 90). The front
+	 * preview is mirrored, as people expect from a selfie camera; its
+	 * files are not. Other desktop rotations add their own turn
+	 * (desktop_turn()).
 	 */
-	const char *preview_turn;
-	const char *file_turn;
+	enum flip preview_turn;
+	enum flip file_turn;
 };
 
 static const struct cam cams[] = {
 	{ "/base/soc@0/i2c@138b0000/camera@2d", "s5k4ha", "rear", 3248, 2436,
-	  "90l", "90l" },
+	  FLIP_90L, FLIP_90L },
 	{ "/base/soc@0/i2c@138a0000/camera@2d", "s5k5e9", "front", 2576, 1932,
-	  "ul-lr", "90l" },
+	  FLIP_UR_LL, FLIP_90L },
 };
+
+/*
+ * The turn to add for the way the desktop is rotated, against the
+ * portrait-inverted one the turns above are for. The pictures follow the
+ * desktop, not the accelerometer: what the screen shows upright is upright
+ * in the files too. X turns the desktop on the panel ("left" is a quarter
+ * turn counterclockwise), so the picture turns the other way.
+ */
+static enum flip desktop_turn(void)
+{
+	static const struct {
+		const char *name;
+		enum flip turn;
+	} turns[] = {
+		{ "portrait", FLIP_180 },		/* RandR normal */
+		{ "landscape-ccw", FLIP_90L },		/* RandR left */
+		{ "portrait-inverted", FLIP_NONE },	/* RandR inverted */
+		{ "landscape-cw", FLIP_90R },		/* RandR right */
+	};
+	enum flip turn = FLIP_180;	/* no state: t510-rotate says portrait */
+	char *state = NULL;
+
+	if (g_file_get_contents(ROTATION_STATE, &state, NULL, NULL)) {
+		g_strstrip(state);
+		for (unsigned int i = 0; i < G_N_ELEMENTS(turns); i++)
+			if (!strcmp(state, turns[i].name))
+				turn = turns[i].turn;
+	}
+	g_free(state);
+	return turn;
+}
 
 enum state { IDLE, PREVIEW, STILL, RECORDING, STOPPING };
 
@@ -67,6 +152,7 @@ struct app {
 	guint bus_watch;
 	enum state state;
 	unsigned int cam;
+	enum flip desktop;	/* desktop_turn(), read at the start */
 	unsigned int still_count;
 	unsigned int still_skip;
 	gint64 rec_start;
@@ -266,7 +352,17 @@ static char *source_desc(const struct cam *c, int w, int h)
 			       "video/x-raw,width=%d,height=%d", c->id, w, h);
 }
 
-static char *view_desc(const struct cam *c)
+static enum flip preview_turn(struct app *a)
+{
+	return flip_then(cams[a->cam].preview_turn, a->desktop);
+}
+
+static const char *file_turn(struct app *a)
+{
+	return flips[flip_then(cams[a->cam].file_turn, a->desktop)].name;
+}
+
+static char *view_desc(struct app *a)
 {
 	/*
 	 * libcamerasrc has only a few buffers: every branch keeps at most one
@@ -275,14 +371,15 @@ static char *view_desc(const struct cam *c)
 	return g_strdup_printf("queue leaky=downstream max-size-buffers=1 ! "
 			       "glupload ! glcolorconvert ! "
 			       "glvideoflip video-direction=%s ! "
-			       "glsinkbin name=out", c->preview_turn);
+			       "glsinkbin name=out",
+			       gl_flip_name(preview_turn(a)));
 }
 
 static void start_preview(struct app *a)
 {
 	const struct cam *c = &cams[a->cam];
 	char *src = source_desc(c, PREVIEW_W, PREVIEW_H);
-	char *view = view_desc(c);
+	char *view = view_desc(a);
 	char *desc = g_strdup_printf("%s ! %s", src, view);
 
 	set_status(a, NULL);
@@ -428,7 +525,7 @@ static void take_photo(struct app *a)
 	desc = g_strdup_printf("%s ! identity name=gate ! videoconvert ! "
 			       "videoflip video-direction=%s ! "
 			       "jpegenc quality=92 ! filesink location=\"%s\"",
-			       src, c->file_turn, a->last_file);
+			       src, file_turn(a), a->last_file);
 
 	a->state = STILL;
 	a->still_count = 0;
@@ -515,7 +612,7 @@ static void start_recording(struct app *a)
 	}
 
 	src = source_desc(c, PREVIEW_W, PREVIEW_H);
-	view = view_desc(c);
+	view = view_desc(a);
 	desc = g_strdup_printf("%s ! tee name=t "
 			       "t. ! %s "
 			       "t. ! queue leaky=downstream max-size-buffers=1 ! "
@@ -526,7 +623,7 @@ static void start_recording(struct app *a)
 			       "filesink location=\"%s\" "
 			       "pulsesrc ! audioconvert ! audioresample ! %s ! "
 			       "queue ! mux.",
-			       src, view, c->file_turn, video,
+			       src, view, file_turn(a), video,
 			       h264 ? "mp4mux" : "webmmux", a->last_file,
 			       audio);
 
@@ -716,6 +813,8 @@ static void activate(GtkApplication *gapp, gpointer data)
 	g_signal_connect(a->window, "destroy", G_CALLBACK(on_destroy), a);
 	gtk_widget_show_all(a->window);
 
+	/* Rotating the desktop restarts the session, and this program */
+	a->desktop = desktop_turn();
 	start_preview(a);
 }
 
