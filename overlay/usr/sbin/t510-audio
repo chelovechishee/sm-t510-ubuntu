@@ -22,12 +22,14 @@ SW_MICROPHONE_INSERT = 0x04
 EVIOCGSW = 0x8000451B | (8 << 16)
 
 # COD3035 ADC -> UAIF0 -> NSRC0 -> WDMA1 (hw:0,1). Android records with
-# MIC1 boost 1 + ADC 132 (+3 dB); boost 2 (20 dB, the top of its scale) and
-# the ADC at its +12 dB maximum give speech peaks around -10 dBFS. The rest
-# is software gain on the PipeWire source (migrate-user, 0.11.0).
+# MIC1 boost 1 + ADC 132 (+3 dB). Boost 3 is past the driver's dB scale
+# (0, 12, 20 dB) but works: the room noise comes out 1.7-2x (+5-6 dB) above
+# boost 2, about 26 dB, and with the ADC at its +12 dB maximum speech peaks
+# reach about -5 dBFS. The rest is software gain on the PipeWire source
+# (migrate-user, 0.11.0).
 CAPTURE = [
     ("ABOX NSRC0", "UAIF0"),
-    ("MIC1 Boost Volume", "2"),
+    ("MIC1 Boost Volume", "3"),
     ("MIC3 Boost Volume", "1"),
     ("ADC Left Gain", "150"),
     ("ADC Right Gain", "150"),
