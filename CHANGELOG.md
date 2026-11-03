@@ -10,6 +10,17 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.12.3 — front camera photos upright (build #94)
+
+- Camera: photos and videos of the front camera came out upside down
+  with the desktop in portrait (either way up). They are now upright,
+  the preview without its mirror.
+- Camera: with the desktop in landscape the front preview was upside
+  down (its files were right); it is upright now. A tap on the front
+  preview meters at the point tapped, not at the opposite one.
+
+The kernel is unchanged (build #94).
+
 ## 0.12.2 — Enhance for photos (build #94)
 
 - Camera: an Enhance box under Photo/Video. With it on, each photo gets a
