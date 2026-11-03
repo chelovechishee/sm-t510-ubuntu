@@ -113,19 +113,6 @@ static enum flip flip_then(enum flip a, enum flip b)
 	return FLIP_NONE;
 }
 
-/*
- * glvideoflip has the diagonals the other way round than videoflip (GL's
- * y axis points up); the turns are the same.
- */
-static const char *gl_flip_name(enum flip f)
-{
-	if (f == FLIP_UL_LR)
-		return flips[FLIP_UR_LL].name;
-	if (f == FLIP_UR_LL)
-		return flips[FLIP_UL_LR].name;
-	return flips[f].name;
-}
-
 struct cam {
 	const char *id;		/* libcamera's name of the camera */
 	const char *sensor;	/* its V4L2 subdev name starts so */
@@ -135,21 +122,21 @@ struct cam {
 	int still_w, still_h;	/* the largest the software ISP gives */
 	/*
 	 * Both sensors are mounted turned: on the desktop rotated upside
-	 * down (portrait-inverted, the USB port up) the pictures need a
-	 * quarter turn counterclockwise (DT rotation = 90). The front
-	 * preview is mirrored, as people expect from a selfie camera; its
-	 * files are not. Other desktop rotations add their own turn
+	 * down (portrait-inverted, the USB port up) the rear pictures need
+	 * a quarter turn counterclockwise, the front ones clockwise. The
+	 * front preview is mirrored, as people expect from a selfie camera;
+	 * its files are not. Other desktop rotations add their own turn
 	 * (desktop_turn()).
 	 */
-	enum flip preview_turn;
-	enum flip file_turn;
+	enum flip turn;
+	gboolean mirror;
 };
 
 static const struct cam cams[] = {
 	{ "/base/soc@0/i2c@138b0000/camera@2d", "s5k4ha", "dw9807", "rear",
-	  3264, 2448, 3248, 2436, FLIP_90L, FLIP_90L },
+	  3264, 2448, 3248, 2436, FLIP_90L, FALSE },
 	{ "/base/soc@0/i2c@138a0000/camera@2d", "s5k5e9", NULL, "front",
-	  2592, 1944, 2576, 1932, FLIP_UR_LL, FLIP_90L },
+	  2592, 1944, 2576, 1932, FLIP_90R, TRUE },
 };
 
 /*
@@ -466,12 +453,22 @@ static char *source_desc(struct app *a, int w, int h)
 
 static enum flip preview_turn(struct app *a)
 {
-	return flip_then(cams[a->cam].preview_turn, a->desktop);
+	const struct cam *c = &cams[a->cam];
+
+	return flip_then(c->mirror ? flip_then(c->turn, FLIP_HORIZ) : c->turn,
+			 a->desktop);
 }
 
+/*
+ * The files are the preview without its mirror, taken on the screen: the
+ * front camera faces the other way, so a quarter turn of the tablet turns
+ * its own picture the other way round than the desktop.
+ */
 static const char *file_turn(struct app *a)
 {
-	return flips[flip_then(cams[a->cam].file_turn, a->desktop)].name;
+	enum flip f = preview_turn(a);
+
+	return flips[cams[a->cam].mirror ? flip_then(f, FLIP_HORIZ) : f].name;
 }
 
 static char *view_desc(struct app *a)
@@ -484,7 +481,7 @@ static char *view_desc(struct app *a)
 			       "glupload ! glcolorconvert ! "
 			       "glvideoflip video-direction=%s ! "
 			       "glsinkbin name=out",
-			       gl_flip_name(preview_turn(a)));
+			       flips[preview_turn(a)].name);
 }
 
 /* The V4L2 subdev whose name starts with prefix, opened, or -1 */
