@@ -1,5 +1,5 @@
 [Match]
-Name=usb* rndis*
+Name=usb*
 
 [Network]
 Address=172.16.42.1/24

@@ -48,6 +48,9 @@ MOTD="00-header 10-help-text 50-motd-news 60-unminimize 85-fwupd
 # blueman's applet (tray icon, pairing agent) starts again now that there is
 # Bluetooth: 0.7.0-0.9.0 hid it with this file
 dpkg-maintscript-helper rm_conffile /etc/xdg/xdg-xfce/autostart/blueman.desktop 0.10.0~ t510-support -- "$@"
+# udev's v4l_id runs again: the mask was for the cameras of Samsung's 4.4
+# kernel, which crashed on it
+dpkg-maintscript-helper rm_conffile /etc/udev/rules.d/60-persistent-v4l.rules 0.13.0~ t510-support -- "$@"
 
 case $1 in
 install | upgrade)

@@ -1,2 +1,2 @@
 # SM-T510 hardware keys (power, volume) readable by the seat user for t510-powerkey
-SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="gpio_keys|gpio-keys", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="gpio-keys", TAG+="uaccess"

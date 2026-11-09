@@ -3,9 +3,8 @@
 set -e
 
 UNITS="usb-gadget.service resize-rootfs.service boot-ok.service
-	t510-display.service t510-firmware.service t510-firmware-fetch.service
-	t510-audio.service t510-no-lmk.service zram-manual.service
-	t510-chrome.service t510-update.service"
+	t510-firmware.service t510-firmware-fetch.service t510-audio.service
+	zram-manual.service t510-chrome.service t510-update.service"
 
 undivert() {
 	dpkg-divert --package t510-support --rename --remove "$1" >/dev/null
@@ -14,6 +13,9 @@ undivert() {
 # blueman's applet (tray icon, pairing agent) starts again now that there is
 # Bluetooth: 0.7.0-0.9.0 hid it with this file
 dpkg-maintscript-helper rm_conffile /etc/xdg/xdg-xfce/autostart/blueman.desktop 0.10.0~ t510-support -- "$@"
+# udev's v4l_id runs again: the mask was for the cameras of Samsung's 4.4
+# kernel, which crashed on it
+dpkg-maintscript-helper rm_conffile /etc/udev/rules.d/60-persistent-v4l.rules 0.13.0~ t510-support -- "$@"
 
 case $1 in
 remove)

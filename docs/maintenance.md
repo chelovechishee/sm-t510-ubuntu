@@ -39,7 +39,7 @@ version after it that apt can bring.
 
 | Package | Contents | Version |
 |---|---|---|
-| `t510-support` | `overlay/` (services, udev rules, Xorg, PipeWire, Xfce defaults, apt pins) and the programs of `tools/` (`longpress`, `fbtool`, `nograb.so`, `noblank.so`, `t510-camera`) | the project version, `0.7.1` |
+| `t510-support` | `overlay/` (services, udev rules, Xorg, PipeWire, Xfce defaults, apt pins) and the programs of `tools/` (`longpress`, `nograb.so`, `noblank.so`, `t510-camera`) | the project version, `0.7.1` |
 | `t510-kernel` | the boot image (`boot-mainline.img`: kernel, DTB, initramfs); its install script writes it to BOOT (`mmcblk0p15`) | kernel version + build, `7.3.0+66` |
 | `t510-archive-keyring` | the key the repository is signed with and its apt source | changes only with the key |
 | `libcamera0.7`, `libcamera-ipa` | Ubuntu's libcamera with `camera/libcamera-0.7.0-t510.patch` (the CSIS in the simple pipeline, the sensors, software ISP fixes), built by `camera/build-libcamera.sh` | Ubuntu's version + `+t510.N`, `0.7.0-1ubuntu2+t510.6` |

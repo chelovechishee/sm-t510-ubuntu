@@ -13,7 +13,7 @@ mount -t devtmpfs devtmpfs /dev
 log() { echo "t510-initramfs: $*" > /dev/kmsg; }
 log "start"
 
-# USB gadget: RNDIS (rndis0 on 4.4, usb0 on mainline) + ACM (ttyGS0)
+# USB gadget: RNDIS (usb0) + ACM (ttyGS0)
 gadget_up() {
 	CFS=/sys/kernel/config
 	G=$CFS/usb_gadget/g1

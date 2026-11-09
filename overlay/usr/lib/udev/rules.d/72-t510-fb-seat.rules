@@ -1,4 +1,5 @@
-# Mainline kernel: the display is simplefb (/dev/fb0) without DRM. Since
-# systemd 258 71-seat.rules makes an fbdev a seat master only with nomodeset,
-# so logind never marks seat0 graphical and LightDM starts no X server.
+# Without the KMS driver (exynos7885-decon did not bind) the display is
+# simplefb (/dev/fb0) alone. Since systemd 258 71-seat.rules makes an fbdev a
+# seat master only with nomodeset, so logind would never mark seat0 graphical
+# and LightDM would start no X server for the fbdev fallback (t510-xorg).
 SUBSYSTEM=="graphics", KERNEL=="fb0", TAG+="master-of-seat"

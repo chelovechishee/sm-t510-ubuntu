@@ -3,11 +3,10 @@
 | Problem | Solution |
 |---|---|
 | desktop on the GPU | `t510-xorg` (LightDM `xserver-command`): modesetting + glamor on the Mali-G71 (Panfrost, `/etc/X11/t510/kms.conf`), fbdev without KMS (`fbdev.conf`); `/etc/X11/t510/force-fbdev` forces fbdev |
-| on fbdev, decon shows no buffer without a pan | `t510-display-setup` → `fbtool unblank` (without KMS only: under KMS the pan would replace the scanout buffer) |
-| udev `v4l_id` crashes the kernel on the cameras | `60-persistent-v4l.rules` masked |
 | journald loops on charger uevents | `ReadKMsg=no` |
 | SCSC Wi-Fi looks for its firmware only when `/system` exists | an empty `/system`; the firmware is `/vendor/etc/wifi` on the Android VENDOR partition (p26), mounted read-only |
-| USB NCM gets no carrier | RNDIS + fixed MAC addresses |
+| the PC must know the tablet's USB network again on every boot | RNDIS with fixed MAC addresses (`usb-gadget.sh`); `install.sh` and the rescue mode use the same |
+| a PC without a system needs an installer, and there is no flash drive | `t510-usb-disk`: the tablet shows an ISO or a disk image to the PC as a USB disk (a second gadget in place of the network one); `t510-powerkey` does not suspend meanwhile |
 | mousetweaks is broken | our `longpress` (right click by holding a finger) |
 | a double tap on a desktop icon does nothing: GTK3 makes no double click out of touches (XI2 touch), and two taps fit in 0.15 s and 26 px | icons open with one tap (`xfdesktop` single-click); `longpress` sends the right click when the hold time is up, while the finger is still down (it used to come on release, after the left click, and the icon had already opened); xsettings drag threshold `/Net/DndDragThreshold` 32 |
 | Onboard crashes in its XInput handler (Python 3.12) | `input-event-source='GTK'` |
@@ -26,7 +25,6 @@
 | fixes come from the apt repository, an image only with large versions: a new install would start with the image's packages | `t510-update.service`: the first time online, the newest `t510-support` and `t510-kernel` from the repository, once (`/var/lib/t510/updated`) |
 | `resize2fs` on the mounted root: "Device or resource busy" (the kernel has `CONFIG_BLK_DEV_WRITE_MOUNTED` off) | `t510-resize-rootfs` grows `/` with ext4's resize ioctl (`resize-rootfs.service`, first boot) |
 | panel launchers given as bare names of `NoDisplay` entries are dropped (xfce4-panel looks them up among visible menu items) | `default.xml` names our launchers by full path |
-| Samsung's battery driver: some attributes take up to a minute over i2c | do not read `/sys/class/power_supply/battery/*` in a loop — it blocks the bus and upower |
 | left/right speakers depend on the rotation | `t510-rotate` rewrites the channel order in `t510-audio.conf` |
 | Android partitions show up on the desktop | `80-t510-udisks.rules`: `UDISKS_IGNORE` for `mmcblk0*` (the microSD card is shown) |
 

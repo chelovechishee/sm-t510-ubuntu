@@ -301,7 +301,7 @@ What the version numbers mean and how updates are made:
   tablet: rotation, keyboard, hardware name);
   `scripts/` — packages, the apt repository, building and seeding the system
   image, firmware, helpers.
-- `tools/` — our programs (`longpress.c`, `fbtool.c`, `nograb.c`, `noblank.c`) and
+- `tools/` — our programs (`longpress.c`, `nograb.c`, `noblank.c`, `camera.c`) and
   development tools (SPEEDY, ACPM, DSI, ASoC); `tools/gpu/` — GLES tests.
 - `gpu/` — the Mesa patch for derivatives on the G71 and a Mesa build to test it.
 

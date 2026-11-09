@@ -47,8 +47,8 @@ The 4.4 registers were read with the `tools/usbregs` module; the stage 1 init
 prints the same registers on screen through `devmem` when it fails.
 
 The initramfs (`initramfs/init`) takes the RNDIS interface name from configfs
-(`rndis0` on 4.4, `usb0` on mainline), and Ubuntu's network (`50-usb.network`)
-matches both.
+(`usb0`); Ubuntu's network for it is `50-usb.network` (systemd-networkd, DHCP
+server).
 
 A running mainline system can rewrite its kernel with `dd` to `p15`.
 
@@ -101,10 +101,7 @@ than `stmfts`', hence our own `drivers/input/touchscreen/stm-fts1ba90a.c`
 wait for READY, ID `39 36`, touch type, scan `A0 00 01` with an echo, chip
 interrupts `A4 01 01`; 8-byte events (`60` — one, `61` — the rest). The chip
 firmware is not touched. Rotation: `t510-rotate` matches the touchscreen with
-`MatchIsTouchscreen`, not by the 4.4 name `sec_touchscreen`.
-
-On simplefb `fbtool unblank` is not needed (and fails): `t510-display-setup`
-and `t510-display.service` skip it, otherwise LightDM restarts X in a loop.
+`MatchIsTouchscreen`.
 
 ## Battery and clock
 
@@ -187,7 +184,7 @@ mainline has no audio channel at all — the codec driver alone is useless (see
   Prototype: `tools/dsi-cmd.py`.
 - Power key: `t510-powerkey` turns the backlight off and on through `bl_power`
   (video group permissions — `70-t510-backlight.rules`); the key device is
-  called `gpio-keys` on mainline (`gpio_keys` on 4.4).
+  called `gpio-keys`.
 - By default the boot shows the kernel and systemd log on screen. `SPLASH=1
   mainline/make-boot.sh` — `quiet loglevel=3 splash`: with
   `FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER` the S-Boot logo stays until Plymouth
@@ -499,7 +496,7 @@ ABOX DSP, whose Bluetooth side is not ported.
   any of the four from the sensor (lying flat: no change), `portrait` and
   `landscape` pick only the side, upside down selects `portrait-inverted`, `t510-rotate status` prints the position. A
   rotation hint icon for the tray (`t510-rotate-hint`) exists but is off; its
-  autostart file is in `/usr/local/share/t510/`.
+  autostart file is in `/usr/share/t510/`.
 - **Applications hanging for minutes** — PipeWire crashed in a loop: the
   fixed nodes in `/etc/pipewire/pipewire.conf.d/t510-audio*.conf` point at
   `hw:0,0`/`hw:0,9` of ABOX, and when there is no card the portal

@@ -40,7 +40,7 @@ if [ "$CHECK" = 1 ]; then
 	for p in t510-support_"$VERSION"_arm64 t510-kernel_*_arm64 t510-archive-keyring_*_all; do
 		ls "$O"/$p.deb >/dev/null 2>&1 || die "no $p.deb in $O: run scripts/make-debs.sh"
 	done
-	n=$(find "$T/overlay" "$T/packaging" "$T/tools/fbtool.c" "$T/tools/longpress.c" \
+	n=$(find "$T/overlay" "$T/packaging" "$T/tools/longpress.c" \
 		"$T/tools/nograb.c" "$T/tools/noblank.c" "$T/tools/camera.c" \
 		"$T/tools/camera-enhance.c" "$T/tools/camera-enhance.h" "$BOOT" -type f -newer "$(ls -tr "$O"/t510-*.deb | head -n1)" -print -quit)
 	[ -z "$n" ] || die "the packages in $O are older than ${n#"$T"/}: run scripts/make-debs.sh"
@@ -86,7 +86,6 @@ S=$W/t510-support
 mkdir -p "$S/usr/libexec/t510"
 cp -a "$T/overlay/." "$S/"
 find "$S" -name __pycache__ -prune -exec rm -rf {} +
-"$CC" -O2 -o "$S/usr/libexec/t510/fbtool" "$T/tools/fbtool.c"
 "$CC" -O2 -o "$S/usr/libexec/t510/longpress" "$T/tools/longpress.c" -lX11 -lXi -lXtst -lXfixes -lXext -lm ||
 	die "longpress does not link: sudo apt install libx11-dev:arm64 libxi-dev:arm64 libxtst-dev:arm64 libxfixes-dev:arm64 libxext-dev:arm64"
 "$CC" -O2 -shared -fPIC -o "$S/usr/libexec/t510/nograb.so" "$T/tools/nograb.c"
@@ -98,7 +97,7 @@ GTKGST=$(PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgco
 "$CC" -O2 -I/usr/include/onnxruntime -o "$S/usr/bin/t510-camera" \
 	"$T/tools/camera.c" "$T/tools/camera-enhance.c" $GTKGST -ldl -lm ||
 	die "t510-camera does not build: sudo apt install libgtk-3-dev:arm64 libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64 libonnxruntime-dev:arm64"
-aarch64-linux-gnu-strip "$S"/usr/libexec/t510/{fbtool,longpress,nograb.so,noblank.so} "$S/usr/bin/t510-camera"
+aarch64-linux-gnu-strip "$S"/usr/libexec/t510/{longpress,nograb.so,noblank.so} "$S/usr/bin/t510-camera"
 chmod 644 "$S"/usr/libexec/t510/{nograb,noblank}.so
 chmod 440 "$S/etc/sudoers.d/t510-rotate"
 mkdir -p "$S/DEBIAN"

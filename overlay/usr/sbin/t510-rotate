@@ -121,10 +121,10 @@ def write_configs(name):
     os.makedirs(os.path.dirname(KMS_CONF), exist_ok=True)
     with open(FBDEV_CONF, "w") as f:
         f.write(
-            "# SM-T510 fallback: Samsung decon framebuffer, plain fbdev with shadow fb\n"
+            "# SM-T510 fallback without KMS: plain fbdev with shadow fb\n"
             "# Written by t510-rotate (%s)\n"
             'Section "Device"\n'
-            '\tIdentifier "decon"\n'
+            '\tIdentifier "t510-fbdev"\n'
             '\tDriver "fbdev"\n'
             '\tOption "fbdev" "/dev/fb0"\n'
             '\tOption "ShadowFB" "on"\n'
@@ -157,7 +157,7 @@ def write_configs(name):
     with open(AUDIO_CONF, "w") as f:
         f.write(
             "# SM-T510: ABOX PCMs are not auto-probed (the DSP firmware crashes on odd\n"
-            "# formats, see /etc/wireplumber/main.lua.d/51-t510.lua). One fixed-format sink\n"
+            "# formats, see /etc/wireplumber/wireplumber.conf.d/51-t510.conf). One fixed-format sink\n"
             "# on RDMA0; t510-audio.service routes it to the speakers or the headphones.\n"
             "# Channel order written by t510-rotate (%s).\n"
             "context.objects = [\n"
@@ -177,7 +177,7 @@ def write_configs(name):
             "            priority.session       = 1000\n"
             "            priority.driver        = 1000\n"
             "        }\n"
-            "        # no ABOX card on the mainline kernel yet: keep PipeWire running\n"
+            "        # keep PipeWire running when ABOX is off (snd_soc_abox.enable=0)\n"
             "        flags = [ nofail ]\n"
             "    }\n"
             "]\n" % (name, CHANNELS[name]))

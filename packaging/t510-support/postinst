@@ -5,16 +5,25 @@ set -e
 # on the first install, and on upgrades the units that come new; a unit its
 # owner disabled stays off (deb-systemd-helper keeps that state)
 UNITS="usb-gadget.service resize-rootfs.service boot-ok.service
-	t510-display.service t510-firmware.service t510-firmware-fetch.service
-	t510-audio.service t510-no-lmk.service zram-manual.service
-	t510-chrome.service t510-update.service"
+	t510-firmware.service t510-firmware-fetch.service t510-audio.service
+	zram-manual.service t510-chrome.service t510-update.service"
+# units for Samsung's 4.4 kernel (its framebuffer and low-memory killer),
+# in the package up to 0.12.3: the links that enabled them go with them
+GONE="t510-display.service t510-no-lmk.service"
 
 # blueman's applet (tray icon, pairing agent) starts again now that there is
 # Bluetooth: 0.7.0-0.9.0 hid it with this file
 dpkg-maintscript-helper rm_conffile /etc/xdg/xdg-xfce/autostart/blueman.desktop 0.10.0~ t510-support -- "$@"
+# udev's v4l_id runs again: the mask was for the cameras of Samsung's 4.4
+# kernel, which crashed on it
+dpkg-maintscript-helper rm_conffile /etc/udev/rules.d/60-persistent-v4l.rules 0.13.0~ t510-support -- "$@"
 
 case $1 in
 configure | abort-upgrade | abort-deconfigure | abort-remove)
+	for u in $GONE; do
+		deb-systemd-helper purge "$u" >/dev/null 2>&1 || true
+		find /etc/systemd/system -type l -name "$u" -delete 2>/dev/null || true
+	done
 	for u in $UNITS; do
 		deb-systemd-helper unmask "$u" >/dev/null || true
 		if deb-systemd-helper --quiet was-enabled "$u"; then

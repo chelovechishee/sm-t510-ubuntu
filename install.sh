@@ -246,7 +246,8 @@ if [ "$OWN_IMAGE" = 1 ]; then
 	fi
 	stale "$IMAGE" "$T/overlay" "$T/image" "$T/packaging" \
 		"$T/scripts/image-packages.txt" "$T/scripts/trim-services.sh" \
-		"$T/tools/fbtool.c" "$T/tools/longpress.c" "$T/tools/nograb.c"
+		"$T/tools/longpress.c" "$T/tools/nograb.c" "$T/tools/noblank.c" \
+		"$T/tools/camera.c" "$T/tools/camera-enhance.c" "$T/tools/camera-enhance.h"
 fi
 size=$(zstd -lv "$IMAGE" 2>/dev/null | sed -n 's/.*Decompressed Size:.*(\([0-9]*\) B).*/\1/p')
 free=$(df --output=avail -B1 "$W" | tail -n1)
