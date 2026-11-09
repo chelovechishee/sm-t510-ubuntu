@@ -2,28 +2,32 @@
 # CPU and GPU temperature for the XFCE panel (Generic Monitor plugin):
 # the cpu-thermal and gpu-thermal zones (Exynos 7885 TMU). Orange from the
 # 75 C throttling point, red from 90 C.
+# The panel runs this every 3 s: shell builtins only, no process is started
+# (with cat and command substitutions it was 60 ms of CPU each time).
+
+# zone <type>: its temperature in $temp, "?" without the zone
 zone() {
+	temp="?"
 	for z in /sys/class/thermal/thermal_zone*; do
-		[ "$(cat "$z/type" 2>/dev/null)" = "$1" ] || continue
-		echo $(($(cat "$z/temp") / 1000))
+		read -r type < "$z/type" || continue
+		[ "$type" = "$1" ] || continue
+		read -r milli < "$z/temp" && temp=$((milli / 1000))
 		return
-	done
-	echo "?"
+	done 2>/dev/null
 }
 
+# paint <temperature>: the panel's text for it in $text
 paint() {
-	case $1 in
-	\?) echo "$1" ;;
-	*) if [ "$1" -ge 90 ]; then echo "<span foreground='#e53935'>$1°</span>"
-	   elif [ "$1" -ge 75 ]; then echo "<span foreground='#fb8c00'>$1°</span>"
-	   else echo "$1°"; fi ;;
-	esac
+	if [ "$1" = "?" ]; then text=$1
+	elif [ "$1" -ge 90 ]; then text="<span foreground='#e53935'>$1°</span>"
+	elif [ "$1" -ge 75 ]; then text="<span foreground='#fb8c00'>$1°</span>"
+	else text="$1°"; fi
 }
 
-cpu=$(zone cpu-thermal)
-gpu=$(zone gpu-thermal)
-echo "<txt>CPU $(paint "$cpu")
-GPU $(paint "$gpu")</txt>"
+zone cpu-thermal; cpu=$temp; paint "$cpu"; cpu_text=$text
+zone gpu-thermal; gpu=$temp; paint "$gpu"; gpu_text=$text
+echo "<txt>CPU $cpu_text
+GPU $gpu_text</txt>"
 echo "<tool>CPU: $cpu °C
 GPU: $gpu °C
 Throttling from 75 °C</tool>"
