@@ -133,11 +133,12 @@ CONFIG_INET=y
 CONFIG_PACKET=y
 CONFIG_NETDEVICES=y
 
-# Debug: busybox devmem for register dumps from init (bring-up only)
+# Debug: /dev/mem for register dumps (busybox devmem in the bring-up init,
+# tools/acpm-probe.py, tools/dsi-cmd.py)
 CONFIG_DEVMEM=y
 CONFIG_STRICT_DEVMEM=n
 
-# Ubuntu userspace (systemd 255 now, 259 for 26.04: cgroup v2 only)
+# Ubuntu userspace (systemd 259: cgroup v2 only)
 CONFIG_CGROUPS=y
 CONFIG_MEMCG=y
 CONFIG_BLK_CGROUP=y
@@ -204,8 +205,8 @@ CONFIG_REGULATOR_FIXED_VOLTAGE=y
 CONFIG_INPUT_TOUCHSCREEN=y
 CONFIG_TOUCHSCREEN_STM_FTS1BA90A=y
 
-# Phase 2: battery fuel gauge (S2MU005 on i2c_0); the S2MU005 charger/MUIC
-# stay off for now: they switch USB modes and the port is behind a CCIC
+# Phase 2: battery fuel gauge (S2MU005 on i2c_0); its charger is
+# CONFIG_CHARGER_S2M below
 CONFIG_POWER_SUPPLY=y
 CONFIG_BATTERY_S2MU005=y
 
@@ -275,7 +276,7 @@ CONFIG_SCSC_WLAN_SG=y
 CONFIG_SCSC_WLAN_PSCHED_AMSDU=y
 CONFIG_SCSC_WLAN_HIP_SUPPORT_SCATTER_GATHER_API=y
 
-# Accelerometer ST LIS2DS12 on USI2 HSI2C1 (screen rotation hint)
+# Accelerometer ST LIS2DS12 on USI2 HSI2C1 (screen rotation: t510-rotate)
 CONFIG_EXYNOS_USI=y
 CONFIG_I2C_EXYNOS5=y
 CONFIG_IIO=y
@@ -284,7 +285,8 @@ CONFIG_IIO_TRIGGERED_BUFFER=y
 CONFIG_IIO_ST_ACCEL_3AXIS=y
 CONFIG_IIO_ST_ACCEL_I2C_3AXIS=y
 
-# Sound: Samsung ABOX (work in progress); ABOX powers its DSP from runtime PM
+# Sound: Samsung ABOX (it powers its DSP from runtime PM), the board's card
+# with the COD3035X codec, the TFA9896 speaker amplifiers
 CONFIG_PM=y
 CONFIG_SOUND=y
 CONFIG_SND=y

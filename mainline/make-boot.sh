@@ -5,11 +5,12 @@
 # S-Boot always places at 0x89000000.
 # Usage: [SPLASH=1] [FB_MARK=1] [INSTALL=1] mainline/make-boot.sh [initramfs dir]   (default: initramfs-phase0)
 # INSTALL=1: boot-install.img, whose initramfs only waits on USB for install.sh
+# KERNEL_SRC=/path: another kernel tree than src/linux-7.3
 set -euo pipefail
 
 M=$(cd "$(dirname "$0")" && pwd)
 T=$(dirname "$M")
-K=$T/src/linux-7.3
+K=${KERNEL_SRC:-$T/src/linux-7.3}
 O=$M/out
 I=$O/initramfs
 SRC=${1:-$M/initramfs-phase0}
