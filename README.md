@@ -52,7 +52,7 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 | Wi-Fi | Samsung SCSC (ported Samsung driver), 2.4 and 5 GHz, NetworkManager |
 | Sound | speakers: ABOX + 2×TFA9896, PipeWire, volume keys; built-in microphone (COD3035 codec, own port) |
 | Power | CPU DVFS through ACPM, cpuidle (C2) on all 8 cores, temperatures and throttling |
-| Battery | charge level (S2MU005), charging at stock currents by the kernel driver, set again for every cable (asleep too) |
+| Battery | charge level (S2MU005), charging at stock currents by the kernel driver, set again for every cable (asleep too); a charging screen with the charge in per cent while the tablet is off |
 | USB | USB-C host and device by the S2MM005 controller: flash drives, keyboards, mice, network adapters, sound cards, webcams, phones; the USB network and console to a PC, or a USB disk for it (`t510-usb-disk`) |
 | Bluetooth | Samsung SCSC (ported Samsung service, own BlueZ driver), BlueZ + blueman: pairing, BLE, music from a phone to the speakers (A2DP; tried with an iPhone) |
 | Cameras | rear 8 MP (S5K4HA) and front 5 MP (S5K5E9): own drivers for the receivers (CSIS) and sensors, libcamera's software ISP; rear autofocus on a tap; the Camera program for photos and videos, other programs through PipeWire |
@@ -139,9 +139,11 @@ temperatures. `touch ~/.hushlogin` hides it.
 
 - **Boot.** S-Boot (Samsung's bootloader) starts not the kernel from the BOOT
   partition but [minimal_sboot_wrapper](https://github.com/VDavid003/minimal_sboot_wrapper),
-  which hands over to the 7.3 kernel with its own DTB and command line. The
-  initramfs (`initramfs/init`) mounts Ubuntu from `userdata`, or, if the
-  previous boot failed, brings up a rescue shell over USB.
+  which hands over to the 7.3 kernel with its own DTB and command line (and
+  S-Boot's charging mode). The initramfs (`initramfs/init`) mounts Ubuntu
+  from `userdata`, or, if the previous boot failed, brings up a rescue shell
+  over USB; when a charger turned the tablet on, it shows the charging screen
+  first.
 - **Kernel.** Linux 7.3 + `mainline/patches/` (the tablet's DT, USB, touch,
   SPEEDY/PMIC, ACPM, Wi-Fi, sound, display, cpuidle, charging). Details and the
   pitfalls found on the way: [mainline/README.md](mainline/README.md).
@@ -300,14 +302,15 @@ What the version numbers mean and how updates are made:
 - `mainline/` — kernel patches, config (`configs/t510.fragment`),
   `build-kernel.sh`, `make-boot.sh`, `export-patches.sh`, the debug initramfs
   of bring-up stages 0/1.
-- `initramfs/init` — boots Ubuntu, rescue mode.
+- `initramfs/init` — boots Ubuntu, rescue mode, the charging screen.
 - `overlay/` — the files of the package `t510-support` (services, udev rules,
   Xfce defaults); `packaging/` — the packages' control files and install
   scripts; `image/` — files only the system image gets (they change on the
   tablet: rotation, keyboard, hardware name);
   `scripts/` — packages, the apt repository, building and seeding the system
   image, firmware, helpers.
-- `tools/` — our programs (`longpress.c`, `nograb.c`, `noblank.c`, `camera.c`) and
+- `tools/` — our programs (`longpress.c`, `nograb.c`, `noblank.c`, `camera.c`,
+  `charger.c` for the initramfs) and
   development tools (SPEEDY, ACPM, DSI, ASoC); `tools/gpu/` — GLES tests.
 - `gpu/` — the Mesa patch for derivatives on the G71 and a Mesa build to test it.
 

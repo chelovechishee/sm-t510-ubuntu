@@ -10,6 +10,70 @@ Versions are x.y.z: x a very large update (a new Ubuntu base, a reinstall),
 y a large feature update, z security and bug fixes
 ([docs/maintenance.md](docs/maintenance.md)).
 
+## 0.13.0 — the tablet as a USB disk, a charging screen (build #97)
+
+- A charger plugged into a tablet that is off no longer starts the
+  system. After Samsung's battery icon comes a charging screen: the
+  battery with its charge in per cent and a flash while it charges. The
+  screen goes off after 15 s, a press of the power key turns it on again,
+  holding the key for 1.5 s starts the system, and unplugging the charger
+  turns the tablet off. Shutting down while charging leads to the same
+  screen instead of starting the system again.
+- The tablet can be a USB disk for a PC, for example to install a system
+  on a PC that has none and no flash drive at hand:
+  `t510-usb-disk ubuntu-26.04.1-live-server-amd64.iso`, connect the cable
+  and boot the PC from the USB disk. Read-only by default; `--rw` lets the
+  PC write, `--cdrom` makes it a CD-ROM drive, a block device (a microSD
+  card) works like an image file, `t510-usb-disk --off` brings the USB
+  network and console back, and without arguments it tells what is shared.
+  The tablet's own eMMC is refused.
+- While a disk is shared the tablet stays awake: sleep is inhibited, and a
+  short press of the power key locks it and turns the screen off without
+  suspending, so the PC keeps its disk.
+- The journal keeps the kernel's messages again (`journalctl -k`, and
+  `install.sh --logs` collects them). They were left out because of a
+  logging loop with the charger driver of Samsung's 4.4 kernel; the
+  mainline drivers do not cause it.
+- The kernel works around the hardware errata of the tablet's processor
+  cores: a wrong address after certain instructions on the Cortex-A53
+  (843419) and a wrong timer count on the Cortex-A73 once every 165 s
+  (858921), which could show as a jump in time or a rare hang. Both are on
+  by default in Linux and were in Samsung's kernel or not needed there;
+  our minimal configuration had left them out. For the same reason there
+  was no memory compaction and no I/O scheduler: they are on now
+  (mq-deadline, so that a long write such as an update no longer holds up
+  reads from the eMMC). BPF is for root only.
+- The temperatures on the panel cost fifteen times less processor time
+  (they were the largest steady load of an idle desktop).
+- Memory: swapping to zram is preferred over dropping files the eMMC has
+  to read again (swappiness 180, no watermark boost), and the print queue
+  applet (22 MB) no longer starts; printing works as before.
+- A panic restarts the tablet after 10 s, its log kept for
+  `/var/lib/systemd/pstore`, instead of staying on screen until a forced
+  reset; a task stuck for two minutes (a slow USB disk or card) is only
+  reported. The kernel schedules per CPU cluster (`SCHED_MC`), has stack
+  protection, and `/dev/mem` no longer reaches system RAM.
+- Gone, as they only served Samsung's 4.4 kernel of the time before 0.1.0:
+  `t510-display.service` and `fbtool` (waking Samsung's framebuffer; the
+  service still ran at every boot), `t510-no-lmk.service` (Android's
+  low-memory killer), and the mask of udev's `60-persistent-v4l.rules`
+  (`v4l_id` crashed Samsung's camera driver; on the cameras' own drivers
+  here it works, so `/dev/v4l/by-path` and the `ID_V4L_*` properties are
+  back, for USB webcams too). The update removes the units' links and the
+  mask by itself.
+- `mainline/make-boot.sh` takes `KERNEL_SRC` like the other build scripts;
+  `install.sh` checks an own image against all the sources of
+  `t510-support`'s programs, the camera included.
+
+Builds: #95 (the USB mass storage function,
+`CONFIG_USB_CONFIGFS_MASS_STORAGE`; the kernel sources are those of #94.
+Built on the tablet itself and used there to share an installer ISO), #96
+(the errata workarounds, compaction, mq-deadline, slab merging and no
+unprivileged BPF: defaults of the kernel that `allnoconfig` had turned off,
+`mainline/README.md`), #97 (patch 0053: "reboot charge" for the charging
+screen; `SCHED_MC`, `STACKPROTECTOR_STRONG`, `STRICT_DEVMEM`, no panic for
+a hung task, a panic restarts after 10 s).
+
 ## 0.12.3 — front camera photos upright (build #94)
 
 - Camera: photos and videos of the front camera came out upside down
