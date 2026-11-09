@@ -1,5 +1,5 @@
 [Unit]
-Description=USB gadget (NCM network + ACM console)
+Description=USB gadget (RNDIS network + ACM console)
 DefaultDependencies=no
 After=sys-kernel-config.mount systemd-udevd.service
 Before=network-pre.target

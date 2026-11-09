@@ -1,0 +1,132 @@
+#!/bin/sh
+# The tablet as a USB disk for a PC: an ISO (or any disk image, or a block
+# device) shows up on the PC like a flash drive, and a PC without a system
+# boots from it (USB mass storage gadget, kernel 7.3.0+95 on).
+#
+#   t510-usb-disk FILE          read-only, removable (an installer ISO)
+#   t510-usb-disk --rw FILE     the PC may write to it
+#   t510-usb-disk --cdrom FILE  as a CD-ROM drive instead of a disk
+#   t510-usb-disk --off         back to the USB network and console
+#   t510-usb-disk               what is shared now
+#
+# While the disk is shared, the USB network (172.16.42.1) and the console
+# (ttyGS0) are off: one USB port, one gadget. The tablet must stay awake:
+# sleep is inhibited until --off, but a short press of the power key still
+# suspends it, and the PC loses the disk then.
+set -e
+[ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+
+CFS=/sys/kernel/config
+NET=$CFS/usb_gadget/g1
+G=$CFS/usb_gadget/disk
+LUN=$G/functions/mass_storage.0/lun.0
+INHIBIT=t510-usb-disk-inhibit
+
+die() { echo "t510-usb-disk: $*" >&2; exit 1; }
+
+udc() { ls /sys/class/udc 2>/dev/null | head -n1; }
+
+# remove the disk gadget (configfs: links and directories, innermost first)
+disk_down() {
+	[ -d "$G" ] || return 0
+	echo "" > "$G/UDC" 2>/dev/null || true
+	rm -f "$G/configs/c.1/mass_storage.0"
+	rmdir "$G/configs/c.1/strings/0x409" "$G/configs/c.1" \
+		"$G/functions/mass_storage.0" "$G/strings/0x409" "$G" 2>/dev/null || true
+	systemctl stop "$INHIBIT" 2>/dev/null || true
+}
+
+net_up() {
+	if [ -d "$NET" ]; then
+		[ -n "$(cat "$NET/UDC")" ] || echo "$(udc)" > "$NET/UDC"
+	else
+		/usr/sbin/usb-gadget.sh
+	fi
+}
+
+# a session over the USB network or console ends when the gadget changes
+# (who -m: the login on this terminal; sudo keeps no SSH_CONNECTION)
+over_usb() {
+	case "$(tty 2>/dev/null)" in /dev/ttyGS*) return 0 ;; esac
+	who -m 2>/dev/null | grep -q '(172\.16\.42\.'
+}
+
+status() {
+	if [ -d "$G" ] && [ -n "$(cat "$G/UDC" 2>/dev/null)" ]; then
+		ro=$(cat "$LUN/ro"); cd=$(cat "$LUN/cdrom")
+		mode="read-only"; [ "$ro" = 0 ] && mode="read-write"
+		[ "$cd" = 1 ] && mode="CD-ROM"
+		echo "shared ($mode): $(cat "$LUN/file")"
+	else
+		echo "no disk shared; USB: network and console"
+	fi
+}
+
+RO=1 CDROM=0 FORCE=0 OFF=0 FILE=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--off) OFF=1 ;;
+	--rw) RO=0 ;;
+	--cdrom) CDROM=1 ;;
+	--force) FORCE=1 ;;
+	-h|--help) sed -n '2,15s/^# \{0,1\}//p' "$0"; exit 0 ;;
+	-*) die "unknown option $1 (--help)" ;;
+	*) [ -z "$FILE" ] || die "one file only"; FILE=$1 ;;
+	esac
+	shift
+done
+if [ "$OFF" = 1 ]; then
+	if over_usb && [ "$FORCE" = 0 ]; then
+		die "this session runs over USB and would end; --force to go on"
+	fi
+	disk_down; net_up; status; exit 0
+fi
+[ -n "$FILE" ] || { status; exit 0; }
+
+FILE=$(realpath -e "$FILE") || die "no such file"
+[ -f "$FILE" ] || [ -b "$FILE" ] || die "$FILE is neither a file nor a block device"
+[ "$CDROM" = 1 ] && RO=1
+if [ "$RO" = 0 ] && [ -b "$FILE" ] && findmnt -rn -S "$FILE" >/dev/null; then
+	die "$FILE is mounted here: the PC must not write to it at the same time"
+fi
+case "$FILE" in /dev/mmcblk0*) die "the tablet's own eMMC is not shared" ;; esac
+if over_usb && [ "$FORCE" = 0 ]; then
+	die "this session runs over USB and would end; --force to go on"
+fi
+
+UDC=$(udc)
+[ -n "$UDC" ] || die "no USB device controller"
+
+mountpoint -q "$CFS" || mount -t configfs none "$CFS"
+disk_down
+[ -d "$NET" ] && echo "" > "$NET/UDC" 2>/dev/null || true
+
+# from here on a failure puts the USB network back
+trap 'disk_down; net_up' EXIT
+
+mkdir "$G"
+echo 0x1d6b > "$G/idVendor"
+echo 0x0104 > "$G/idProduct"
+mkdir "$G/strings/0x409"
+echo t510-disk > "$G/strings/0x409/serialnumber"
+echo Ubuntu > "$G/strings/0x409/manufacturer"
+echo "Galaxy Tab A 10.1 (USB disk)" > "$G/strings/0x409/product"
+mkdir "$G/functions/mass_storage.0" 2>/dev/null ||
+	die "the kernel has no USB mass storage gadget (CONFIG_USB_CONFIGFS_MASS_STORAGE, t510-kernel 7.3.0+95 on)"
+# ro and cdrom only change while no file is open: set them first
+echo 1 > "$LUN/removable"
+echo "$RO" > "$LUN/ro"
+echo "$CDROM" > "$LUN/cdrom"
+echo "$FILE" > "$LUN/file"
+mkdir -p "$G/configs/c.1/strings/0x409"
+echo "USB disk" > "$G/configs/c.1/strings/0x409/configuration"
+echo 500 > "$G/configs/c.1/MaxPower"
+ln -s "$G/functions/mass_storage.0" "$G/configs/c.1/"
+echo "$UDC" > "$G/UDC"
+trap - EXIT
+
+systemd-run -q --unit="$INHIBIT" --collect \
+	systemd-inhibit --what=sleep:idle --who=t510-usb-disk \
+	--why="the PC reads a disk from the tablet" sleep infinity || true
+status
+echo "on the PC: boot from the USB disk; here: t510-usb-disk --off when done"

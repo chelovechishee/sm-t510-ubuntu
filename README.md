@@ -53,7 +53,7 @@ What changed between versions: [CHANGELOG.md](CHANGELOG.md).
 | Sound | speakers: ABOX + 2×TFA9896, PipeWire, volume keys; built-in microphone (COD3035 codec, own port) |
 | Power | CPU DVFS through ACPM, cpuidle (C2) on all 8 cores, temperatures and throttling |
 | Battery | charge level (S2MU005), charging at stock currents by the kernel driver, set again for every cable (asleep too) |
-| USB | USB-C host and device by the S2MM005 controller: flash drives, keyboards, mice, network adapters, sound cards, webcams, phones; the USB network and console to a PC |
+| USB | USB-C host and device by the S2MM005 controller: flash drives, keyboards, mice, network adapters, sound cards, webcams, phones; the USB network and console to a PC, or a USB disk for it (`t510-usb-disk`) |
 | Bluetooth | Samsung SCSC (ported Samsung service, own BlueZ driver), BlueZ + blueman: pairing, BLE, music from a phone to the speakers (A2DP; tried with an iPhone) |
 | Cameras | rear 8 MP (S5K4HA) and front 5 MP (S5K5E9): own drivers for the receivers (CSIS) and sensors, libcamera's software ISP; rear autofocus on a tap; the Camera program for photos and videos, other programs through PipeWire |
 | Other | microSD, clock (RTC in the PMIC over the SPEEDY bus), network printing |
@@ -116,6 +116,14 @@ and charges the tablet; to make the phone a USB device of the tablet, run
 `echo host | sudo tee /sys/class/typec/port0/data_role`, and
 `echo source | sudo tee /sys/class/typec/port0/power_role` to charge it from
 the tablet.
+
+The tablet can also be a USB disk for a PC, for example to install a system
+on a PC that has none: `t510-usb-disk ubuntu-26.04.1-live-server-amd64.iso`,
+connect the cable and boot the PC from the USB disk. The image is read-only
+(`--rw` lets the PC write to it, `--cdrom` makes it a CD-ROM drive, a block
+device such as a microSD card works too); `t510-usb-disk --off` brings the
+USB network and console back. While the disk is shared they are off, and the
+tablet must stay awake: a short press of the power key takes the disk away.
 
 A terminal (and a login on the console or over ssh) starts with a short
 report: version, boot time, last login, battery, memory, disks and

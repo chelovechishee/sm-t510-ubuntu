@@ -52,6 +52,14 @@ matches both.
 
 A running mainline system can rewrite its kernel with `dd` to `p15`.
 
+The kernel also has the mass storage function
+(`CONFIG_USB_CONFIGFS_MASS_STORAGE`, build #95 on): `t510-usb-disk FILE`
+unbinds the network gadget `g1` and binds a second one, `disk`, with a single
+`mass_storage.0` LUN (removable, read-only unless `--rw`, `--cdrom` for a
+CD-ROM drive) backed by an image file or a block device; `--off` puts `g1`
+back. One port, one gadget: the USB network and console are away meanwhile.
+The PC sees a flash drive and can boot an installer ISO from it.
+
 ## USB-C roles (S2MM005)
 
 The port is behind the S2MM005 CC controller (`i2c_6`, `0x33`, interrupt
