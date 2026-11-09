@@ -123,7 +123,7 @@ connect the cable and boot the PC from the USB disk. The image is read-only
 (`--rw` lets the PC write to it, `--cdrom` makes it a CD-ROM drive, a block
 device such as a microSD card works too); `t510-usb-disk --off` brings the
 USB network and console back. While the disk is shared they are off, and the
-tablet must stay awake: a short press of the power key takes the disk away.
+tablet stays awake: the power key only locks it and turns the screen off.
 
 A terminal (and a login on the console or over ssh) starts with a short
 report: version, boot time, last login, battery, memory, disks and

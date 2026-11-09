@@ -10,9 +10,9 @@
 #   t510-usb-disk               what is shared now
 #
 # While the disk is shared, the USB network (172.16.42.1) and the console
-# (ttyGS0) are off: one USB port, one gadget. The tablet must stay awake:
-# sleep is inhibited until --off, but a short press of the power key still
-# suspends it, and the PC loses the disk then.
+# (ttyGS0) are off: one USB port, one gadget. The tablet stays awake until
+# --off: sleep is inhibited, and the power key only locks it and turns the
+# screen off (t510-powerkey).
 set -e
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
 
