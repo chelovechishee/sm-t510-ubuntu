@@ -45,6 +45,27 @@ CONFIG_VT_CONSOLE=y
 CONFIG_UNIX98_PTYS=y
 CONFIG_MAGIC_SYSRQ=y
 
+# Defaults of the kernel that allnoconfig turns off and this tablet needs
+# (Samsung's 4.4 configuration had the first four as well).
+# Errata of its cores: Cortex-A53 r0p4 (cpu0-5) may use a wrong address after
+# an ADRP at the end of a page (843419: the linker avoids those); Cortex-A73
+# r0p2 (cpu6-7) may return a wrong arch timer count when its low 32 bits
+# roll over, every 165 s at 26 MHz (858921: read twice). The arch timer is
+# the clocksource and sched_clock here; 4.4 kept time on the MCT instead.
+CONFIG_ARM64_ERRATUM_843419=y
+CONFIG_ARM64_ERRATUM_858921=y
+# memory compaction: without it higher-order allocations start to fail once
+# 2 GB have fragmented over days of uptime
+CONFIG_COMPACTION=y
+# an I/O scheduler: with none a long write (apt) keeps reads waiting on the
+# eMMC; mq-deadline is the kernel's own choice for single-queue devices
+CONFIG_MQ_IOSCHED_DEADLINE=y
+# similar slab caches share their pages
+CONFIG_SLAB_MERGE_DEFAULT=y
+# BPF for root only: Spectre v2 cannot be mitigated on the A73 here (no
+# firmware call for it in S-Boot's EL3)
+CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
+
 # SoC
 CONFIG_OF=y
 CONFIG_COMMON_CLK=y

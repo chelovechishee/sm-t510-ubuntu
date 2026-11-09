@@ -565,6 +565,41 @@ Our kernel changes are `patches/0001…`, on top of the Linux 7.3 tag; after
 changing the tree, `mainline/export-patches.sh` writes them out again. The
 toolchain is the system's `aarch64-linux-gnu-gcc`.
 
+## The configuration: allnoconfig and the kernel's defaults
+
+The configuration is `allnoconfig` plus `configs/t510.fragment`: every
+option is off unless the fragment names it, the ones the kernel turns on by
+default included. Up to build #95 that left out, unnoticed, things the
+tablet needs (the fragment has them from #96 on):
+
+- **Errata of the cores.** cpu0–5 are Cortex-A53 r0p4, cpu6–7 Cortex-A73
+  r0p2 (`/proc/cpuinfo`). `ARM64_ERRATUM_843419`: an A53 up to r0p4 can
+  use a wrong address after an ADRP in the last bytes of a page; the kernel
+  is linked with `--fix-cortex-a53-843419`. `ARM64_ERRATUM_858921`: an A73
+  can return a wrong arch timer count while its low 32 bits roll over
+  (every 165 s at 26 MHz), off by one such period; the kernel then reads
+  the counter twice. Here the arch timer is the clocksource and
+  `sched_clock`, so a wrong read is a jump in time; Samsung's 4.4 kernel
+  kept time on the MCT and gave userspace no counter. With the workaround
+  the kernel takes the counter out of the vDSO: `clock_gettime()` is a
+  system call on every core.
+- `COMPACTION` (higher-order allocations after days of uptime with 2 GB),
+  `MQ_IOSCHED_DEADLINE` (there was no I/O scheduler at all: `none` for the
+  eMMC, the card and USB disks), `SLAB_MERGE_DEFAULT`,
+  `BPF_UNPRIV_DEFAULT_OFF` (Spectre v2 stays unmitigated on the A73: S-Boot's
+  EL3 has no call for it).
+
+Still off, as before: `SCHED_MC` (one scheduling domain over all 8 cores),
+`STACKPROTECTOR`, `BLK_DEV_WRITE_MOUNTED` (hence `t510-resize-rootfs`). To
+see what a new kernel line turns on by default that the fragment does not
+ask for (run in the kernel tree; neither touches its `.config`):
+
+```bash
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCONFIG_CONFIG=/tmp/no.config allnoconfig KCONFIG_ALLCONFIG=../../mainline/configs/t510.fragment
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCONFIG_CONFIG=/tmp/def.config alldefconfig KCONFIG_ALLCONFIG=../../mainline/configs/t510.fragment
+LC_ALL=C comm -13 <(grep ^CONFIG /tmp/no.config | LC_ALL=C sort) <(grep ^CONFIG /tmp/def.config | LC_ALL=C sort)
+```
+
 ## Debugging without USB
 
 - Screen: simplefb on top of the bootloader's buffer (`0xEC000000`, 1200×1920,
