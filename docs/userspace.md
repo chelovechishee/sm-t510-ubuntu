@@ -3,7 +3,6 @@
 | Problem | Solution |
 |---|---|
 | desktop on the GPU | `t510-xorg` (LightDM `xserver-command`): modesetting + glamor on the Mali-G71 (Panfrost, `/etc/X11/t510/kms.conf`), fbdev without KMS (`fbdev.conf`); `/etc/X11/t510/force-fbdev` forces fbdev |
-| journald loops on charger uevents | `ReadKMsg=no` |
 | SCSC Wi-Fi looks for its firmware only when `/system` exists | an empty `/system`; the firmware is `/vendor/etc/wifi` on the Android VENDOR partition (p26), mounted read-only |
 | the PC must know the tablet's USB network again on every boot | RNDIS with fixed MAC addresses (`usb-gadget.sh`); `install.sh` and the rescue mode use the same |
 | a PC without a system needs an installer, and there is no flash drive | `t510-usb-disk`: the tablet shows an ISO or a disk image to the PC as a USB disk (a second gadget in place of the network one); `t510-powerkey` does not suspend meanwhile |
