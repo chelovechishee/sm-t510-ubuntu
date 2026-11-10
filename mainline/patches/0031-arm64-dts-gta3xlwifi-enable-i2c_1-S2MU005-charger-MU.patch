@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 31/52] arm64: dts: gta3xlwifi: enable i2c_1 (S2MU005
+Subject: [PATCH 31/53] arm64: dts: gta3xlwifi: enable i2c_1 (S2MU005
  charger/MUIC at 0x3d)
 
 The charger is configured from userspace over i2c-dev for now.

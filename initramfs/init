@@ -37,6 +37,15 @@ gadget_up() {
 	ip addr add 172.16.42.1/24 dev "$IF"
 }
 
+# S-Boot's charging mode: a charger turned the tablet on, or it was shut
+# down on a charger ("reboot charge"). The charging screen instead of the
+# system; the power key held goes on with the boot, unplugging powers off.
+if [ ! -e /install ] && grep -q 't510.boot=charge' /proc/cmdline; then
+	log "charging mode"
+	/bin/t510-charger || log "charging screen failed ($?), booting"
+	log "power key: booting"
+fi
+
 ROOT=/dev/mmcblk0p33
 for i in $(seq 100); do
 	[ -b $ROOT ] && break

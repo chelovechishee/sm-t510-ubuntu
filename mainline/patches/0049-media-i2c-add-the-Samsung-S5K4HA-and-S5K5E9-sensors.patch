@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 49/52] media: i2c: add the Samsung S5K4HA and S5K5E9 sensors
+Subject: [PATCH 49/53] media: i2c: add the Samsung S5K4HA and S5K5E9 sensors
 
 The rear (S5K4HA, 8 MP, 4 lanes) and front (S5K5E9, 5 MP, 2 lanes)
 cameras of the Galaxy Tab A 10.1 (2019), modelled on the s5k3m5 driver:

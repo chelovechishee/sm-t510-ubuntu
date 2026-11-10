@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 47/52] clk: samsung: exynos7885: CAM bus and camera sensor
+Subject: [PATCH 47/53] clk: samsung: exynos7885: CAM bus and camera sensor
  clocks
 
 CMU_TOP feeds CMU_CAM through CLKCMU_CAM_BUS and the sensors through

@@ -3,8 +3,10 @@
 # S-Boot loads minimal_sboot_wrapper as the "kernel"; the wrapper ignores the
 # S-Boot DTB and cmdline and starts Image with our DTB, using the ramdisk that
 # S-Boot always places at 0x89000000.
-# Usage: [SPLASH=1] [FB_MARK=1] [INSTALL=1] mainline/make-boot.sh [initramfs dir]   (default: initramfs-phase0)
+# Usage: [SPLASH=1] [FB_MARK=1] [INSTALL=1] [PANIC=s] mainline/make-boot.sh [initramfs dir]   (default: initramfs-phase0)
 # INSTALL=1: boot-install.img, whose initramfs only waits on USB for install.sh
+# PANIC=0: a panic stays on screen (bring-up); default 10: the tablet restarts
+# 10 s after a panic, its log kept by ramoops (/var/lib/systemd/pstore)
 # KERNEL_SRC=/path: another kernel tree than src/linux-7.3
 set -euo pipefail
 
@@ -17,7 +19,9 @@ SRC=${1:-$M/initramfs-phase0}
 # default: kernel warnings and systemd messages on screen (see what fails);
 # SPLASH=1: S-Boot logo stays (deferred fbcon takeover), then the Plymouth splash;
 # FB_MARK=1: the wrapper paints a green bar when it gets control (bring-up)
-BASE="clk_ignore_unused pd_ignore_unused printk.devkmsg=on fbcon=font:TER16x32 panic=0"
+# t510.boot=normal: the wrapper makes it t510.boot=charge when S-Boot started
+# the kernel in its charging mode (initramfs/init: the charging screen)
+BASE="clk_ignore_unused pd_ignore_unused printk.devkmsg=on fbcon=font:TER16x32 panic=${PANIC:-10} t510.boot=normal"
 if [ "${SPLASH:-0}" = 1 ]; then
 	CMDLINE="console=tty0 quiet loglevel=3 splash vt.global_cursor_default=0 $BASE"
 else
@@ -30,6 +34,10 @@ W=$M/minimal_sboot_wrapper
 if [ ! -d "$W" ]; then
 	git clone -q https://github.com/VDavid003/minimal_sboot_wrapper.git "$W"
 	git -C "$W" checkout -q f0fbe9c8c812f15507988153a7ae63fe316c6a66
+fi
+# the clone carries patches/sboot-wrapper.patch as it is now, not an older one
+if ! git -C "$W" apply --check -R "$M/patches/sboot-wrapper.patch" 2>/dev/null; then
+	git -C "$W" checkout -q -f f0fbe9c8c812f15507988153a7ae63fe316c6a66 -- .
 	git -C "$W" apply "$M/patches/sboot-wrapper.patch"
 fi
 
@@ -38,6 +46,8 @@ mkdir -p "$I/bin" "$I/dev" "$I/proc" "$I/sys"
 cp "$T/out/busybox" "$I/bin/busybox"
 cp -a "$SRC/." "$I/"
 chmod 755 "$I/init"
+# the charging screen (initramfs/init runs it in S-Boot's charging mode)
+${CROSS_COMPILE:-aarch64-linux-gnu-}gcc -static -Os -s -o "$I/bin/t510-charger" "$T/tools/charger.c"
 OUT=$O/boot-mainline.img
 if [ "${INSTALL:-0}" = 1 ]; then
 	touch "$I/install"
@@ -52,6 +62,7 @@ make -s -C "$M/minimal_sboot_wrapper" \
 	DTB_PATH="$K/arch/arm64/boot/dts/exynos/exynos7904-gta3xlwifi.dtb" \
 	CMDLINE="$CMDLINE" \
 	SEC_REBOOT_REASON_RESET=1 \
+	CHARGER_MODE=1 \
 	KERNEL_LOAD=0xA0000000 \
 	$FB_MARK_ARG \
 	INITRD_END=$(printf '0x%x' $((0x89000000 + RD_SIZE)))

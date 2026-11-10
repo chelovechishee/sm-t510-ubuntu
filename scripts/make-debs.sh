@@ -117,7 +117,8 @@ build "$S" "$P/t510-support/control" -e "s/@VERSION@/$VERSION/"
 # --- t510-kernel: the boot image of the kernel tree as it is built now
 IMAGE=$K/arch/arm64/boot/Image
 [ -f "$BOOT" ] && [ -f "$IMAGE" ] || die "no kernel build (README.md, \"Building\")"
-n=$(find "$K/.config" "$IMAGE" "$T/initramfs" -newer "$BOOT" -print -quit)
+n=$(find "$K/.config" "$IMAGE" "$T/initramfs" "$T/tools/charger.c" \
+	"$T/mainline/patches/sboot-wrapper.patch" -newer "$BOOT" -print -quit)
 [ -z "$n" ] || die "$BOOT is older than $n: run mainline/make-boot.sh initramfs"
 # its initramfs starts Ubuntu: make-boot.sh without an argument packs the
 # bring-up one (initramfs-phase0, stops after its report), INSTALL=1 the

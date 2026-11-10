@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 52/52] arm64: dts: gta3xlwifi: the rear and front cameras
+Subject: [PATCH 52/53] arm64: dts: gta3xlwifi: the rear and front cameras
 
 The S5K4HA on CSIS1 with its DW9808 focus motor (fixed at the position
 found sharpest, as nothing drives autofocus), the S5K5E9 on CSIS0, their

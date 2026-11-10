@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 48/52] arm64: dts: exynos7885: camera I2C buses, sensor clock
+Subject: [PATCH 48/53] arm64: dts: exynos7885: camera I2C buses, sensor clock
  pins and CSIS
 
 The HSI2C controllers 0-2 the camera modules sit on, the CIS_CLK pin

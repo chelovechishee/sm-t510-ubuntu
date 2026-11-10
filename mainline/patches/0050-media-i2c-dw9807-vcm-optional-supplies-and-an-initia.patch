@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 50/52] media: i2c: dw9807-vcm: optional supplies and an
+Subject: [PATCH 50/53] media: i2c: dw9807-vcm: optional supplies and an
  initial focus
 
 The DW9808 of the S5K4HA module has the DW9807's registers. Here the VCM

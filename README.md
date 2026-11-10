@@ -105,6 +105,12 @@ The power key:
 | hold 1–3 s, then release | screenshot: saved to Pictures/Screenshots and copied, ready to paste |
 | hold 3 s | the power dialog (log out, restart, shut down) |
 
+Plugging a charger into a tablet that is off no longer starts the system:
+after Samsung's battery icon comes a charging screen with the charge in per
+cent. A press of the power key turns that screen on again, holding the key
+for a moment and a half starts the system; unplugging the charger turns the
+tablet off. Shutting down while the tablet charges leads to the same screen.
+
 On the touch screen: hold a finger still for a moment for a right click;
 desktop icons open with one tap. There is no mouse pointer: a small dot
 shows where the finger is. The on-screen keyboard suggests words above its

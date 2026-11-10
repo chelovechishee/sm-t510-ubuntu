@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 14/52] net: wireless: add Samsung SCSC wlan driver from the
+Subject: [PATCH 14/53] net: wireless: add Samsung SCSC wlan driver from the
  downstream kernel; arm64: dts: gta3xlwifi: Wi-Fi LDOs
 
 Port of the SCSC cfg80211 driver (STA/P2P/AP, no Android extensions) to 7.3:

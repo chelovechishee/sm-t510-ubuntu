@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 51/52] media: samsung: add the Exynos 7885 CSIS receiver with
+Subject: [PATCH 51/53] media: samsung: add the Exynos 7885 CSIS receiver with
  DMA
 
 The CSIS v5.1 MIPI CSI-2 receivers write what they receive straight to

@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 30/52] arm64: dts: exynos7885: MCT tick and PSCI core power
+Subject: [PATCH 30/53] arm64: dts: exynos7885: MCT tick and PSCI core power
  down idle state
 
 MCT at 0x10040000 with its 4 global and 8 local timer interrupts (SPI

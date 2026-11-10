@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 20/52] ASoC: tfa989x: add TFA9896
+Subject: [PATCH 20/53] ASoC: tfa989x: add TFA9896
 
 Revision 0x96 with the init sequence of the downstream tfa98xx driver
 (boost, current sense), as used on the Galaxy Tab A 10.1 (2019).

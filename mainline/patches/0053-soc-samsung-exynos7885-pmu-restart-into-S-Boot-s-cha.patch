@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
+Subject: [PATCH 53/53] soc: samsung: exynos7885-pmu: restart into S-Boot's
+ charging mode
+
+S-Boot reads INFORM2 after a reset: SEC_POWER_RESET (0x12345678) means a
+reboot, anything else with a charger in starts the kernel in its charging
+mode (androidboot.mode=charger). The boot wrapper sets SEC_POWER_RESET on
+every boot. Samsung's kernel, told to power off with a charger in,
+clears it and resets instead, so that the charging screen comes up.
+
+"reboot charge" now does the same: userspace asks for it when the
+tablet is shut down on a charger, and the initramfs shows the charging
+screen.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/soc/samsung/exynos7885-pmu.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/drivers/soc/samsung/exynos7885-pmu.c b/drivers/soc/samsung/exynos7885-pmu.c
+index 198a3c703..91766d29c 100644
+--- a/drivers/soc/samsung/exynos7885-pmu.c
++++ b/drivers/soc/samsung/exynos7885-pmu.c
+@@ -13,6 +13,13 @@
+  * power down armed: once both cores sleep, the PMU cuts the cluster with its
+  * L2, which nobody cleaned for a core-level PSCI request, and memory gets
+  * corrupted. Keep every cluster powered (downstream cluster_enable()).
++ *
++ * INFORM2 tells S-Boot whether a reset is a reboot: the boot wrapper sets it
++ * to SEC_POWER_RESET on every boot, so a reboot starts the system again even
++ * with a charger in. "reboot charge" clears it, as Samsung's kernel does
++ * when it is told to power off on a charger: S-Boot then starts the kernel
++ * in its charging mode (androidboot.mode=charger), and the initramfs shows
++ * the charging screen instead of starting the system.
+  */
+ 
+ #include <linux/array_size.h>
+@@ -20,7 +27,9 @@
+ #include <linux/cpu_pm.h>
+ #include <linux/cpumask.h>
+ #include <linux/notifier.h>
++#include <linux/reboot.h>
+ #include <linux/smp.h>
++#include <linux/string.h>
+ #include <linux/soc/samsung/exynos-pmu.h>
+ 
+ #include <asm/cputype.h>
+@@ -34,6 +43,9 @@
+ #define EXYNOS7885_CLUSTER_PWRDN_EN		BIT(0)
+ #define EXYNOS7885_CLUSTER_KEEP_ON		BIT(4)
+ 
++#define EXYNOS7885_INFORM2			0x808
++#define EXYNOS7885_SEC_POWER_OFF		0x0
++
+ /*
+  * MPIDR Aff1 0: Cortex-A73 pair, 1: Cortex-A53 quad (CPUs 0-3, boots),
+  * 2: Cortex-A53 pair; the PMU orders their blocks 0, 2, 1.
+@@ -83,6 +95,19 @@ static struct notifier_block exynos7885_cpu_pm_nb = {
+ 	.priority = INT_MIN,
+ };
+ 
++static int exynos7885_reboot_notify(struct notifier_block *nb,
++				    unsigned long action, void *cmd)
++{
++	if (action == SYS_RESTART && cmd && !strcmp(cmd, "charge"))
++		pmu_raw_writel(EXYNOS7885_SEC_POWER_OFF, EXYNOS7885_INFORM2);
++
++	return NOTIFY_DONE;
++}
++
++static struct notifier_block exynos7885_reboot_nb = {
++	.notifier_call = exynos7885_reboot_notify,
++};
++
+ static void exynos7885_pmu_init(void)
+ {
+ 	unsigned int cl;
+@@ -96,6 +121,7 @@ static void exynos7885_pmu_init(void)
+ 	}
+ 
+ 	cpu_pm_register_notifier(&exynos7885_cpu_pm_nb);
++	register_reboot_notifier(&exynos7885_reboot_nb);
+ }
+ 
+ const struct exynos_pmu_data exynos7885_pmu_data = {
+-- 
+2.53.0
+

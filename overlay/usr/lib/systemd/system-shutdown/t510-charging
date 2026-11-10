@@ -1,0 +1,21 @@
+#!/bin/sh
+# Shut down on a charger: like Samsung's kernel, restart into S-Boot's
+# charging mode instead of powering off ("reboot charge": the kernel clears
+# S-Boot's reboot flag for it). The initramfs then shows the charging screen
+# and powers off once the charger is unplugged; the power key held starts the
+# system. Without this a charger powered the tablet straight back on into the
+# system. systemd-shutdown runs this last, with the file systems read-only.
+[ "$1" = poweroff ] || exit 0
+read -r online < /sys/class/power_supply/s2mu005-charger/online 2>/dev/null || exit 0
+[ "$online" = 1 ] || exit 0
+echo "t510-charging: charger in, restarting into the charging screen" > /dev/kmsg
+# reboot(2) with an argument, which no command here passes: arm64 __NR_reboot
+# 142, LINUX_REBOOT_CMD_RESTART2
+exec /usr/bin/python3 -I -B -c '
+import ctypes, os
+os.sync()
+libc = ctypes.CDLL(None, use_errno=True)
+L = ctypes.c_long
+libc.syscall(L(142), L(0xfee1dead), L(672274793), L(0xa1b2c3d4), ctypes.c_char_p(b"charge"))
+print("t510-charging: reboot failed, errno", ctypes.get_errno())
+'

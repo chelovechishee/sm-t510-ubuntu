@@ -551,7 +551,35 @@ Our changes to the wrapper:
 - `FB_MARK=0xEC000000` — a green bar at the top of the screen: the wrapper got control;
 - `SEC_REBOOT_REASON_RESET` — INFORM2/INFORM3 set to "normal reboot" (did not
   help to get out of RECOVERY, see below, but does no harm);
+- `CHARGER_MODE` — S-Boot's boot mode carried over (below); `boot.S` keeps
+  S-Boot's x0 (its DTB) for it, and the C code is built with
+  `-mcmodel=tiny`, so its strings are found with `adr` at any load address;
 - `cpp -undef` — otherwise the path `linux-7.3` turns into `1-7.3`.
+
+### The charging screen
+
+When a charger turns the tablet on, S-Boot shows its battery icon (no
+number: that is S-Boot's own, and it stays while the battery is too low to
+start a kernel) and then starts the kernel in its charging mode: the command
+line in its DTB says `androidboot.mode=charger`. Samsung's own kernel then
+showed the charging animation; ours started the system, so a charger turned
+the tablet on by itself. The wrapper now looks for `androidboot.mode=charger`
+in S-Boot's DTB and turns `t510.boot=normal` of our command line into
+`t510.boot=charge` (same length, the DTB needs no other change), and
+`initramfs/init` runs `t510-charger` (`tools/charger.c`, static, built by
+`make-boot.sh`) before it touches the eMMC: the battery with its charge in
+per cent and a flash while charging, the screen off after 15 s, on again with
+a press of the power key. The key held for 1.5 s goes on with the boot;
+unplugging the charger powers the tablet off after 3 s.
+
+A shutdown with a charger in did the same: the PMIC powered the tablet back
+on and the system came up again. S-Boot decides between a reboot and its
+charging mode by INFORM2 (`0x11C80808`): `SEC_POWER_RESET` (`0x12345678`,
+which the wrapper sets on every boot) is a reboot. Samsung's kernel, told to
+power off on a charger, clears it and resets instead. Here
+`/usr/lib/systemd/system-shutdown/t510-charging` restarts with
+`reboot(2)` and the argument `charge` when the charger is online, and the PMU
+driver clears INFORM2 for that argument (patch 0053).
 
 ## Building and flashing
 

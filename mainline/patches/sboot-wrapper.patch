@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 08ada2c..2c9655a 100644
+index 08ada2c..1dfbce5 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,6 +1,8 @@
@@ -11,7 +11,7 @@ index 08ada2c..2c9655a 100644
  
  CCPREFIX?=aarch64-linux-gnu-
  CC=$(CCPREFIX)gcc
-@@ -14,6 +16,18 @@ ifdef POWER_KEY_BOOT
+@@ -14,6 +16,22 @@ ifdef POWER_KEY_BOOT
  DEFS += -DPOWER_KEY_BOOT
  endif
  
@@ -27,10 +27,14 @@ index 08ada2c..2c9655a 100644
 +DEFS += -DSEC_REBOOT_REASON_RESET
 +endif
 +
++ifdef CHARGER_MODE
++DEFS += -DCHARGER_MODE
++endif
++
  OBJ=boot.o main.o
  
  .PHONY: rebuild clean
-@@ -25,7 +39,7 @@ wrapper.o: $(OBJ) linker.lds tmp.dtb
+@@ -25,16 +43,16 @@ wrapper.o: $(OBJ) linker.lds tmp.dtb
  	$(LD) $(OBJ) -o $@ --script=linker.lds
  
  linker.lds: linker.lds.S $(KERNEL_PATH)
@@ -39,9 +43,10 @@ index 08ada2c..2c9655a 100644
  
  %.o: %.S defs_value
  	$(CC) $(DEFS) -c -o $@ $<
-@@ -33,8 +47,8 @@ linker.lds: linker.lds.S $(KERNEL_PATH)
+ 
  %.o: %.c defs_value
- 	$(CC) -fno-builtin $(DEFS) -c -o $@ $<
+-	$(CC) -fno-builtin $(DEFS) -c -o $@ $<
++	$(CC) -fno-builtin -mcmodel=tiny $(DEFS) -c -o $@ $<
  
 -tmp.dtb: $(DTB_PATH) cmdline_value
 -	( dtc -O dts $(DTB_PATH) && echo "/ { chosen { bootargs = \"$(CMDLINE)\"; linux,initrd-start = <0x89000000>; linux,initrd-end = <0x890FFFFF>; }; };" ) | dtc -O dtb -o $@
@@ -50,7 +55,7 @@ index 08ada2c..2c9655a 100644
  
  defs_value: rebuild
  	@echo $(DEFS) > defs.tmp
-@@ -47,4 +61,9 @@ cmdline_value: rebuild
+@@ -47,4 +65,9 @@ cmdline_value: rebuild
  	@rm cmdline.tmp
  
  clean :
@@ -61,8 +66,18 @@ index 08ada2c..2c9655a 100644
 +	@echo $(INITRD_START) $(INITRD_END) > initrd.tmp
 +	@diff initrd_value initrd.tmp || cp initrd.tmp initrd_value
 +	@rm initrd.tmp
+diff --git a/boot.S b/boot.S
+index a9c1968..8b94fde 100644
+--- a/boot.S
++++ b/boot.S
+@@ -1,3 +1,5 @@
++    /* x0 from S-Boot: its own DTB (command line with its boot mode) */
++    mov	x2, x0
+     adr	x0, dtb
+     adr	x1, kernel
+     b main
 diff --git a/main.c b/main.c
-index cdcec7d..1bf9b8e 100644
+index cdcec7d..b444e1e 100644
 --- a/main.c
 +++ b/main.c
 @@ -1,3 +1,7 @@
@@ -73,10 +88,11 @@ index cdcec7d..1bf9b8e 100644
  extern void boot_kernel(void* dtb, void* x1, void* x2, void* x3, void* kernel);
  
  void memcpy(void *dest, void *src, int size)
-@@ -24,10 +28,37 @@ void wait_for_power_key() {
+@@ -24,10 +28,101 @@ void wait_for_power_key() {
  }
  #endif
  
+-void main(void* dtb, void* kernel) {
 +#ifdef SEC_REBOOT_REASON_RESET
 +void reset_reboot_reason() {
 +	//Samsung sec_reboot reason registers in the PMU (0x11C80000).
@@ -98,9 +114,73 @@ index cdcec7d..1bf9b8e 100644
 +}
 +#endif
 +
- void main(void* dtb, void* kernel) {
++#ifdef CHARGER_MODE
++//S-Boot starts the kernel in its charging mode when a charger powered the
++//device on (or after a reset that was not a reboot, INFORM2): its command
++//line, in the DTB it passes in x0, then says androidboot.mode=charger. That
++//DTB is ignored otherwise, so carry the mode over into ours: our command
++//line holds "t510.boot=normal", which becomes "t510.boot=charge" (the same
++//length: the DTB needs no other change). The strings are found with adr
++//(-mcmodel=tiny): exact at any load address S-Boot picks.
++#ifndef DRAM_START
++#define DRAM_START 0x80000000UL
++#define DRAM_END 0x100000000UL
++#endif
++
++static unsigned int be32(const unsigned char *p)
++{
++	return (unsigned int)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
++}
++
++static unsigned char *find(unsigned char *hay, unsigned long len, const char *needle)
++{
++	unsigned long n = 0, i, j;
++
++	while (needle[n])
++		n++;
++	for (i = 0; i + n <= len; i++) {
++		for (j = 0; j < n && hay[i + j] == (unsigned char)needle[j]; j++)
++			;
++		if (j == n)
++			return hay + i;
++	}
++	return 0;
++}
++
++//the size of a DTB at p, 0 when there is none
++static unsigned long dtb_size(const unsigned char *p)
++{
++	unsigned long addr = (unsigned long)p, size;
++
++	if (addr < DRAM_START || addr > DRAM_END - 8 || be32(p) != 0xd00dfeed)
++		return 0;
++	size = be32(p + 4);
++	if (size > 0x100000 || addr + size > DRAM_END)
++		return 0;
++	return size;
++}
++
++void charger_mode(unsigned char *dtb, unsigned char *sboot_dtb) {
++	unsigned long size = dtb_size(sboot_dtb);
++	unsigned char *arg;
++	const char *charge = "charge";
++
++	if (!size || !find(sboot_dtb, size, "androidboot.mode=charger"))
++		return;
++	arg = find(dtb, be32(dtb + 4), "t510.boot=normal");
++	if (!arg)
++		return;
++	for (int i = 0; i < 6; i++)
++		arg[10 + i] = charge[i];
++}
++#endif
++
++void main(void* dtb, void* kernel, void* sboot_dtb) {
 +#ifdef FB_MARK
 +	fb_mark();
++#endif
++#ifdef CHARGER_MODE
++	charger_mode(dtb, sboot_dtb);
 +#endif
 +#ifdef SEC_REBOOT_REASON_RESET
 +	reset_reboot_reason();

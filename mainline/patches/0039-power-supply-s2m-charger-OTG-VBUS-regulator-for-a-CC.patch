@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: chelovechishee <261262090+chelovechishee@users.noreply.github.com>
-Subject: [PATCH 39/52] power: supply: s2m-charger: OTG VBUS regulator for a CC
+Subject: [PATCH 39/53] power: supply: s2m-charger: OTG VBUS regulator for a CC
  controller
 
 Boards without a MUIC node (Galaxy Tab A 10.1 2019) have the USB-C port
