@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=print-applet
+# hidden on SM-T510: 22 MB of RAM for a print queue icon; printing works
+# without it (CUPS, driverless network printers)
+Hidden=true
