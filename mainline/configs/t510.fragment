@@ -65,6 +65,12 @@ CONFIG_SLAB_MERGE_DEFAULT=y
 # BPF for root only: Spectre v2 cannot be mitigated on the A73 here (no
 # firmware call for it in S-Boot's EL3)
 CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
+# a scheduling domain per cluster (cpu-map: the A53 quad, the A53 pair, the
+# A73 pair) under the one over all eight: wakeups stay near their cache
+CONFIG_SCHED_MC=y
+# stack canaries in functions with arrays or address-taken locals
+CONFIG_STACKPROTECTOR=y
+CONFIG_STACKPROTECTOR_STRONG=y
 
 # SoC
 CONFIG_OF=y
@@ -127,12 +133,15 @@ CONFIG_PSTORE=y
 CONFIG_PSTORE_RAM=y
 CONFIG_PSTORE_CONSOLE=y
 
-# Lockups panic; a panic stays on screen (restore via Download mode)
-CONFIG_PANIC_TIMEOUT=0
+# A soft lockup panics, and a panic restarts the tablet after 10 s (the
+# command line of make-boot.sh says the same; PANIC=0 there keeps it on
+# screen for bring-up); ramoops keeps its log for /var/lib/systemd/pstore.
+# A task blocked for 2 minutes (a slow USB disk or SD card, a network share)
+# is only reported
+CONFIG_PANIC_TIMEOUT=10
 CONFIG_SOFTLOCKUP_DETECTOR=y
 CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=1
 CONFIG_DETECT_HUNG_TASK=y
-CONFIG_BOOTPARAM_HUNG_TASK_PANIC=1
 CONFIG_DEBUG_KERNEL=y
 CONFIG_DEBUG_FS=y
 
@@ -155,9 +164,10 @@ CONFIG_PACKET=y
 CONFIG_NETDEVICES=y
 
 # Debug: /dev/mem for register dumps (busybox devmem in the bring-up init,
-# tools/acpm-probe.py, tools/dsi-cmd.py)
+# tools/acpm-probe.py, tools/dsi-cmd.py): device registers and the APM SRAM
+# only, not system RAM
 CONFIG_DEVMEM=y
-CONFIG_STRICT_DEVMEM=n
+CONFIG_STRICT_DEVMEM=y
 
 # Ubuntu userspace (systemd 259: cgroup v2 only)
 CONFIG_CGROUPS=y

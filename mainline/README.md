@@ -617,8 +617,12 @@ tablet needs (the fragment has them from #96 on):
   `BPF_UNPRIV_DEFAULT_OFF` (Spectre v2 stays unmitigated on the A73: S-Boot's
   EL3 has no call for it).
 
-Still off, as before: `SCHED_MC` (one scheduling domain over all 8 cores),
-`STACKPROTECTOR`, `BLK_DEV_WRITE_MOUNTED` (hence `t510-resize-rootfs`). To
+Build #97 adds `SCHED_MC` (a domain per cluster under the one over all 8
+cores) and `STACKPROTECTOR_STRONG`. Still off: `BLK_DEV_WRITE_MOUNTED`
+(hence `t510-resize-rootfs`), and energy-aware scheduling: it needs an
+energy model, and the OPP tables have no voltages (ACPM picks them) for one
+from `dynamic-power-coefficient`; without measured power per frequency there
+is nothing honest to put in `opp-microwatt`. To
 see what a new kernel line turns on by default that the fragment does not
 ask for (run in the kernel tree; neither touches its `.config`):
 
@@ -631,8 +635,10 @@ LC_ALL=C comm -13 <(grep ^CONFIG /tmp/no.config | LC_ALL=C sort) <(grep ^CONFIG 
 ## Debugging without USB
 
 - Screen: simplefb on top of the bootloader's buffer (`0xEC000000`, 1200×1920,
-  stride 4800), font TER16x32. `panic=0` — a panic stays on screen; the test
-  init (`initramfs-phase0/init`) does not reboot.
+  stride 4800), font TER16x32. `PANIC=0 mainline/make-boot.sh` — a panic
+  stays on screen (by default, since build #97, the tablet restarts 10 s
+  after one and ramoops keeps the log); the test init
+  (`initramfs-phase0/init`) does not reboot.
 - ramoops: the same area as on the 4.4 kernel (`0x91500000`, 0x8000: record
   0x4000 + 0x4000). The mainline console lies where 4.4 expects pmsg, so after
   going back to 4.4 it shows as `pmsg-ramoops-0` (systemd-pstore moves it to
@@ -652,6 +658,8 @@ LC_ALL=C comm -13 <(grep ^CONFIG /tmp/no.config | LC_ALL=C sort) <(grep ^CONFIG 
 - HS400 is off in the DT for now (HS200 works, 200 MHz).
 - In 7.3 `/dev/fb0` is a separate option, `CONFIG_FB_DEVICE` (Xorg fbdev does
   not start without it).
-- `CONFIG_DEVMEM` without `STRICT_DEVMEM` is on for debugging only (devmem in init).
+- `CONFIG_DEVMEM` is on for debugging (devmem in the bring-up init,
+  `tools/acpm-probe.py`, `tools/dsi-cmd.py`); since build #97 with
+  `STRICT_DEVMEM`: registers and the APM SRAM can be read, system RAM not.
 - A failed device lock can hang `reboot.target` (seen after a driver oops in
   a deferred probe): a forced reset (power + volume down, 7–10 s) gets out.
